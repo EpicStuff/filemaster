@@ -435,7 +435,11 @@ func (lp *LayeredProfile) MatchFilterLists(ctx context.Context, entity *intel.En
 		// Search for the first layer that has filter lists set.
 		if layer.filterListsSet {
 			if entity.MatchLists(layer.filterListIDs) {
-				return endpoints.Denied, entity.ListBlockReason()
+				// In filemaster ListBlockReason returns a string; we drop it
+				// here because no code path actually reaches this matcher
+				// (filter lists are gone). nil keeps the Reason type happy.
+				_ = entity.ListBlockReason()
+				return endpoints.Denied, nil
 			}
 
 			return endpoints.NoMatch, nil
@@ -446,7 +450,8 @@ func (lp *LayeredProfile) MatchFilterLists(ctx context.Context, entity *intel.En
 	defer cfgLock.RUnlock()
 	if len(cfgFilterLists) > 0 {
 		if entity.MatchLists(cfgFilterLists) {
-			return endpoints.Denied, entity.ListBlockReason()
+			_ = entity.ListBlockReason()
+			return endpoints.Denied, nil
 		}
 	}
 

@@ -15,45 +15,19 @@ import (
 	"github.com/safing/portmaster/base/runtime"
 	"github.com/safing/portmaster/base/utils"
 	"github.com/safing/portmaster/service/broadcasts"
-	"github.com/safing/portmaster/service/compat"
-	"github.com/safing/portmaster/service/control"
 	"github.com/safing/portmaster/service/core"
 	"github.com/safing/portmaster/service/core/base"
-	"github.com/safing/portmaster/service/firewall"
-	"github.com/safing/portmaster/service/firewall/interception"
-	"github.com/safing/portmaster/service/firewall/interception/dnsmonitor"
 	"github.com/safing/portmaster/service/integration"
-	"github.com/safing/portmaster/service/intel/customlists"
-	"github.com/safing/portmaster/service/intel/filterlists"
-	"github.com/safing/portmaster/service/intel/geoip"
-	"github.com/safing/portmaster/service/interop"
 	"github.com/safing/portmaster/service/mgr"
-	"github.com/safing/portmaster/service/nameserver"
-	"github.com/safing/portmaster/service/netenv"
-	"github.com/safing/portmaster/service/netquery"
-	"github.com/safing/portmaster/service/network"
 	"github.com/safing/portmaster/service/process"
 	"github.com/safing/portmaster/service/profile"
-	"github.com/safing/portmaster/service/resolver"
-	"github.com/safing/portmaster/service/splittun"
 	"github.com/safing/portmaster/service/status"
 	"github.com/safing/portmaster/service/sync"
 	"github.com/safing/portmaster/service/ui"
 	"github.com/safing/portmaster/service/updates"
-	"github.com/safing/portmaster/spn/access"
-	"github.com/safing/portmaster/spn/cabin"
-	"github.com/safing/portmaster/spn/captain"
-	"github.com/safing/portmaster/spn/crew"
-	"github.com/safing/portmaster/spn/docks"
-	"github.com/safing/portmaster/spn/hub"
-	"github.com/safing/portmaster/spn/navigator"
-	"github.com/safing/portmaster/spn/patrol"
-	"github.com/safing/portmaster/spn/ships"
-	"github.com/safing/portmaster/spn/sluice"
-	"github.com/safing/portmaster/spn/terminal"
 )
 
-// Instance is an instance of a Portmaster service.
+// Instance is an instance of a filemaster service.
 type Instance struct {
 	ctx       context.Context
 	cancelCtx context.CancelFunc
@@ -61,8 +35,7 @@ type Instance struct {
 	shutdownCtx       context.Context
 	cancelShutdownCtx context.CancelFunc
 
-	serviceGroup             *mgr.Group
-	serviceGroupInterception *mgr.GroupModule
+	serviceGroup *mgr.Group
 
 	binDir  string
 	dataDir string
@@ -82,49 +55,19 @@ type Instance struct {
 	binaryUpdates *updates.Updater
 	intelUpdates  *updates.Updater
 	integration   *integration.OSIntegration
-	geoip         *geoip.GeoIP
-	netenv        *netenv.NetEnv
 	ui            *ui.UI
 	profile       *profile.ProfileModule
-	network       *network.Network
-	netquery      *netquery.NetQuery
-	firewall      *firewall.Firewall
-	filterLists   *filterlists.FilterLists
-	interception  *interception.Interception
-	dnsmonitor    *dnsmonitor.DNSMonitor
-	customlist    *customlists.CustomList
+	process       *process.ProcessModule
 	status        *status.Status
 	broadcasts    *broadcasts.Broadcasts
-	compat        *compat.Compat
-	nameserver    *nameserver.NameServer
-	process       *process.ProcessModule
-	resolver      *resolver.ResolverModule
-	sync          *sync.Sync
-	control       *control.Control
-	interop       *interop.Interoperability
-
-	splittun *splittun.SplitTunModule
-
-	access *access.Access
-
-	// SPN modules
-	SpnGroup  *mgr.ExtendedGroup
-	cabin     *cabin.Cabin
-	navigator *navigator.Navigator
-	captain   *captain.Captain
-	crew      *crew.Crew
-	docks     *docks.Docks
-	patrol    *patrol.Patrol
-	ships     *ships.Ships
-	sluice    *sluice.SluiceModule
-	terminal  *terminal.TerminalModule
+	sync *sync.Sync
 
 	CommandLineOperation func() error
 	ShouldRestart        bool
 }
 
-// New returns a new Portmaster service instance.
-func New(svcCfg *ServiceConfig) (*Instance, error) { //nolint:maintidx
+// New returns a new filemaster service instance.
+func New(svcCfg *ServiceConfig) (*Instance, error) {
 	// Initialize config.
 	err := svcCfg.Init()
 	if err != nil {
@@ -172,7 +115,7 @@ func New(svcCfg *ServiceConfig) (*Instance, error) { //nolint:maintidx
 	}
 	instance.notifications, err = notifications.New(instance)
 	if err != nil {
-		return instance, fmt.Errorf("create runtime module: %w", err)
+		return instance, fmt.Errorf("create notifications module: %w", err)
 	}
 	instance.rng, err = rng.New(instance)
 	if err != nil {
@@ -200,14 +143,6 @@ func New(svcCfg *ServiceConfig) (*Instance, error) { //nolint:maintidx
 	if err != nil {
 		return instance, fmt.Errorf("create integration module: %w", err)
 	}
-	instance.geoip, err = geoip.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create customlist module: %w", err)
-	}
-	instance.netenv, err = netenv.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create netenv module: %w", err)
-	}
 	instance.ui, err = ui.New(instance)
 	if err != nil {
 		return instance, fmt.Errorf("create ui module: %w", err)
@@ -216,35 +151,6 @@ func New(svcCfg *ServiceConfig) (*Instance, error) { //nolint:maintidx
 	if err != nil {
 		return instance, fmt.Errorf("create profile module: %w", err)
 	}
-	instance.network, err = network.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create network module: %w", err)
-	}
-	instance.netquery, err = netquery.NewModule(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create netquery module: %w", err)
-	}
-	instance.firewall, err = firewall.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create firewall module: %w", err)
-	}
-	instance.filterLists, err = filterlists.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create filterLists module: %w", err)
-	}
-	instance.interception, err = interception.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create interception module: %w", err)
-	}
-	instance.dnsmonitor, err = dnsmonitor.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create dns-listener module: %w", err)
-	}
-	instance.customlist, err = customlists.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create customlist module: %w", err)
-	}
-
 	instance.status, err = status.New(instance)
 	if err != nil {
 		return instance, fmt.Errorf("create status module: %w", err)
@@ -253,87 +159,14 @@ func New(svcCfg *ServiceConfig) (*Instance, error) { //nolint:maintidx
 	if err != nil {
 		return instance, fmt.Errorf("create broadcasts module: %w", err)
 	}
-	instance.compat, err = compat.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create compat module: %w", err)
-	}
-	instance.nameserver, err = nameserver.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create nameserver module: %w", err)
-	}
 	instance.process, err = process.New(instance)
 	if err != nil {
 		return instance, fmt.Errorf("create process module: %w", err)
-	}
-	instance.resolver, err = resolver.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create resolver module: %w", err)
 	}
 	instance.sync, err = sync.New(instance)
 	if err != nil {
 		return instance, fmt.Errorf("create sync module: %w", err)
 	}
-	instance.control, err = control.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create control module: %w", err)
-	}
-	instance.interop, err = interop.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create interop module: %w", err)
-	}
-	instance.access, err = access.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create access module: %w", err)
-	}
-
-	instance.splittun, err = splittun.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create splittun module: %w", err)
-	}
-
-	// SPN modules
-	instance.cabin, err = cabin.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create cabin module: %w", err)
-	}
-	instance.navigator, err = navigator.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create navigator module: %w", err)
-	}
-	instance.captain, err = captain.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create captain module: %w", err)
-	}
-	instance.crew, err = crew.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create crew module: %w", err)
-	}
-	instance.docks, err = docks.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create docks module: %w", err)
-	}
-	instance.patrol, err = patrol.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create patrol module: %w", err)
-	}
-	instance.ships, err = ships.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create ships module: %w", err)
-	}
-	instance.sluice, err = sluice.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create sluice module: %w", err)
-	}
-	instance.terminal, err = terminal.New(instance)
-	if err != nil {
-		return instance, fmt.Errorf("create terminal module: %w", err)
-	}
-
-	// Grouped interception modules that can be paused/resumed together.
-	instance.serviceGroupInterception = mgr.NewGroupModule("Interception Group",
-		instance.interception,
-		instance.dnsmonitor,
-		instance.compat)
 
 	// Add all modules to instance group.
 	instance.serviceGroup = mgr.NewGroup(
@@ -350,49 +183,14 @@ func New(svcCfg *ServiceConfig) (*Instance, error) { //nolint:maintidx
 		instance.binaryUpdates,
 		instance.intelUpdates,
 		instance.integration,
-		instance.geoip,
-		instance.netenv,
 
 		instance.process,
 		instance.profile,
-		instance.network,
-		instance.netquery,
-		instance.firewall,
-		instance.nameserver,
-		instance.resolver,
-		instance.filterLists,
-		instance.customlist,
-
-		instance.splittun,
-
-		instance.interop, // required to start before interception
-
-		// Grouped pausable interception modules:
-		// 		instance.interception,
-		// 		instance.dnsmonitor,
-		// 		instance.compat
-		instance.serviceGroupInterception,
 
 		instance.status,
 		instance.broadcasts,
 		instance.sync,
 		instance.ui,
-		instance.control,
-
-		instance.access,
-	)
-
-	// SPN Group
-	instance.SpnGroup = mgr.NewExtendedGroup(
-		instance.cabin,
-		instance.navigator,
-		instance.captain,
-		instance.crew,
-		instance.docks,
-		instance.patrol,
-		instance.ships,
-		instance.sluice,
-		instance.terminal,
 	)
 
 	return instance, nil
@@ -406,11 +204,6 @@ type SleepyModule interface {
 // SetSleep sets sleep mode on all modules that satisfy the SleepyModule interface.
 func (i *Instance) SetSleep(enabled bool) {
 	for _, module := range i.serviceGroup.Modules() {
-		if sm, ok := module.(SleepyModule); ok {
-			sm.SetSleep(enabled)
-		}
-	}
-	for _, module := range i.SpnGroup.Modules() {
 		if sm, ok := module.(SleepyModule); ok {
 			sm.SetSleep(enabled)
 		}
@@ -493,66 +286,6 @@ func (i *Instance) OSIntegration() *integration.OSIntegration {
 	return i.integration
 }
 
-// GeoIP returns the geoip module.
-func (i *Instance) GeoIP() *geoip.GeoIP {
-	return i.geoip
-}
-
-// NetEnv returns the netenv module.
-func (i *Instance) NetEnv() *netenv.NetEnv {
-	return i.netenv
-}
-
-// Access returns the access module.
-func (i *Instance) Access() *access.Access {
-	return i.access
-}
-
-// Cabin returns the cabin module.
-func (i *Instance) Cabin() *cabin.Cabin {
-	return i.cabin
-}
-
-// Captain returns the captain module.
-func (i *Instance) Captain() *captain.Captain {
-	return i.captain
-}
-
-// Crew returns the crew module.
-func (i *Instance) Crew() *crew.Crew {
-	return i.crew
-}
-
-// Docks returns the crew module.
-func (i *Instance) Docks() *docks.Docks {
-	return i.docks
-}
-
-// Navigator returns the navigator module.
-func (i *Instance) Navigator() *navigator.Navigator {
-	return i.navigator
-}
-
-// Patrol returns the patrol module.
-func (i *Instance) Patrol() *patrol.Patrol {
-	return i.patrol
-}
-
-// Ships returns the ships module.
-func (i *Instance) Ships() *ships.Ships {
-	return i.ships
-}
-
-// Sluice returns the ships module.
-func (i *Instance) Sluice() *sluice.SluiceModule {
-	return i.sluice
-}
-
-// Terminal returns the terminal module.
-func (i *Instance) Terminal() *terminal.TerminalModule {
-	return i.terminal
-}
-
 // UI returns the ui module.
 func (i *Instance) UI() *ui.UI {
 	return i.ui
@@ -561,36 +294,6 @@ func (i *Instance) UI() *ui.UI {
 // Profile returns the profile module.
 func (i *Instance) Profile() *profile.ProfileModule {
 	return i.profile
-}
-
-// Firewall returns the firewall module.
-func (i *Instance) Firewall() *firewall.Firewall {
-	return i.firewall
-}
-
-// FilterLists returns the filterLists module.
-func (i *Instance) FilterLists() *filterlists.FilterLists {
-	return i.filterLists
-}
-
-// Interception returns the interception module.
-func (i *Instance) Interception() *interception.Interception {
-	return i.interception
-}
-
-// InterceptionGroup returns the grouped interception modules that can be paused together.
-func (i *Instance) InterceptionGroup() *mgr.GroupModule {
-	return i.serviceGroupInterception
-}
-
-// DNSMonitor returns the dns-listener module.
-func (i *Instance) DNSMonitor() *dnsmonitor.DNSMonitor {
-	return i.dnsmonitor
-}
-
-// CustomList returns the customlist module.
-func (i *Instance) CustomList() *customlists.CustomList {
-	return i.customlist
 }
 
 // Status returns the status module.
@@ -603,34 +306,9 @@ func (i *Instance) Broadcasts() *broadcasts.Broadcasts {
 	return i.broadcasts
 }
 
-// Compat returns the compat module.
-func (i *Instance) Compat() *compat.Compat {
-	return i.compat
-}
-
-// NameServer returns the nameserver module.
-func (i *Instance) NameServer() *nameserver.NameServer {
-	return i.nameserver
-}
-
-// NetQuery returns the netquery module.
-func (i *Instance) NetQuery() *netquery.NetQuery {
-	return i.netquery
-}
-
-// Network returns the network module.
-func (i *Instance) Network() *network.Network {
-	return i.network
-}
-
 // Process returns the process module.
 func (i *Instance) Process() *process.ProcessModule {
 	return i.process
-}
-
-// Resolver returns the resolver module.
-func (i *Instance) Resolver() *resolver.ResolverModule {
-	return i.resolver
 }
 
 // Sync returns the sync module.
@@ -643,22 +321,6 @@ func (i *Instance) Core() *core.Core {
 	return i.core
 }
 
-// SPNGroup returns the group of all SPN modules.
-func (i *Instance) SPNGroup() *mgr.ExtendedGroup {
-	return i.SpnGroup
-}
-
-// Events
-
-// GetEventSPNConnected return the event manager for the SPN connected event.
-func (i *Instance) GetEventSPNConnected() *mgr.EventMgr[struct{}] {
-	return i.captain.EventSPNConnected
-}
-
-func (i *Instance) GetHookSPNConnecting() *mgr.HookMgr[hub.Announcement] {
-	return i.captain.HookSPNConnecting
-}
-
 // Special functions
 
 // SetCmdLineOperation sets a command line operation to be executed instead of starting the system. This is useful when functions need all modules to be prepared for a special operation.
@@ -668,21 +330,13 @@ func (i *Instance) SetCmdLineOperation(f func() error) {
 
 // GetStates returns the current states of all group modules.
 func (i *Instance) GetStates() []mgr.StateUpdate {
-	mainStates := i.serviceGroup.GetStates()
-	spnStates := i.SpnGroup.GetStates()
-
-	updates := make([]mgr.StateUpdate, 0, len(mainStates)+len(spnStates))
-	updates = append(updates, mainStates...)
-	updates = append(updates, spnStates...)
-
-	return updates
+	return i.serviceGroup.GetStates()
 }
 
 // AddStatesCallback adds the given callback function to all group modules that
 // expose a state manager at States().
 func (i *Instance) AddStatesCallback(callbackName string, callback mgr.EventCallbackFunc[mgr.StateUpdate]) {
 	i.serviceGroup.AddStatesCallback(callbackName, callback)
-	i.SpnGroup.AddStatesCallback(callbackName, callback)
 }
 
 // Ready returns whether all modules in the main service module group have been started and are still running.

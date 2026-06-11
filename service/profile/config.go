@@ -7,8 +7,12 @@ import (
 	"github.com/safing/portmaster/base/config"
 	"github.com/safing/portmaster/service/profile/endpoints"
 	"github.com/safing/portmaster/service/status"
-	"github.com/safing/portmaster/spn/access/account"
 )
+
+// featureHistoryAnnotation was originally the SPN feature-ID gating history
+// behind a paid plan. filemaster has no paid plan; we keep the annotation
+// constant as an empty marker so the call sites compile unchanged.
+const featureHistoryAnnotation = ""
 
 // Configuration Keys.
 var (
@@ -259,7 +263,7 @@ In order to reduce noise optimize performance, internal and device-only (localho
 			config.SettablePerAppAnnotation:    true,
 			config.DisplayOrderAnnotation:      cfgOptionEnableHistoryOrder,
 			config.CategoryAnnotation:          "General",
-			config.RequiresFeatureIDAnnotation: account.FeatureHistory,
+			config.RequiresFeatureIDAnnotation: featureHistoryAnnotation,
 		},
 	})
 	if err != nil {
@@ -285,7 +289,7 @@ Set to 0 days to keep network history forever. Depending on your device, this mi
 			config.UnitAnnotation:              "Days",
 			config.DisplayOrderAnnotation:      cfgOptionKeepHistoryOrder,
 			config.CategoryAnnotation:          "General",
-			config.RequiresFeatureIDAnnotation: account.FeatureHistory,
+			config.RequiresFeatureIDAnnotation: featureHistoryAnnotation,
 		},
 	})
 	if err != nil {

@@ -15,7 +15,6 @@ import (
 	"github.com/safing/portmaster/base/database/record"
 	"github.com/safing/portmaster/base/log"
 	"github.com/safing/portmaster/base/utils"
-	"github.com/safing/portmaster/service/intel/filterlists"
 	"github.com/safing/portmaster/service/profile/binmeta"
 	"github.com/safing/portmaster/service/profile/endpoints"
 )
@@ -193,16 +192,10 @@ func (profile *Profile) parseConfig() error {
 		}
 	}
 
-	list, ok = profile.configPerspective.GetAsStringArray(CfgOptionFilterListsKey)
+	// Block-list resolution removed in filemaster — `filterlists` package is gone.
 	profile.filterListsSet = false
-	if ok {
-		profile.filterListIDs, err = filterlists.ResolveListIDs(list)
-		if err != nil {
-			log.Warningf("profiles: failed to resolve filter list IDs: %s", err)
-		} else {
-			profile.filterListsSet = true
-		}
-	}
+	profile.filterListIDs = nil
+	_, _ = profile.configPerspective.GetAsStringArray(CfgOptionFilterListsKey)
 
 	list, ok = profile.configPerspective.GetAsStringArray(CfgOptionSplitTunUsagePolicyKey)
 	profile.splitTunUsagePolicy = nil

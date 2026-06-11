@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/safing/portmaster/service/intel/filterlists"
 	"github.com/safing/portmaster/service/mgr"
 	"github.com/safing/portmaster/service/profile/endpoints"
 )
@@ -69,11 +68,9 @@ func updateGlobalConfigProfile(_ context.Context) error {
 		lastErr = err
 	}
 
-	list = cfgOptionFilterLists()
-	cfgFilterLists, err = filterlists.ResolveListIDs(list)
-	if err != nil {
-		lastErr = err
-	}
+	// Block-list resolution removed in filemaster — `filterlists` package is gone.
+	cfgFilterLists = nil
+	_ = cfgOptionFilterLists()
 
 	list = cfgOptionSplitTunUsagePolicy()
 	cfgSplitTunUsagePolicy, err = endpoints.ParseEndpoints(list)

@@ -2,7 +2,6 @@ package status
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -10,7 +9,6 @@ import (
 	"github.com/safing/portmaster/base/runtime"
 	"github.com/safing/portmaster/base/utils/debug"
 	"github.com/safing/portmaster/service/mgr"
-	"github.com/safing/portmaster/service/netenv"
 )
 
 // Status Module manages status information.
@@ -36,13 +34,6 @@ func (s *Status) Manager() *mgr.Manager {
 // Start starts the module.
 func (s *Status) Start() error {
 	s.mgr.Go("status publisher", s.statusPublisher)
-
-	s.instance.NetEnv().EventOnlineStatusChange.AddCallback("update online status in system status",
-		func(_ *mgr.WorkerCtx, _ netenv.OnlineStatus) (bool, error) {
-			s.triggerPublishStatus()
-			return false, nil
-		},
-	)
 
 	// Make an initial status query.
 	s.statesLock.Lock()
@@ -72,12 +63,12 @@ func (s *Status) prep() error {
 }
 
 // AddToDebugInfo adds the system status to the given debug.Info.
+// Online-status reporting was removed in filemaster (no netenv module).
 func AddToDebugInfo(di *debug.Info) {
 	di.AddSection(
-		fmt.Sprintf("Status: %s", netenv.GetOnlineStatus()),
+		"Status",
 		debug.UseCodeSection|debug.AddContentLineBreaks,
-		fmt.Sprintf("OnlineStatus:          %s", netenv.GetOnlineStatus()),
-		"CaptivePortal:         "+netenv.GetCaptivePortal().URL,
+		"online-status reporting disabled in this fork",
 	)
 }
 
@@ -108,7 +99,6 @@ func New(instance instance) (*Status, error) {
 }
 
 type instance interface {
-	NetEnv() *netenv.NetEnv
 	GetStates() []mgr.StateUpdate
 	AddStatesCallback(callbackName string, callback mgr.EventCallbackFunc[mgr.StateUpdate])
 }

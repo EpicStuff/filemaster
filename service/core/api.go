@@ -23,11 +23,8 @@ import (
 	"github.com/safing/portmaster/base/rng"
 	"github.com/safing/portmaster/base/utils"
 	"github.com/safing/portmaster/base/utils/debug"
-	"github.com/safing/portmaster/service/compat"
 	"github.com/safing/portmaster/service/process"
-	"github.com/safing/portmaster/service/resolver"
 	"github.com/safing/portmaster/service/status"
-	"github.com/safing/portmaster/spn/captain"
 )
 
 var errInvalidReadPermission = errors.New("invalid read permission")
@@ -318,13 +315,10 @@ func debugInfo(ar *api.Request) (data []byte, err error) {
 
 	// Status Information from various modules.
 	status.AddToDebugInfo(di)
-	captain.AddToDebugInfo(di)
-	resolver.AddToDebugInfo(di)
 	config.AddToDebugInfo(di)
 
 	// Detailed information.
 	AddVersionsToDebugInfo(di)
-	compat.AddToDebugInfo(di)
 	module.instance.AddWorkerInfoToDebugInfo(di)
 	di.AddGoroutineStack()
 

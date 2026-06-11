@@ -10,8 +10,6 @@ import (
 	"github.com/safing/portmaster/base/api"
 	"github.com/safing/portmaster/base/database"
 	"github.com/safing/portmaster/base/database/accessor"
-	"github.com/safing/portmaster/service/interop/ivpn"
-	"github.com/safing/portmaster/service/resolver"
 )
 
 func registerAPIEndpoints() error {
@@ -67,9 +65,6 @@ func handleResetState(ar *api.Request) (msg string, err error) {
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return "", err
 	}
-
-	_ = db.Delete(ivpn.Notification_DB_ID_IvpnDetectSuppressed)
-	_ = db.Delete(resolver.Notification_DB_ID_StaleCacheSuppressed)
 
 	return "Reset complete. Some notifications require a restart to reappear.", nil
 }

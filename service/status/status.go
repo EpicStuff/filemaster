@@ -8,22 +8,16 @@ import (
 	"github.com/safing/portmaster/base/database/record"
 	"github.com/safing/portmaster/base/runtime"
 	"github.com/safing/portmaster/service/mgr"
-	"github.com/safing/portmaster/service/netenv"
 )
 
-// SystemStatusRecord describes the overall status of the Portmaster.
+// SystemStatusRecord describes the overall status of filemaster.
 // It's a read-only record exposed via runtime:system/status.
+//
+// The upstream record carried OnlineStatus and CaptivePortal fields fed by
+// the netenv package; both are gone in this fork.
 type SystemStatusRecord struct {
 	record.Base
 	sync.Mutex
-
-	// OnlineStatus holds the current online status as
-	// seen by the netenv package.
-	OnlineStatus netenv.OnlineStatus
-	// CaptivePortal holds all information about the captive
-	// portal of the network the portmaster is currently
-	// connected to, if any.
-	CaptivePortal *netenv.CaptivePortal
 
 	Modules    []mgr.StateUpdate
 	WorstState struct {
@@ -80,9 +74,7 @@ func (s *Status) buildSystemStatus() *SystemStatusRecord {
 	defer s.statesLock.Unlock()
 
 	status := &SystemStatusRecord{
-		CaptivePortal: netenv.GetCaptivePortal(),
-		OnlineStatus:  netenv.GetOnlineStatus(),
-		Modules:       make([]mgr.StateUpdate, 0, len(s.states)),
+		Modules: make([]mgr.StateUpdate, 0, len(s.states)),
 	}
 	for _, newStateUpdate := range s.states {
 		// Deep copy state.
