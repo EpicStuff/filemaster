@@ -17,6 +17,7 @@ import (
 	"github.com/safing/portmaster/service/broadcasts"
 	"github.com/safing/portmaster/service/core"
 	"github.com/safing/portmaster/service/core/base"
+	"github.com/safing/portmaster/service/fileaccess"
 	"github.com/safing/portmaster/service/integration"
 	"github.com/safing/portmaster/service/mgr"
 	"github.com/safing/portmaster/service/process"
@@ -60,7 +61,8 @@ type Instance struct {
 	process       *process.ProcessModule
 	status        *status.Status
 	broadcasts    *broadcasts.Broadcasts
-	sync *sync.Sync
+	sync          *sync.Sync
+	fileAccess    *fileaccess.FileAccess
 
 	CommandLineOperation func() error
 	ShouldRestart        bool
@@ -167,6 +169,10 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	if err != nil {
 		return instance, fmt.Errorf("create sync module: %w", err)
 	}
+	instance.fileAccess, err = fileaccess.New(instance)
+	if err != nil {
+		return instance, fmt.Errorf("create fileaccess module: %w", err)
+	}
 
 	// Add all modules to instance group.
 	instance.serviceGroup = mgr.NewGroup(
@@ -186,6 +192,7 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 
 		instance.process,
 		instance.profile,
+		instance.fileAccess,
 
 		instance.status,
 		instance.broadcasts,

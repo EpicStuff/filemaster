@@ -1,0 +1,118 @@
+# filemaster — implementation steps
+
+Tracking the path from "compiling fork with no file logic" to "working
+file-access prompt loop." See `FORK_NOTES.md` for what was deleted to get
+here.
+
+## Phase 1 — minimal fanotify daemon (no UI, no rules) [DONE]
+
+Goal: a single Go package that opens an fanotify group, marks one
+hard-coded path, and blocks/allows opens via stdin or a hard-coded
+verdict. Proves the kernel plumbing works before we wire anything else.
+
+- [x] `service/fileaccess/` new package skeleton (module manifest, mgr.Module).
+- [x] `fanotify_linux.go` — `unix.FanotifyInit` with `FAN_CLASS_CONTENT |
+      FAN_CLOEXEC`, mark a hard-coded dir with `FAN_OPEN_PERM`.
+- [x] Event loop: read `fanotify_event_metadata`, resolve PID → exe path
+      via `/proc/<pid>/exe`, log `{pid, exe, path}`.
+- [x] Verdict writer: respond with `FAN_ALLOW`. (Auto-allow only; deny
+      logic deferred to phase 3 with the prompt loop.)
+- [x] Wire the package into `service/instance.go` service group (after
+      `process`, before `ui`).
+- [x] Smoke test: `cat /tmp/filemaster-test/<file>` triggers an event,
+      daemon logs `{pid, exe, path}`, syscall proceeds. Verified
+      2026-06-12 with bash + cat events. Smoke binary at
+      `cmds/fanotify-smoke/`.
+
+Lessons / footguns:
+- `FAN_MARK_MOUNT` marks the *entire mount*, not the path. On a root-
+  filesystem path this routes every open on the system to the daemon and
+  freezes the host when verdicts can't keep up. Use plain inode mark
+  (default) + `FAN_EVENT_ON_CHILD` for a single-directory watch.
+- Self-PID filter is mandatory: an open from inside the daemon's own
+  handler would block waiting for the daemon to respond to itself.
+- Env requirements: init user namespace + `CAP_SYS_ADMIN` + no seccomp
+  filter blocking `fanotify_init`. In Docker terms:
+  `--userns=host --cap-add=SYS_ADMIN --security-opt seccomp=unconfined`
+  (or a custom seccomp profile that allows fanotify syscalls).
+
+Open questions deferred to phase 2/3:
+- `FAN_REPORT_FID` for cross-mount support — punt until the rule shape
+  forces the decision.
+
+## Phase 2 — file-flavored Endpoint
+
+Goal: replace the dead IP/domain endpoint scaffolding for the first real
+case (path match). Existing rule storage/serialisation gets reused.
+
+- [ ] `service/profile/endpoints/endpoint_path.go` — `EndpointPath` with
+      glob or prefix match against a `FileEntity{Path, Op, PID, Exe}`.
+- [ ] Parser entry in `endpoints.go` for `path:` / `glob:` rule strings.
+- [ ] Replace `*intel.Entity` parameter on `Endpoint.Matches` with an
+      interface or new `FileEntity` type — touches every endpoint file.
+      (Easier: define a small `Subject` interface both can satisfy during
+      the transition.)
+- [ ] Delete the IP/domain/country/ASN/scope endpoint files +
+      `service/intel/entity.go` + `netutils` + `reference` stubs in one
+      sweep once `EndpointPath` is the only matcher in use.
+
+## Phase 3 — prompt loop end-to-end
+
+Goal: an unknown path access fires a notification, user responds via API,
+rule persists in the profile, next access of the same path is
+auto-decided.
+
+- [ ] In the fanotify event handler, look up the process's profile (reuse
+      `process.GetProcessWithProfile`).
+- [ ] Match the access against the layered profile's endpoints. If no
+      match → create a `notifications.Prompt`.
+- [ ] Prompt actions: Allow once / Deny once / Allow always / Deny always.
+      "Always" appends an `EndpointPath` rule to the profile.
+- [ ] Verdict write happens only after the user responds (or a timeout
+      hits — default-deny? default-allow? probably configurable).
+- [ ] Test via `curl` against the existing notification API:
+      trigger access → `GET /api/v1/notifications` → POST the action →
+      see verdict applied, rule saved.
+
+## Phase 4 — UI
+
+Goal: existing Angular/Tauri shell renders file prompts instead of
+network prompts. Defer until phase 3 settles the field shape.
+
+- [ ] Map `FileEntity` fields into whatever the prompt component expects
+      (probably rename `Entity` → `Subject` in the API payload).
+- [ ] Replace network-specific labels in the prompt component
+      (`Connection from ...` → `Access to ...`).
+- [ ] App-list view: per-app rules render `path:` lines instead of
+      `domain:`/`ip:`.
+- [ ] Strip out tabs/panels that no longer make sense (network monitor,
+      DNS settings, SPN).
+
+## Phase 5 — per-app sandboxing (Storage-Scopes-style)
+
+Stretch goal from the original ChatGPT discussion. Only after phase 4.
+
+**Landlock vs mount namespaces:** Landlock LSM (Linux 5.13+, syscalls
+`landlock_create_ruleset` / `landlock_add_rule` / `landlock_restrict_self`)
+is probably the right primitive here, not mount namespaces. It's
+self-imposed by the sandboxed process, inherits across `clone()`, doesn't
+need root-per-app, and stacks cleanly with the fanotify prompt layer
+(fanotify intercepts the *first* access for the prompt; Landlock enforces
+the resulting rule cheaply in-kernel). Mount-namespace + OverlayFS still
+wins if we need transparent path *rewriting* (Storage-Scopes-style) rather
+than just deny — Landlock can only allow/deny, not redirect.
+
+- [ ] Decide: pure Landlock (deny-only) vs Landlock + ns-redirect hybrid.
+- [ ] If hybrid: per-app mount namespace + bind/OverlayFS for the redirect
+      cases, Landlock for everything else.
+- [ ] Trigger: endpoint actions `sandbox:~/Documents=allow` (Landlock) and
+      `redirect:~/Documents=/var/lib/filemaster/<app>/Documents` (ns).
+- [ ] Launcher shim that applies the ruleset before `execve` (Landlock
+      must be set up by the parent).
+
+## Cross-cutting cleanup (do whenever)
+
+- [ ] Rename the binary and module path from `portmaster` to `filemaster`.
+      Defer until phase 3 — module-path rename touches every Go file.
+- [ ] Drop the `safing.io` / Portmaster branding from `info/info.go`.
+- [ ] Trim the README to describe the fork.
