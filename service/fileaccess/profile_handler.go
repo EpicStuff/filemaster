@@ -6,21 +6,18 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/safing/portmaster/service/profile"
 )
 
 // RuleStore is the small slice of *profile.Profile that the
-// ProfileHandler needs. Keeping it as an interface lets tests inject a
-// fake without pulling in the database/config plumbing.
+// ProfileHandler needs for *writing* a new rule. Reads come back as
+// pre-parsed rules in LookupResult to keep the hot path free of
+// re-parsing.
 type RuleStore interface {
 	// ID identifies the profile this store backs. Used for diagnostics
-	// and to key the prompter's notification IDs so concurrent prompts
-	// for the same app collapse where the UI wants them to.
+	// and the prompter's notification IDs.
 	ID() string
-
-	// Rules returns the persisted rule strings in the order they were
-	// added (newest first). Each string is a single "<+|-> <pattern>"
-	// entry per the format defined by ParseRule / FormatRule.
-	Rules() []string
 
 	// AppendRule prepends a new rule entry and persists it. Errors are
 	// surfaced so the caller can log without losing the in-memory
@@ -28,27 +25,56 @@ type RuleStore interface {
 	AppendRule(entry string) error
 }
 
-// ProfileLookup resolves a PID to the RuleStore for the matched
-// profile. Production binding wraps process.GetProcessWithProfile;
-// tests pass an in-memory map.
+// LookupResult is everything a single ProfileLookup pass yields: the
+// resolved exe path (for the fallback handler + audit logging), the
+// rule store (nil if no profile resolved), the pre-parsed per-profile
+// rules, and the profile's default action.
+//
+// Bundling all four into one struct means we hit
+// process.GetProcessWithProfile exactly once per event -- both
+// ProfileHandler and the fallback path get what they need from a
+// single call.
+type LookupResult struct {
+	// Path is the process's resolved exe path, mirrored from
+	// Process.Path. Empty when the process couldn't be resolved.
+	Path string
+
+	// Store is the rule store backing the matched profile, or nil
+	// when no profile resolved.
+	Store RuleStore
+
+	// ParsedRules is the cached parsed view of Store.Rules(). Empty
+	// PathRules when Store is nil.
+	ParsedRules PathRules
+
+	// DefaultAction is the profile's default action constant from
+	// service/profile (DefaultActionNotSet / Block / Ask / Permit).
+	// DefaultActionAsk when no profile resolved, so default-deny isn't
+	// silently applied to processes the lookup couldn't identify.
+	DefaultAction uint8
+}
+
+// ProfileLookup resolves a PID to a LookupResult. Production binding
+// wraps process.GetProcessWithProfile; tests pass an in-memory map.
 type ProfileLookup interface {
-	Lookup(ctx context.Context, pid int32) (RuleStore, error)
+	Lookup(ctx context.Context, pid int32) (LookupResult, error)
 }
 
 // ProfileHandler decides verdicts by consulting per-profile rules
-// stored in the profile's persisted config map and, on miss, asking
-// the user via a Prompter. "Always" responses are written back into
-// the profile, which carries the existing portmaster persistence +
-// sync machinery.
+// stored in the profile's persisted config map and, on miss, applying
+// the profile's default action: permit / block straight through, or
+// ask the user via a Prompter. "Always" responses are written back
+// into the profile, which carries the existing portmaster persistence
+// + sync machinery.
 type ProfileHandler struct {
 	lookup   ProfileLookup
 	prompter Prompter
 	timeout  time.Duration
 
-	// fallback is used when ProfileLookup returns an error (process
-	// gone, profile module not ready, etc). Without it the daemon
-	// would default-deny every unidentified syscall; with it we keep
-	// the in-memory PromptHandler as a safety net.
+	// fallback is used when ProfileLookup returns an error or no
+	// profile resolves. Without it the daemon would default-deny every
+	// unidentified syscall; with it we keep the exe-keyed PromptHandler
+	// as a safety net.
 	fallback Handler
 
 	// log is used for noisy lookup failures so we don't break the
@@ -59,9 +85,9 @@ type ProfileHandler struct {
 }
 
 // NewProfileHandler returns a profile-backed handler. The fallback
-// handler is invoked when ProfileLookup fails -- typically a plain
-// PromptHandler so events from processes-without-profiles still get
-// to ask the user.
+// handler is invoked when ProfileLookup fails OR when no profile
+// resolves -- typically a plain PromptHandler so events from
+// processes-without-profiles still get to ask the user.
 func NewProfileHandler(lookup ProfileLookup, prompter Prompter, fallback Handler, timeout time.Duration, log logger) *ProfileHandler {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -83,25 +109,52 @@ func NewProfileHandler(lookup ProfileLookup, prompter Prompter, fallback Handler
 
 // Decide implements Handler.
 func (h *ProfileHandler) Decide(ctx context.Context, e FileEvent) Verdict {
-	store, err := h.lookup.Lookup(ctx, e.PID)
-	if err != nil || store == nil {
-		if err != nil {
-			h.log.Warn("profile lookup failed; using fallback handler",
-				"pid", e.PID,
-				"path", e.Path,
-				"err", err,
-			)
+	res, err := h.lookup.Lookup(ctx, e.PID)
+	if err != nil {
+		h.log.Warn("profile lookup failed; using fallback handler",
+			"pid", e.PID,
+			"path", e.Path,
+			"err", err,
+		)
+		// Populate Exe from what we managed to resolve so the fallback
+		// can key by it.
+		if res.Path != "" {
+			e.Exe = res.Path
 		}
 		return h.fallback.Decide(ctx, e)
 	}
+	// Always pass the resolved exe to the fallback (and along the
+	// audit-log chain), regardless of whether a profile resolved.
+	if res.Path != "" {
+		e.Exe = res.Path
+	}
+	if res.Store == nil {
+		return h.fallback.Decide(ctx, e)
+	}
 
-	if v, ok := matchRules(store.Rules(), e.Path); ok {
+	// Profile resolved -- match against its pre-parsed rules.
+	if v, ok := res.ParsedRules.Lookup(e.Path); ok {
 		return v
+	}
+
+	// No rule match. Consult the profile's default action before
+	// raising a prompt, mirroring how the network filter chain uses
+	// cfgOptionDefaultAction.
+	switch res.DefaultAction {
+	case profile.DefaultActionPermit:
+		return VerdictAllow
+	case profile.DefaultActionBlock:
+		return VerdictDeny
+	case profile.DefaultActionAsk, profile.DefaultActionNotSet:
+		// Fall through to the prompter below.
+	default:
+		// Unknown default-action value: be safe.
+		return VerdictDeny
 	}
 
 	action, ok := h.prompter.Prompt(ctx, e, h.timeout)
 	if !ok {
-		// Default-deny on timeout/cancel for the same reason the
+		// Default-deny on timeout/cancel for the same reason
 		// PromptHandler does: better to break an app than leak data.
 		return VerdictDeny
 	}
@@ -112,13 +165,13 @@ func (h *ProfileHandler) Decide(ctx context.Context, e FileEvent) Verdict {
 	case ActionDeny:
 		return VerdictDeny
 	case ActionAllowAlways:
-		if err := store.AppendRule(FormatRule(e.Path, VerdictAllow)); err != nil {
-			h.log.Error("persist allow-always failed", "profile", store.ID(), "path", e.Path, "err", err)
+		if err := res.Store.AppendRule(FormatRule(e.Path, VerdictAllow)); err != nil {
+			h.log.Error("persist allow-always failed", "profile", res.Store.ID(), "path", e.Path, "err", err)
 		}
 		return VerdictAllow
 	case ActionDenyAlways:
-		if err := store.AppendRule(FormatRule(e.Path, VerdictDeny)); err != nil {
-			h.log.Error("persist deny-always failed", "profile", store.ID(), "path", e.Path, "err", err)
+		if err := res.Store.AppendRule(FormatRule(e.Path, VerdictDeny)); err != nil {
+			h.log.Error("persist deny-always failed", "profile", res.Store.ID(), "path", e.Path, "err", err)
 		}
 		return VerdictDeny
 	default:
@@ -154,20 +207,17 @@ func ParseRule(entry string) (PathRule, bool) {
 	return PathRule{Pattern: strings.TrimSpace(entry[2:]), Verdict: v}, true
 }
 
-// matchRules walks the entries in order and returns the first match.
-// First-match-wins matches PathRules semantics; AddFileAccessRule
-// prepends, so newest rules take priority over older ones.
-func matchRules(entries []string, path string) (Verdict, bool) {
+// ParseRules parses a []string of rule entries (as stored in a profile)
+// into a PathRules with VerdictAllow as the no-match default. Malformed
+// entries are skipped.
+func ParseRules(entries []string) PathRules {
+	rs := PathRules{Default: VerdictAllow}
 	for _, entry := range entries {
-		r, ok := ParseRule(entry)
-		if !ok {
-			continue
-		}
-		if r.Matches(path) {
-			return r.Verdict, true
+		if r, ok := ParseRule(entry); ok {
+			rs.Rules = append(rs.Rules, r)
 		}
 	}
-	return 0, false
+	return rs
 }
 
 // ErrNoProfile is returned by a ProfileLookup when no matching profile

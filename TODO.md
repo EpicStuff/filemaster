@@ -183,3 +183,33 @@ than just deny — Landlock can only allow/deny, not redirect.
       Defer until phase 3 — module-path rename touches every Go file.
 - [ ] Drop the `safing.io` / Portmaster branding from `info/info.go`.
 - [ ] Trim the README to describe the fork.
+
+## Portmaster reuse audit (kept current as we sweep)
+
+- [x] **Profile.DefaultAction** read by `ProfileHandler` on no-rule-match.
+      Honors the existing per-profile `permit` / `ask` / `block` knob, so
+      users coming from the network filter UX get the same mental model.
+- [x] **Single lookup per event.** `ProfileLookup.Lookup` is the only
+      place that calls `process.GetProcessWithProfile`; the result
+      bundles Path + Store + ParsedRules + DefaultAction so both the
+      main and fallback handlers consume one resolve.
+- [x] **Drop fanotify's `/proc/<pid>/exe` readlink.** Exe resolution
+      now rides on the process module's richer lookup (cmdline, env,
+      tags) instead of a parallel readlink in the source. Source logs
+      `pid + path` only; ProfileHandler populates `e.Exe` from
+      `Process.Path` before delegating to the fallback or logging.
+- [x] **Cached parsed rules.** `processProfileLookup` caches a
+      `PathRules` per profile ID, invalidated only when the raw rule
+      count changes (the only mutation we currently do is prepend via
+      `AddFileAccessRule`). Avoids re-parsing the StringArray on every
+      Decide without restructuring the type graph.
+
+Still on the list:
+- [ ] Watch paths as a `base/config` `StringArrayOption` instead of
+      the `FM_WATCH_PATHS` env var. Gets UI exposure, validation,
+      live-reload.
+- [ ] Delete `service/profile/endpoints/` IP/domain/country matchers +
+      the intel.Entity / netutils / reference stubs once nothing in the
+      tree depends on them (currently still referenced by the
+      LayeredProfile network-rule getters). This is the largest hunk
+      of upstream code we carry but don't use.

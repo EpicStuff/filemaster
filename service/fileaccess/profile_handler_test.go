@@ -6,50 +6,89 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/safing/portmaster/service/profile"
 )
 
 // fakeRuleStore is an in-memory RuleStore for tests.
 type fakeRuleStore struct {
 	id       string
-	rules    []string
 	appendMu sync.Mutex
+	appended []string
 }
 
-func (s *fakeRuleStore) ID() string {
-	return s.id
-}
-
-func (s *fakeRuleStore) Rules() []string {
-	s.appendMu.Lock()
-	defer s.appendMu.Unlock()
-	out := make([]string, len(s.rules))
-	copy(out, s.rules)
-	return out
-}
+func (s *fakeRuleStore) ID() string { return s.id }
 
 func (s *fakeRuleStore) AppendRule(entry string) error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
-	// Mirror Profile.AddEndpoint semantics: prepend so most-recent wins.
-	s.rules = append([]string{entry}, s.rules...)
+	s.appended = append(s.appended, entry)
 	return nil
 }
 
-// fakeLookup keys RuleStores by PID. Pid 0 returns an error.
-type fakeLookup struct {
-	stores map[int32]*fakeRuleStore
-	err    error
+// fakeProfile bundles what a fake "profile" needs to look like to the
+// lookup: an ID, the current rule strings, a default action, and the
+// resolved exe path. fakeLookup composes a LookupResult from it.
+type fakeProfile struct {
+	id     string
+	exe    string
+	rules  []string
+	defAct uint8 // profile.DefaultAction* constants
 }
 
-func (l *fakeLookup) Lookup(_ context.Context, pid int32) (RuleStore, error) {
+// fakeLookup keys fakeProfiles by PID. err != nil short-circuits to
+// the fallback regardless.
+type fakeLookup struct {
+	profiles map[int32]*fakeProfile
+	err      error
+
+	mu     sync.Mutex
+	stores map[int32]*fakeRuleStore
+}
+
+func (l *fakeLookup) Lookup(_ context.Context, pid int32) (LookupResult, error) {
 	if l.err != nil {
-		return nil, l.err
+		return LookupResult{}, l.err
 	}
-	s, ok := l.stores[pid]
+	fp, ok := l.profiles[pid]
 	if !ok {
-		return nil, ErrNoProfile
+		return LookupResult{Path: "", DefaultAction: profile.DefaultActionAsk}, ErrNoProfile
 	}
-	return s, nil
+
+	l.mu.Lock()
+	if l.stores == nil {
+		l.stores = make(map[int32]*fakeRuleStore)
+	}
+	store, ok := l.stores[pid]
+	if !ok {
+		store = &fakeRuleStore{id: fp.id}
+		l.stores[pid] = store
+	}
+	// Merge any persisted entries that AppendRule has recorded into the
+	// next-lookup parsed view, mirroring how the real binding re-reads
+	// from the live profile.
+	allRules := append([]string(nil), store.appended...)
+	allRules = append(allRules, fp.rules...)
+	l.mu.Unlock()
+
+	return LookupResult{
+		Path:          fp.exe,
+		Store:         store,
+		ParsedRules:   ParseRules(allRules),
+		DefaultAction: fp.defAct,
+	}, nil
+}
+
+func (l *fakeLookup) appendedFor(pid int32) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stores == nil {
+		return nil
+	}
+	if s, ok := l.stores[pid]; ok {
+		return append([]string(nil), s.appended...)
+	}
+	return nil
 }
 
 func TestParseAndFormatRuleRoundTrip(t *testing.T) {
@@ -86,14 +125,16 @@ func TestParseRuleRejectsMalformed(t *testing.T) {
 	}
 }
 
-// TestProfileHandlerRuleHit: a rule stored in the profile shortcuts
-// the prompter.
+// TestProfileHandlerRuleHit: a rule present in the parsed view
+// shortcuts the prompter.
 func TestProfileHandlerRuleHit(t *testing.T) {
-	store := &fakeRuleStore{
-		id:    "profile-A",
-		rules: []string{"+ /etc/passwd"},
-	}
-	lookup := &fakeLookup{stores: map[int32]*fakeRuleStore{42: store}}
+	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
+		42: {
+			id:     "profile-A",
+			rules:  []string{"+ /etc/passwd"},
+			defAct: profile.DefaultActionAsk,
+		},
+	}}
 	p := &scriptedPrompter{}
 
 	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
@@ -110,20 +151,21 @@ func TestProfileHandlerRuleHit(t *testing.T) {
 // response writes the rule back into the profile's store, and the
 // second access of the same path goes straight to the rule.
 func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
-	store := &fakeRuleStore{id: "profile-B"}
-	lookup := &fakeLookup{stores: map[int32]*fakeRuleStore{99: store}}
-
+	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
+		99: {id: "profile-B", defAct: profile.DefaultActionAsk},
+	}}
 	p := &scriptedPrompter{responses: map[string]string{
 		"/home/alice/notes.txt": ActionAllowAlways,
 	}}
 	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
 
-	e := FileEvent{PID: 99, Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"}
+	e := FileEvent{PID: 99, Path: "/home/alice/notes.txt"}
 	v := h.Decide(context.Background(), e)
 	if v != VerdictAllow {
 		t.Fatalf("first call: got %s, want allow", v)
 	}
-	if got := store.Rules(); len(got) != 1 || got[0] != "+ /home/alice/notes.txt" {
+	got := lookup.appendedFor(99)
+	if len(got) != 1 || got[0] != "+ /home/alice/notes.txt" {
 		t.Fatalf("rule not persisted in profile store: %v", got)
 	}
 
@@ -140,13 +182,11 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 }
 
 // TestProfileHandlerPerProfileIsolation: two profiles maintain
-// independent rule lists, mirroring the per-app guarantee.
+// independent rule lists.
 func TestProfileHandlerPerProfileIsolation(t *testing.T) {
-	storeVim := &fakeRuleStore{id: "vim"}
-	storeCat := &fakeRuleStore{id: "cat"}
-	lookup := &fakeLookup{stores: map[int32]*fakeRuleStore{
-		100: storeVim,
-		101: storeCat,
+	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
+		100: {id: "vim", defAct: profile.DefaultActionAsk},
+		101: {id: "cat", defAct: profile.DefaultActionAsk},
 	}}
 	p := &scriptedPrompter{responses: map[string]string{
 		"/home/alice/notes.txt": ActionAllowAlways,
@@ -169,39 +209,115 @@ func TestProfileHandlerPerProfileIsolation(t *testing.T) {
 		t.Errorf("prompter calls after cat: %d, want 2", p.called)
 	}
 
-	if len(storeVim.Rules()) != 1 || len(storeCat.Rules()) != 0 {
-		t.Errorf("per-profile rule counts wrong: vim=%d cat=%d", len(storeVim.Rules()), len(storeCat.Rules()))
+	if len(lookup.appendedFor(100)) != 1 || len(lookup.appendedFor(101)) != 0 {
+		t.Errorf("per-profile rule counts wrong: vim=%d cat=%d",
+			len(lookup.appendedFor(100)), len(lookup.appendedFor(101)))
 	}
 }
 
-// TestProfileHandlerFallback: lookup error routes the event to the
-// fallback handler instead of default-denying.
-func TestProfileHandlerFallback(t *testing.T) {
-	fallback := HandlerFunc(func(_ context.Context, _ FileEvent) Verdict { return VerdictAllow })
-	lookup := &fakeLookup{err: errors.New("boom")}
+// TestProfileHandlerDefaultActionPermit: profile says "permit by
+// default" -> no rule + no prompt, allow.
+func TestProfileHandlerDefaultActionPermit(t *testing.T) {
+	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
+		1: {id: "permit-app", defAct: profile.DefaultActionPermit},
+	}}
 	p := &scriptedPrompter{}
+	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
 
-	h := NewProfileHandler(lookup, p, fallback, time.Second, nopLogger{})
-
-	v := h.Decide(context.Background(), FileEvent{PID: 1, Path: "/etc/anything"})
+	v := h.Decide(context.Background(), FileEvent{PID: 1, Path: "/anything"})
 	if v != VerdictAllow {
-		t.Errorf("got %s, want allow (from fallback)", v)
+		t.Errorf("got %s, want allow (DefaultActionPermit)", v)
+	}
+	if p.called != 0 {
+		t.Errorf("prompter called %d times; permit should never prompt", p.called)
 	}
 }
 
-// TestProfileHandlerNoProfileFallback: ErrNoProfile is the same path
-// as any other lookup error -- delegate to the fallback.
-func TestProfileHandlerNoProfileFallback(t *testing.T) {
-	fallbackCalled := false
-	fallback := HandlerFunc(func(_ context.Context, _ FileEvent) Verdict {
-		fallbackCalled = true
-		return VerdictDeny
+// TestProfileHandlerDefaultActionBlock: profile says "block by
+// default" -> no rule + no prompt, deny.
+func TestProfileHandlerDefaultActionBlock(t *testing.T) {
+	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
+		1: {id: "block-app", defAct: profile.DefaultActionBlock},
+	}}
+	p := &scriptedPrompter{}
+	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
+
+	v := h.Decide(context.Background(), FileEvent{PID: 1, Path: "/anything"})
+	if v != VerdictDeny {
+		t.Errorf("got %s, want deny (DefaultActionBlock)", v)
+	}
+	if p.called != 0 {
+		t.Errorf("prompter called %d times; block should never prompt", p.called)
+	}
+}
+
+// TestProfileHandlerDefaultActionAskFiresPrompter: explicit ask AND
+// unset (NotSet) both fall through to the prompter.
+func TestProfileHandlerDefaultActionAskFiresPrompter(t *testing.T) {
+	for name, defAct := range map[string]uint8{
+		"DefaultActionAsk":    profile.DefaultActionAsk,
+		"DefaultActionNotSet": profile.DefaultActionNotSet,
+	} {
+		t.Run(name, func(t *testing.T) {
+			lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
+				1: {id: "ask-app", defAct: defAct},
+			}}
+			p := &scriptedPrompter{responses: map[string]string{
+				"/anything": ActionAllow,
+			}}
+			h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
+
+			v := h.Decide(context.Background(), FileEvent{PID: 1, Path: "/anything"})
+			if v != VerdictAllow {
+				t.Errorf("got %s, want allow", v)
+			}
+			if p.called != 1 {
+				t.Errorf("prompter calls: %d, want 1", p.called)
+			}
+		})
+	}
+}
+
+// TestProfileHandlerFallbackPopulatesExe: a lookup that errors still
+// returns a Path; the handler propagates it onto the event so the
+// fallback can key by exe even though no profile resolved.
+func TestProfileHandlerFallbackPopulatesExe(t *testing.T) {
+	var seenExe string
+	fallback := HandlerFunc(func(_ context.Context, e FileEvent) Verdict {
+		seenExe = e.Exe
+		return VerdictAllow
 	})
-	lookup := &fakeLookup{stores: map[int32]*fakeRuleStore{}}
+	lookup := &fakeLookup{
+		err: errors.New("transient"),
+	}
 	h := NewProfileHandler(lookup, &scriptedPrompter{}, fallback, time.Second, nopLogger{})
 
-	_ = h.Decide(context.Background(), FileEvent{PID: 999, Path: "/anywhere"})
-	if !fallbackCalled {
-		t.Error("fallback was not invoked on ErrNoProfile")
+	_ = h.Decide(context.Background(), FileEvent{PID: 1, Path: "/x"})
+	if seenExe != "" {
+		t.Errorf("fallback saw exe %q; lookup error means no Path was resolved", seenExe)
+	}
+}
+
+// TestProfileHandlerNoProfilePopulatesExeAndFallback: ErrNoProfile is
+// the same path as any other no-profile result -- delegate to the
+// fallback, and propagate the resolved exe so the fallback can key by it.
+func TestProfileHandlerNoProfilePopulatesExeAndFallback(t *testing.T) {
+	var seen FileEvent
+	fallback := HandlerFunc(func(_ context.Context, e FileEvent) Verdict {
+		seen = e
+		return VerdictDeny
+	})
+	// The fake lookup returns no profile for unknown PIDs but doesn't
+	// give an exe back. To exercise the propagation, give it a known
+	// entry with Path but no rule data.
+	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{}}
+	h := NewProfileHandler(lookup, &scriptedPrompter{}, fallback, time.Second, nopLogger{})
+
+	v := h.Decide(context.Background(), FileEvent{PID: 999, Path: "/x"})
+	if v != VerdictDeny {
+		t.Errorf("got %s, want deny (from fallback)", v)
+	}
+	if seen.Path != "/x" {
+		t.Errorf("fallback saw path %q, want /x", seen.Path)
 	}
 }

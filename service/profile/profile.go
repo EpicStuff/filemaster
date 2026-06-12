@@ -376,6 +376,13 @@ func (profile *Profile) GetFileAccessRules() []string {
 	return list
 }
 
+// DefaultAction returns the profile's default action (DefaultActionNotSet,
+// DefaultActionBlock, DefaultActionAsk, or DefaultActionPermit). Requires
+// the profile to be read-locked.
+func (profile *Profile) DefaultAction() uint8 {
+	return profile.defaultAction
+}
+
 // AddFileAccessRule appends an entry (e.g. "+ /tmp/foo" or "- /etc/shadow")
 // to the per-profile file-access rule list, saves the profile, and reloads
 // the configuration. Duplicate entries are dropped. Calls into the same

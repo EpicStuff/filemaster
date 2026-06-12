@@ -195,9 +195,13 @@ func (s *fanotifySource) handleEvent(ctx context.Context, h Handler, meta *unix.
 		return
 	}
 
+	// Exe resolution is the lookup chain's job (process module already
+	// does richer resolution -- cmdline, env, tags). Leaving Exe empty
+	// here keeps the fanotify hot path free of /proc reads; the
+	// ProfileHandler populates it from Process.Path before delegating
+	// to the fallback or logging anything that needs it.
 	event := FileEvent{
 		PID:  meta.Pid,
-		Exe:  readlinkSilent(fmt.Sprintf("/proc/%d/exe", meta.Pid)),
 		Path: readlinkSilent(fmt.Sprintf("/proc/self/fd/%d", meta.Fd)),
 		Op:   OpOpen,
 	}
@@ -209,7 +213,6 @@ func (s *fanotifySource) handleEvent(ctx context.Context, h Handler, meta *unix.
 
 	s.log.Info("fanotify event",
 		"pid", event.PID,
-		"exe", event.Exe,
 		"path", event.Path,
 		"op", event.Op,
 		"perm", isPerm,
