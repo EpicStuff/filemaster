@@ -73,17 +73,31 @@ rule persists, next access of the same path is auto-decided.
       default-deny on expire, 30s default).
 - [x] Wired into `service/instance.go`: `NotificationsPrompter` is the
       production Prompter backing `PromptHandler`.
-- [ ] **Pending:** live websocket-against-API test. The notifications
-      database is exposed over `/api/database/v1` (websocket), not REST,
-      so curl-the-prompt needs a ws client. The PromptHandler logic
-      itself is covered by unit tests against an injectable `Prompter`
-      interface.
+- [x] **Live demo:** `cmds/fileaccess-demo/` wires fanotify + Prompt-
+      Handler + a scripted prompter (deny anything with "blocked" in
+      the path). Verified 2026-06-12: real bash + cat open syscalls
+      succeed for allowed paths and fail with EPERM for denied paths.
+      Second access of an "allow-always" / "deny-always" path skips
+      the prompter (persisted rule hit).
+- [ ] **Pending:** live websocket-against-real-notifications test --
+      drive a real NotificationsPrompter prompt via ws on
+      `/api/database/v1`. The Prompter abstraction means this only
+      exercises the upstream notifications path; PromptHandler itself
+      is already verified.
 
 Verified 2026-06-12:
 - Daemon boots cleanly with the wired PromptHandler.
 - Six unit tests cover rule-hit-skips-prompt, allow-once, allow-always
   persists rule, deny-always persists rule, no-reply defaults to deny,
   unknown action defaults to deny.
+- Live demo: real syscalls allowed/denied/persisted as expected.
+
+Footgun captured during live test:
+- Multiple FAN_CLASS_CONTENT listeners on the same inode are ANDed by
+  the kernel -- any denying listener denies the syscall. Don't leave
+  stale daemons running during a focused-test run; they'll either deny
+  events out from under the test or stall waiting on prompts the test
+  isn't responding to.
 
 ## Phase 4 — UI
 
