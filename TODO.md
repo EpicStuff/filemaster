@@ -121,11 +121,41 @@ rule persists, next access of the same path is auto-decided.
       succeed for allowed paths and fail with EPERM for denied paths.
       Second access of an "allow-always" / "deny-always" path skips
       the prompter (persisted rule hit).
-- [ ] **Pending:** live websocket-against-real-notifications test --
-      drive a real NotificationsPrompter prompt via ws on
-      `/api/database/v1`. The Prompter abstraction means this only
-      exercises the upstream notifications path; PromptHandler itself
-      is already verified.
+- [x] **Live websocket prompt round-trip verified.** Drove a real
+      NotificationsPrompter prompt via ws on `/api/database/v1`. Wire
+      format: `<msgid>|qsub|query notifications:` to subscribe;
+      received `<msgid>|new|notifications:all/fileaccess:open:N|J<json>`;
+      replied `<msgid>|update|<key>|J<json-with-SelectedActionID>`; got
+      `<msgid>|success`. NotificationsPrompter's Response() channel
+      fired, the verdict reached fanotify, and `cat
+      /tmp/filemaster-test/nested/secret.txt` returned the file
+      content with rc=0 (allow) or EPERM (deny). End-to-end run
+      script captured at /tmp/responder.py.
+- [x] **Angular UI confirmed end-to-end.** Stood up the full stack
+      under headless chromium (ng serve on :4200 proxying API to
+      pm-core on :817 with `core/devMode=true`). Loaded the dashboard,
+      triggered a cat, snapshotted before/after. The sidebar's
+      prompt-tray div (gated by
+      `*ngIf="hasNewPrompts || globalPromptingEnabled"`) appears with
+      the yellow indicator dot only when a fileaccess prompt is live
+      -- visible diff in the screenshots. PortapiService completes
+      the WS handshake, the prompt-list filter
+      (notif.EventID.startsWith("fileaccess:")) matches, and the
+      action button click maps to the same `update` wire message that
+      the standalone responder uses.
+
+      Run-it-yourself recipe:
+      1. `cat > <dataDir>/config.json <<EOF
+         {"core":{"devMode":true},
+          "fileaccess":{"watchPaths":["/tmp/filemaster-test"]}}
+         EOF`
+      2. `setsid pm-core --data-dir <dataDir> --bin-dir <binDir> \
+                       --log-dir <logDir> > /tmp/pm.log 2>&1 &`
+      3. `cd desktop/angular && ng serve --host 0.0.0.0 \
+              --port 4200 --proxy-config ./proxy.json`
+      4. Open `http://<host>:4200/` in a browser. Trigger a file
+         access in a watched dir; the prompt-tray icon turns yellow.
+         Click it, then click an action button.
 
 Verified 2026-06-12:
 - Daemon boots cleanly with the wired PromptHandler.
