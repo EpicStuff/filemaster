@@ -78,17 +78,25 @@ auto-allow that path for `/usr/bin/cat`. Verified end-to-end:
   same file, then both got silent rule-hits on second access.
 
 Still pending:
-- [ ] Map exe paths to profile fingerprints (`process.GetProcessWith-
-      Profile`) so rules survive renames/upgrades of the same app.
+- [x] **Profile-fingerprint identity:** rules now key off the
+      portmaster `LocalProfile.ScopedID()` (content-addressed from the
+      fingerprint set) instead of the exe path, so reinstalls and
+      upgrades that keep the cmdline stable keep the rules. Implemented
+      as `ProfileHandler` over a `ProfileLookup` interface; the
+      production binding wraps `process.GetProcessWithProfile`. Falls
+      back to the exe-keyed `PromptHandler` when no profile resolves
+      (e.g. process gone, detection disabled). Rules live in the
+      profile's config map under `fileaccess/rules` and ride the
+      existing profile-DB + sync paths -- no parallel storage layer.
 - [x] **Persistence:** per-exe rule lists survive daemon restart via a
-      JSON file at `<dataDir>/fileaccess-rules.json`. Save on every
-      appendRule (atomic temp+rename), load on Start (missing file is
-      not an error). Wired into `instance.go`; demo cmd supports
-      `FM_RULES_PATH` env var. Schema is versioned so future migrations
-      surface as load errors rather than silent corruption. Verified
-      2026-06-12 across two demo invocations against the same file:
-      second run's syscalls hit the persisted rules without any
-      prompter calls.
+      JSON file at `<dataDir>/fileaccess-fallback-rules.json` for the
+      fallback handler. Profile-resolved events persist through the
+      profile package's own storage (config option
+      `fileaccess/rules`). Save on every appendRule (atomic
+      temp+rename), load on Start (missing file is not an error).
+      Wired into `instance.go`; demo cmd supports `FM_RULES_PATH` env
+      var. Schema is versioned so future migrations surface as load
+      errors rather than silent corruption. Verified 2026-06-12.
 
 ## Phase 3 — prompt loop end-to-end [logic done, live test pending]
 

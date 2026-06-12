@@ -362,6 +362,29 @@ func (profile *Profile) AddServiceEndpoint(newEntry string) {
 	profile.addEndpointEntry(CfgOptionServiceEndpointsKey, newEntry)
 }
 
+// GetFileAccessRules returns the per-profile file-access rule list as
+// raw strings; parsing into PathRules lives in service/fileaccess.
+// Requires the profile to be read-locked.
+func (profile *Profile) GetFileAccessRules() []string {
+	if profile.configPerspective == nil {
+		return nil
+	}
+	list, ok := profile.configPerspective.GetAsStringArray(CfgOptionFileAccessRulesKey)
+	if !ok {
+		return nil
+	}
+	return list
+}
+
+// AddFileAccessRule appends an entry (e.g. "+ /tmp/foo" or "- /etc/shadow")
+// to the per-profile file-access rule list, saves the profile, and reloads
+// the configuration. Duplicate entries are dropped. Calls into the same
+// helper that powers AddEndpoint, so persistence + reload semantics are
+// identical to the network-rule path.
+func (profile *Profile) AddFileAccessRule(newEntry string) {
+	profile.addEndpointEntry(CfgOptionFileAccessRulesKey, newEntry)
+}
+
 func (profile *Profile) addEndpointEntry(cfgKey, newEntry string) {
 	changed := false
 

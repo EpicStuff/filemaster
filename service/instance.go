@@ -174,20 +174,31 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	if err != nil {
 		return instance, fmt.Errorf("create fileaccess module: %w", err)
 	}
-	// Wire the prompt-driven handler: rules first, then notifications
-	// prompt on miss, with allow/deny-always responses persisted as new
-	// rules. Default-deny on timeout (30s). Rules persist to a JSON
-	// file under the data dir so they survive restarts.
-	promptHandler := fileaccess.NewPromptHandler(
+	// Wire the file-access verdict chain:
+	//   1. ProfileHandler -- per-profile rules read/written via the
+	//      profile package, so persistence and sync ride on the
+	//      existing portmaster infrastructure (one rule list per
+	//      LocalProfile under cfgKey "fileaccess/rules").
+	//   2. On profile-lookup failure (process gone, detection disabled,
+	//      etc.), fall back to the exe-keyed PromptHandler with its
+	//      JSON file under the data dir so unidentified processes still
+	//      get to ask the user.
+	fallbackPrompt := fileaccess.NewPromptHandler(
 		&fileaccess.NotificationsPrompter{},
 		nil,
 		30*time.Second,
 	)
-	rulesPath := filepath.Join(svcCfg.DataDir, "fileaccess-rules.json")
-	if err := promptHandler.SetPersistPath(rulesPath); err != nil {
-		return instance, fmt.Errorf("load file-access rules from %s: %w", rulesPath, err)
+	fallbackRulesPath := filepath.Join(svcCfg.DataDir, "fileaccess-fallback-rules.json")
+	if err := fallbackPrompt.SetPersistPath(fallbackRulesPath); err != nil {
+		return instance, fmt.Errorf("load fallback rules from %s: %w", fallbackRulesPath, err)
 	}
-	instance.fileAccess.SetHandler(promptHandler)
+	instance.fileAccess.SetHandler(fileaccess.NewProfileHandler(
+		fileaccess.NewProcessProfileLookup(),
+		&fileaccess.NotificationsPrompter{},
+		fallbackPrompt,
+		30*time.Second,
+		instance.fileAccess.Manager(),
+	))
 
 	// Add all modules to instance group.
 	instance.serviceGroup = mgr.NewGroup(

@@ -76,6 +76,13 @@ var (
 
 	// Setting "Custom Filter List" at order 35.
 
+	// File-access rules. Each entry is "<verdict> <path-pattern>", where
+	// verdict is "+" (allow) or "-" (deny) and pattern follows the
+	// service/fileaccess PathRule syntax.
+	CfgOptionFileAccessRulesKey   = "fileaccess/rules"
+	cfgOptionFileAccessRules      config.StringArrayOption
+	cfgOptionFileAccessRulesOrder = 50
+
 	CfgOptionFilterSubDomainsKey   = "filter/includeSubdomains"
 	cfgOptionFilterSubDomains      config.BoolOption
 	cfgOptionFilterSubDomainsOrder = 36
@@ -424,6 +431,30 @@ Pro Tip: You can use "#" to add a comment to a rule.
 	}
 	cfgOptionServiceEndpoints = config.Concurrent.GetAsStringArray(CfgOptionServiceEndpointsKey, []string{})
 	cfgStringArrayOptions[CfgOptionServiceEndpointsKey] = cfgOptionServiceEndpoints
+
+	// File-access rules. Per-app list of "<+|-> <path-pattern>" strings
+	// consumed by service/fileaccess. Persisted with the profile so
+	// "allow always" / "deny always" responses survive restarts and ride
+	// the existing profile-sync machinery.
+	err = config.Register(&config.Option{
+		Name:         "File Access Rules",
+		Key:          CfgOptionFileAccessRulesKey,
+		Description:  "Rules governing file-access requests from this application. Each entry is `<+|-> <pattern>`; `+` allows, `-` denies, and `pattern` follows the same syntax as the global file-access rules.",
+		Sensitive:    true,
+		OptType:      config.OptTypeStringArray,
+		DefaultValue: []string{},
+		Annotations: config.Annotations{
+			config.SettablePerAppAnnotation: true,
+			config.StackableAnnotation:      true,
+			config.DisplayOrderAnnotation:   cfgOptionFileAccessRulesOrder,
+			config.CategoryAnnotation:       "Rules",
+		},
+	})
+	if err != nil {
+		return err
+	}
+	cfgOptionFileAccessRules = config.Concurrent.GetAsStringArray(CfgOptionFileAccessRulesKey, []string{})
+	cfgStringArrayOptions[CfgOptionFileAccessRulesKey] = cfgOptionFileAccessRules
 
 	// Filter list IDs
 	defaultFilterListsValue := []string{"TRAC", "MAL", "BAD", "UNBREAK"}
