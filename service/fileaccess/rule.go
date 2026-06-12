@@ -1,6 +1,7 @@
 package fileaccess
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 )
@@ -36,13 +37,24 @@ type PathRules struct {
 
 // Decide implements Handler: look up the event's path in the rule list
 // and return the matching verdict (or the default).
-func (rs PathRules) Decide(e FileEvent) Verdict {
-	for _, r := range rs.Rules {
-		if r.Matches(e.Path) {
-			return r.Verdict
-		}
+func (rs PathRules) Decide(_ context.Context, e FileEvent) Verdict {
+	if v, ok := rs.Lookup(e.Path); ok {
+		return v
 	}
 	return rs.Default
+}
+
+// Lookup walks the rule list and returns (verdict, true) on the first
+// match, or (zero, false) if no rule applies. Unlike Decide, Lookup
+// does not fall back to Default -- the caller decides what "no match"
+// means (e.g. prompt the user vs. apply a system-wide default).
+func (rs PathRules) Lookup(path string) (Verdict, bool) {
+	for _, r := range rs.Rules {
+		if r.Matches(path) {
+			return r.Verdict, true
+		}
+	}
+	return 0, false
 }
 
 func matchPathPattern(pattern, path string) bool {

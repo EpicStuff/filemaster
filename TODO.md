@@ -56,23 +56,34 @@ case (path match). Existing rule storage/serialisation gets reused.
       `service/intel/entity.go` + `netutils` + `reference` stubs in one
       sweep once `EndpointPath` is the only matcher in use.
 
-## Phase 3 — prompt loop end-to-end
+## Phase 3 — prompt loop end-to-end [logic done, live test pending]
 
 Goal: an unknown path access fires a notification, user responds via API,
-rule persists in the profile, next access of the same path is
-auto-decided.
+rule persists, next access of the same path is auto-decided.
 
 - [ ] In the fanotify event handler, look up the process's profile (reuse
-      `process.GetProcessWithProfile`).
-- [ ] Match the access against the layered profile's endpoints. If no
-      match → create a `notifications.Prompt`.
-- [ ] Prompt actions: Allow once / Deny once / Allow always / Deny always.
-      "Always" appends an `EndpointPath` rule to the profile.
-- [ ] Verdict write happens only after the user responds (or a timeout
-      hits — default-deny? default-allow? probably configurable).
-- [ ] Test via `curl` against the existing notification API:
-      trigger access → `GET /api/v1/notifications` → POST the action →
-      see verdict applied, rule saved.
+      `process.GetProcessWithProfile`). **Deferred** -- phase-3 minimum
+      uses a single global rule list, not per-app. Profile lookup lands
+      with phase 2.5 (storage integration).
+- [x] Match the access against rules. If no match → prompt. (`PromptHandler`
+      in `prompt.go`.)
+- [x] Prompt actions: Allow once / Deny once / Allow always / Deny always.
+      "Always" appends a `PathRule` to the in-memory rule list.
+- [x] Verdict write happens only after user responds (or timeout fires --
+      default-deny on expire, 30s default).
+- [x] Wired into `service/instance.go`: `NotificationsPrompter` is the
+      production Prompter backing `PromptHandler`.
+- [ ] **Pending:** live websocket-against-API test. The notifications
+      database is exposed over `/api/database/v1` (websocket), not REST,
+      so curl-the-prompt needs a ws client. The PromptHandler logic
+      itself is covered by unit tests against an injectable `Prompter`
+      interface.
+
+Verified 2026-06-12:
+- Daemon boots cleanly with the wired PromptHandler.
+- Six unit tests cover rule-hit-skips-prompt, allow-once, allow-always
+  persists rule, deny-always persists rule, no-reply defaults to deny,
+  unknown action defaults to deny.
 
 ## Phase 4 — UI
 

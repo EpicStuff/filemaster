@@ -111,7 +111,7 @@ func (s *fanotifySource) Run(ctx context.Context, h Handler) error {
 			continue
 		}
 
-		s.handleEvents(h, buf[:read])
+		s.handleEvents(ctx, h, buf[:read])
 	}
 }
 
@@ -121,7 +121,7 @@ func (s *fanotifySource) Close() error {
 	return unix.Close(s.fd)
 }
 
-func (s *fanotifySource) handleEvents(h Handler, buf []byte) {
+func (s *fanotifySource) handleEvents(ctx context.Context, h Handler, buf []byte) {
 	metaLen := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
 	for len(buf) >= metaLen {
 		// Copy the struct out of the buffer so we can safely reslice.
@@ -130,12 +130,12 @@ func (s *fanotifySource) handleEvents(h Handler, buf []byte) {
 		if evLen < metaLen || evLen > len(buf) {
 			return
 		}
-		s.handleEvent(h, &meta)
+		s.handleEvent(ctx, h, &meta)
 		buf = buf[evLen:]
 	}
 }
 
-func (s *fanotifySource) handleEvent(h Handler, meta *unix.FanotifyEventMetadata) {
+func (s *fanotifySource) handleEvent(ctx context.Context, h Handler, meta *unix.FanotifyEventMetadata) {
 	if meta.Vers != unix.FANOTIFY_METADATA_VERSION {
 		s.log.Warn("fanotify metadata version mismatch",
 			"got", meta.Vers,
@@ -169,7 +169,7 @@ func (s *fanotifySource) handleEvent(h Handler, meta *unix.FanotifyEventMetadata
 
 	verdict := VerdictAllow
 	if isPerm {
-		verdict = h.Decide(event)
+		verdict = h.Decide(ctx, event)
 	}
 
 	s.log.Info("fanotify event",

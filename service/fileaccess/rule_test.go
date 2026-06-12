@@ -1,6 +1,9 @@
 package fileaccess
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestMatchPathPattern(t *testing.T) {
 	cases := []struct {
@@ -57,7 +60,7 @@ func TestPathRulesDecide(t *testing.T) {
 		{"/var/log/system.log", VerdictAllow},          // default
 	}
 	for _, c := range cases {
-		got := rs.Decide(FileEvent{Path: c.path, Op: OpOpen})
+		got := rs.Decide(context.Background(), FileEvent{Path: c.path, Op: OpOpen})
 		if got != c.want {
 			t.Errorf("Decide(%q) = %s, want %s", c.path, got, c.want)
 		}
@@ -71,5 +74,5 @@ func TestPathRulesAsHandler(t *testing.T) {
 		Default: VerdictAllow,
 	}
 	var _ Handler = rs // compile-time check
-	_ = rs.Decide(FileEvent{Path: "/etc/passwd"})
+	_ = rs.Decide(context.Background(), FileEvent{Path: "/etc/passwd"})
 }

@@ -173,6 +173,14 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	if err != nil {
 		return instance, fmt.Errorf("create fileaccess module: %w", err)
 	}
+	// Wire the prompt-driven handler: rules first, then notifications
+	// prompt on miss, with allow/deny-always responses persisted as new
+	// rules. Default-deny on timeout (30s).
+	instance.fileAccess.SetHandler(fileaccess.NewPromptHandler(
+		&fileaccess.NotificationsPrompter{},
+		nil,
+		30*time.Second,
+	))
 
 	// Add all modules to instance group.
 	instance.serviceGroup = mgr.NewGroup(

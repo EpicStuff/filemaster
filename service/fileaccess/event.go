@@ -1,5 +1,7 @@
 package fileaccess
 
+import "context"
+
 // FileOp is the kind of file access being requested.
 type FileOp uint8
 
@@ -51,16 +53,20 @@ type FileEvent struct {
 // Handler decides a Verdict for a FileEvent. Implementations must return
 // promptly: the kernel is blocking the originating syscall until the
 // source writes the verdict back.
+//
+// The context is the source's run context; handlers that block (e.g.
+// waiting for a user response) should select on ctx.Done() to unwind
+// during shutdown.
 type Handler interface {
-	Decide(event FileEvent) Verdict
+	Decide(ctx context.Context, event FileEvent) Verdict
 }
 
 // HandlerFunc adapts a plain function to the Handler interface.
-type HandlerFunc func(FileEvent) Verdict
+type HandlerFunc func(context.Context, FileEvent) Verdict
 
 // Decide implements Handler.
-func (f HandlerFunc) Decide(e FileEvent) Verdict { return f(e) }
+func (f HandlerFunc) Decide(ctx context.Context, e FileEvent) Verdict { return f(ctx, e) }
 
 // allowAll is the phase-1 default handler -- log and let everything
 // through. Phase 3 swaps this for the profile/endpoint/prompt path.
-var allowAll HandlerFunc = func(FileEvent) Verdict { return VerdictAllow }
+var allowAll HandlerFunc = func(context.Context, FileEvent) Verdict { return VerdictAllow }
