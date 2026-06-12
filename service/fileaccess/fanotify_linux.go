@@ -32,19 +32,42 @@ type fanotifySource struct {
 }
 
 // newPlatformSource returns the Source implementation for this OS.
-// On Linux this is the fanotify-backed one, watching whatever paths
-// are listed in FM_WATCH_PATHS (colon-separated) or the default if
-// unset.
+// On Linux this is the fanotify-backed one. Watch paths come from, in
+// priority order:
+//
+//  1. cfgOptionWatchPaths -- the registered StringArrayOption. In a
+//     fully-booted daemon this is the only source that matters; the
+//     config module overrides it from disk + UI.
+//  2. FM_WATCH_PATHS env var (colon-separated). Useful for the
+//     standalone smoke/demo binaries that don't bring up the config
+//     module.
+//  3. defaultWatchPath -- a single hardcoded directory so the
+//     out-of-box demo / smoke flow keeps working without setup.
 func newPlatformSource(log logger) (Source, error) {
-	return newFanotifySource(watchPathsFromEnv(), log)
+	return newFanotifySource(resolveWatchPaths(), log)
 }
 
-// watchPathsFromEnv parses FM_WATCH_PATHS or returns the single
-// default. Empty entries are dropped.
+// resolveWatchPaths runs the priority chain documented on
+// newPlatformSource and returns the resulting path list. Always
+// returns at least one entry.
+func resolveWatchPaths() []string {
+	if cfgOptionWatchPaths != nil {
+		if v := cfgOptionWatchPaths(); len(v) > 0 {
+			return v
+		}
+	}
+	if env := watchPathsFromEnv(); env != nil {
+		return env
+	}
+	return []string{defaultWatchPath}
+}
+
+// watchPathsFromEnv parses FM_WATCH_PATHS into a slice, or returns nil
+// if unset / empty after trimming. Caller decides what to do on nil.
 func watchPathsFromEnv() []string {
 	raw := os.Getenv(envWatchPaths)
 	if raw == "" {
-		return []string{defaultWatchPath}
+		return nil
 	}
 	var out []string
 	for _, p := range strings.Split(raw, ":") {
@@ -53,7 +76,7 @@ func watchPathsFromEnv() []string {
 		}
 	}
 	if len(out) == 0 {
-		return []string{defaultWatchPath}
+		return nil
 	}
 	return out
 }

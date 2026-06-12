@@ -5,6 +5,7 @@ package fileaccess
 
 import (
 	"errors"
+	"fmt"
 	"sync/atomic"
 
 	"github.com/safing/portmaster/service/mgr"
@@ -67,6 +68,9 @@ var (
 func New(instance instance) (*FileAccess, error) {
 	if !shimLoaded.CompareAndSwap(false, true) {
 		return nil, errors.New("only one instance allowed")
+	}
+	if err := registerConfig(); err != nil {
+		return nil, fmt.Errorf("register fileaccess config: %w", err)
 	}
 	m := mgr.New("FileAccess")
 	module = &FileAccess{

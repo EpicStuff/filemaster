@@ -205,9 +205,16 @@ than just deny — Landlock can only allow/deny, not redirect.
       Decide without restructuring the type graph.
 
 Still on the list:
-- [ ] Watch paths as a `base/config` `StringArrayOption` instead of
-      the `FM_WATCH_PATHS` env var. Gets UI exposure, validation,
-      live-reload.
+- [x] **Watch paths as a `base/config` `StringArrayOption`** under
+      `fileaccess/watchPaths`. Registered from `fileaccess.New()` so it
+      lands before `config.Start` writes `cfgInitialized`. Priority
+      chain in `resolveWatchPaths()`: config option (when non-empty),
+      then `FM_WATCH_PATHS` env var, then the hardcoded default. Live
+      reload (re-mark on config change) is a follow-up; for now the
+      paths are read once at `Start`. Verified 2026-06-12 by writing
+      `{"fileaccess":{"watchPaths":["/tmp/fm-conf-target"]}}` to
+      `<dataDir>/config.json` and observing the daemon mark that path
+      (and not the default).
 - [ ] Delete `service/profile/endpoints/` IP/domain/country matchers +
       the intel.Entity / netutils / reference stubs once nothing in the
       tree depends on them (currently still referenced by the
