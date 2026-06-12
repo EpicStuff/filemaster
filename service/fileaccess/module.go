@@ -15,7 +15,8 @@ type FileAccess struct {
 	mgr      *mgr.Manager
 	instance instance
 
-	fan *fanotifyHandle
+	source  Source
+	handler Handler
 }
 
 // Manager returns the module manager.
@@ -23,14 +24,38 @@ func (fa *FileAccess) Manager() *mgr.Manager {
 	return fa.mgr
 }
 
-// Start starts the module.
+// Start starts the module: build the platform source and run it under a
+// worker. The phase-1 default handler logs and allows every event.
 func (fa *FileAccess) Start() error {
-	return fa.startFanotify()
+	src, err := newPlatformSource(fa.mgr)
+	if err != nil {
+		return err
+	}
+	fa.source = src
+
+	fa.mgr.Go("file-access source", func(w *mgr.WorkerCtx) error {
+		return fa.source.Run(w.Ctx(), fa.handler)
+	})
+	return nil
 }
 
-// Stop stops the module.
+// Stop stops the module by closing the source. The Run goroutine
+// unwinds via either ctx.Done (from the worker manager) or EBADF
+// (from the closed fd), whichever lands first.
 func (fa *FileAccess) Stop() error {
-	return fa.stopFanotify()
+	if fa.source == nil {
+		return nil
+	}
+	err := fa.source.Close()
+	fa.source = nil
+	return err
+}
+
+// SetHandler swaps the verdict handler. Intended for tests and for the
+// phase-3 wiring where the profile/prompt path takes over from allowAll.
+// Must be called before Start.
+func (fa *FileAccess) SetHandler(h Handler) {
+	fa.handler = h
 }
 
 var (
@@ -47,6 +72,7 @@ func New(instance instance) (*FileAccess, error) {
 	module = &FileAccess{
 		mgr:      m,
 		instance: instance,
+		handler:  allowAll,
 	}
 	return module, nil
 }

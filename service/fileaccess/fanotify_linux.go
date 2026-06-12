@@ -3,33 +3,37 @@
 package fileaccess
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
-
-	"github.com/safing/portmaster/service/mgr"
 )
 
-// Skip events from our own PID. fanotify perm events block the caller
-// until we respond, so an open inside the daemon's own handler path
-// would deadlock the daemon against itself.
-var ownPID = int32(os.Getpid())
-
-// Phase-1 scaffold: hard-coded watch path, auto-allow every perm event,
-// log {pid, exe, path}. No rules, no prompts, no profile lookup.
+// Phase-1 watch scope: a single hard-coded directory plus its immediate
+// children. Replaced with a real per-app config when phase 2/3 lands.
 const watchPath = "/tmp/filemaster-test"
 
-type fanotifyHandle struct {
-	fd int
+// fanotifySource is a Linux fanotify-backed Source. One fd per source;
+// Run reads events from it, Close releases it. Construction does both
+// fanotify_init and fanotify_mark so errors surface to module startup.
+type fanotifySource struct {
+	log    logger
+	fd     int
+	ownPID int32
 }
 
-func (fa *FileAccess) startFanotify() error {
-	// Make sure the watch path exists or FanotifyMark returns ENOENT.
-	if err := os.MkdirAll(watchPath, 0o755); err != nil {
-		return fmt.Errorf("create watch dir %s: %w", watchPath, err)
+// newPlatformSource returns the Source implementation for this OS.
+// On Linux this is the fanotify-backed one.
+func newPlatformSource(log logger) (Source, error) {
+	return newFanotifySource(watchPath, log)
+}
+
+func newFanotifySource(path string, log logger) (*fanotifySource, error) {
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return nil, fmt.Errorf("create watch dir %s: %w", path, err)
 	}
 
 	fd, err := unix.FanotifyInit(
@@ -38,51 +42,44 @@ func (fa *FileAccess) startFanotify() error {
 	)
 	if err != nil {
 		if errors.Is(err, unix.EPERM) {
-			return fmt.Errorf("fanotify_init needs CAP_SYS_ADMIN (run as root): %w", err)
+			return nil, fmt.Errorf("fanotify_init needs CAP_SYS_ADMIN in the init user namespace: %w", err)
 		}
-		return fmt.Errorf("fanotify_init: %w", err)
+		return nil, fmt.Errorf("fanotify_init: %w", err)
 	}
 
-	// Inode-scoped mark on the directory itself + FAN_EVENT_ON_CHILD so
-	// opens of immediate children come through too. Do NOT use
-	// FAN_MARK_MOUNT here -- that marks the entire mount containing the
-	// path, which on the root filesystem means every open on the system
-	// gets routed to this daemon and the kernel will freeze every caller
-	// waiting for verdicts.
+	// Inode-scoped mark + FAN_EVENT_ON_CHILD. Do NOT use FAN_MARK_MOUNT
+	// here: that marks the entire mount containing the path, which on a
+	// root-fs watch dir routes every system open to this daemon and
+	// freezes the host when verdicts can't keep up.
 	if err := unix.FanotifyMark(
 		fd,
 		unix.FAN_MARK_ADD,
 		unix.FAN_OPEN_PERM|unix.FAN_EVENT_ON_CHILD,
 		unix.AT_FDCWD,
-		watchPath,
+		path,
 	); err != nil {
 		_ = unix.Close(fd)
-		return fmt.Errorf("fanotify_mark %s: %w", watchPath, err)
+		return nil, fmt.Errorf("fanotify_mark %s: %w", path, err)
 	}
 
-	fa.fan = &fanotifyHandle{fd: fd}
-	fa.mgr.Info("fanotify started", "path", watchPath, "fd", fd)
+	log.Info("fanotify source ready", "path", path, "fd", fd)
 
-	fa.mgr.Go("fanotify event loop", fa.runEventLoop)
-	return nil
+	return &fanotifySource{
+		log:    log,
+		fd:     fd,
+		ownPID: int32(os.Getpid()),
+	}, nil
 }
 
-func (fa *FileAccess) stopFanotify() error {
-	if fa.fan == nil {
-		return nil
-	}
-	err := unix.Close(fa.fan.fd)
-	fa.fan = nil
-	return err
-}
-
-func (fa *FileAccess) runEventLoop(w *mgr.WorkerCtx) error {
+// Run reads events from the fanotify fd until ctx is cancelled or the fd
+// is closed, calling handler.Decide for each perm event.
+func (s *fanotifySource) Run(ctx context.Context, h Handler) error {
 	buf := make([]byte, 4096)
-	pollFds := []unix.PollFd{{Fd: int32(fa.fan.fd), Events: unix.POLLIN}}
+	pollFds := []unix.PollFd{{Fd: int32(s.fd), Events: unix.POLLIN}}
 
 	for {
 		select {
-		case <-w.Done():
+		case <-ctx.Done():
 			return nil
 		default:
 		}
@@ -99,13 +96,13 @@ func (fa *FileAccess) runEventLoop(w *mgr.WorkerCtx) error {
 			continue
 		}
 
-		read, err := unix.Read(fa.fan.fd, buf)
+		read, err := unix.Read(s.fd, buf)
 		if err != nil {
 			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) {
 				continue
 			}
 			if errors.Is(err, unix.EBADF) {
-				// fd closed by Stop().
+				// fd closed by Close().
 				return nil
 			}
 			return fmt.Errorf("read: %w", err)
@@ -114,11 +111,17 @@ func (fa *FileAccess) runEventLoop(w *mgr.WorkerCtx) error {
 			continue
 		}
 
-		fa.handleEvents(w, buf[:read])
+		s.handleEvents(h, buf[:read])
 	}
 }
 
-func (fa *FileAccess) handleEvents(w *mgr.WorkerCtx, buf []byte) {
+// Close releases the fanotify fd. Safe to call from any goroutine; the
+// blocking Read in Run will unwind with EBADF.
+func (s *fanotifySource) Close() error {
+	return unix.Close(s.fd)
+}
+
+func (s *fanotifySource) handleEvents(h Handler, buf []byte) {
 	metaLen := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
 	for len(buf) >= metaLen {
 		// Copy the struct out of the buffer so we can safely reslice.
@@ -127,14 +130,14 @@ func (fa *FileAccess) handleEvents(w *mgr.WorkerCtx, buf []byte) {
 		if evLen < metaLen || evLen > len(buf) {
 			return
 		}
-		fa.handleEvent(w, &meta)
+		s.handleEvent(h, &meta)
 		buf = buf[evLen:]
 	}
 }
 
-func (fa *FileAccess) handleEvent(w *mgr.WorkerCtx, meta *unix.FanotifyEventMetadata) {
+func (s *fanotifySource) handleEvent(h Handler, meta *unix.FanotifyEventMetadata) {
 	if meta.Vers != unix.FANOTIFY_METADATA_VERSION {
-		w.Warn("fanotify metadata version mismatch",
+		s.log.Warn("fanotify metadata version mismatch",
 			"got", meta.Vers,
 			"want", unix.FANOTIFY_METADATA_VERSION)
 		return
@@ -146,40 +149,57 @@ func (fa *FileAccess) handleEvent(w *mgr.WorkerCtx, meta *unix.FanotifyEventMeta
 	}
 	defer func() { _ = unix.Close(int(meta.Fd)) }()
 
-	// Drop self-events to avoid deadlocking the daemon against itself.
-	if meta.Pid == ownPID {
-		if meta.Mask&unix.FAN_ALL_PERM_EVENTS != 0 {
-			resp := unix.FanotifyResponse{Fd: meta.Fd, Response: unix.FAN_ALLOW}
-			respBytes := unsafe.Slice((*byte)(unsafe.Pointer(&resp)), unsafe.Sizeof(resp))
-			_, _ = unix.Write(fa.fan.fd, respBytes)
+	isPerm := meta.Mask&unix.FAN_ALL_PERM_EVENTS != 0
+
+	// Drop self-events to avoid deadlocking the daemon against itself
+	// (an open inside Decide blocking on a verdict from Decide).
+	if meta.Pid == s.ownPID {
+		if isPerm {
+			s.respond(meta.Fd, VerdictAllow)
 		}
 		return
 	}
 
-	path, _ := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", meta.Fd))
-	exe, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", meta.Pid))
+	event := FileEvent{
+		PID:  meta.Pid,
+		Exe:  readlinkSilent(fmt.Sprintf("/proc/%d/exe", meta.Pid)),
+		Path: readlinkSilent(fmt.Sprintf("/proc/self/fd/%d", meta.Fd)),
+		Op:   OpOpen,
+	}
 
-	isPerm := meta.Mask&unix.FAN_ALL_PERM_EVENTS != 0
+	verdict := VerdictAllow
+	if isPerm {
+		verdict = h.Decide(event)
+	}
 
-	w.Info("fanotify event",
-		"pid", meta.Pid,
-		"exe", exe,
-		"path", path,
-		"mask", fmt.Sprintf("%#x", meta.Mask),
+	s.log.Info("fanotify event",
+		"pid", event.PID,
+		"exe", event.Exe,
+		"path", event.Path,
+		"op", event.Op,
 		"perm", isPerm,
+		"verdict", verdict,
 	)
 
-	if !isPerm {
-		return
+	if isPerm {
+		s.respond(meta.Fd, verdict)
 	}
+}
 
-	// Auto-allow for now. Kernel blocks the syscall until we write this back.
-	resp := unix.FanotifyResponse{
-		Fd:       meta.Fd,
-		Response: unix.FAN_ALLOW,
+func (s *fanotifySource) respond(eventFd int32, v Verdict) {
+	resp := unix.FanotifyResponse{Fd: eventFd}
+	if v == VerdictAllow {
+		resp.Response = unix.FAN_ALLOW
+	} else {
+		resp.Response = unix.FAN_DENY
 	}
 	respBytes := unsafe.Slice((*byte)(unsafe.Pointer(&resp)), unsafe.Sizeof(resp))
-	if _, err := unix.Write(fa.fan.fd, respBytes); err != nil {
-		w.Error("fanotify response write failed", "err", err)
+	if _, err := unix.Write(s.fd, respBytes); err != nil {
+		s.log.Error("fanotify response write failed", "err", err, "verdict", v)
 	}
+}
+
+func readlinkSilent(p string) string {
+	target, _ := os.Readlink(p)
+	return target
 }
