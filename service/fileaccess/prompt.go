@@ -55,6 +55,10 @@ type PromptHandler struct {
 	// events where the exe couldn't be resolved.
 	rules map[string]*PathRules
 
+	// persistPath, if non-empty, is the file rules are saved to on
+	// every appendRule call. Set via SetPersistPath.
+	persistPath string
+
 	// promptID counter so concurrent prompts have distinct notification IDs.
 	promptID atomic.Uint64
 }
@@ -118,7 +122,6 @@ func (h *PromptHandler) lookup(exe, path string) (Verdict, bool) {
 
 func (h *PromptHandler) appendRule(exe, pattern string, v Verdict) {
 	h.rulesMu.Lock()
-	defer h.rulesMu.Unlock()
 	rs, ok := h.rules[exe]
 	if !ok {
 		// Seed from the initial template.
@@ -129,6 +132,16 @@ func (h *PromptHandler) appendRule(exe, pattern string, v Verdict) {
 		h.rules[exe] = rs
 	}
 	rs.Rules = append(rs.Rules, PathRule{Pattern: pattern, Verdict: v})
+	persistPath := h.persistPath
+	h.rulesMu.Unlock()
+
+	if persistPath != "" {
+		// Save errors are non-fatal: log somewhere visible eventually,
+		// but for now don't trip the syscall on a transient disk issue.
+		// The in-memory rule is still applied this run; we just lose it
+		// across a restart.
+		_ = h.Save(persistPath)
+	}
 }
 
 func (h *PromptHandler) apply(e FileEvent, action string) Verdict {

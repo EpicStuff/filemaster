@@ -42,7 +42,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "new:", err)
 		os.Exit(1)
 	}
-	fa.SetHandler(fileaccess.NewPromptHandler(scriptedPrompter{}, nil, 5*time.Second))
+	ph := fileaccess.NewPromptHandler(scriptedPrompter{}, nil, 5*time.Second)
+
+	// Optional persistence: if FM_RULES_PATH is set, rules survive
+	// restarts. Useful for hand-running the demo twice to see the
+	// second invocation hit persisted rules instead of re-prompting.
+	if rulesPath := os.Getenv("FM_RULES_PATH"); rulesPath != "" {
+		if err := ph.SetPersistPath(rulesPath); err != nil {
+			fmt.Fprintln(os.Stderr, "load rules:", err)
+			os.Exit(1)
+		}
+		fmt.Println("persisting rules to", rulesPath)
+	}
+
+	fa.SetHandler(ph)
 
 	if err := fa.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "start:", err)

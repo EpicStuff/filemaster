@@ -75,9 +75,15 @@ auto-allow that path for `/usr/bin/cat`. Verified end-to-end:
 Still pending:
 - [ ] Map exe paths to profile fingerprints (`process.GetProcessWith-
       Profile`) so rules survive renames/upgrades of the same app.
-- [ ] Persist per-exe rule lists across restarts. Likely via the
-      profile package's database once the storage shape is decided in
-      phase 2.
+- [x] **Persistence:** per-exe rule lists survive daemon restart via a
+      JSON file at `<dataDir>/fileaccess-rules.json`. Save on every
+      appendRule (atomic temp+rename), load on Start (missing file is
+      not an error). Wired into `instance.go`; demo cmd supports
+      `FM_RULES_PATH` env var. Schema is versioned so future migrations
+      surface as load errors rather than silent corruption. Verified
+      2026-06-12 across two demo invocations against the same file:
+      second run's syscalls hit the persisted rules without any
+      prompter calls.
 
 ## Phase 3 — prompt loop end-to-end [logic done, live test pending]
 

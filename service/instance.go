@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
@@ -175,12 +176,18 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	}
 	// Wire the prompt-driven handler: rules first, then notifications
 	// prompt on miss, with allow/deny-always responses persisted as new
-	// rules. Default-deny on timeout (30s).
-	instance.fileAccess.SetHandler(fileaccess.NewPromptHandler(
+	// rules. Default-deny on timeout (30s). Rules persist to a JSON
+	// file under the data dir so they survive restarts.
+	promptHandler := fileaccess.NewPromptHandler(
 		&fileaccess.NotificationsPrompter{},
 		nil,
 		30*time.Second,
-	))
+	)
+	rulesPath := filepath.Join(svcCfg.DataDir, "fileaccess-rules.json")
+	if err := promptHandler.SetPersistPath(rulesPath); err != nil {
+		return instance, fmt.Errorf("load file-access rules from %s: %w", rulesPath, err)
+	}
+	instance.fileAccess.SetHandler(promptHandler)
 
 	// Add all modules to instance group.
 	instance.serviceGroup = mgr.NewGroup(
