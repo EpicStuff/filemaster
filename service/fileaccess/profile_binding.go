@@ -9,12 +9,38 @@ import (
 	"github.com/safing/portmaster/service/profile"
 )
 
+// getProcessWithProfile is the indirection point for tests. Production
+// code uses process.GetProcessWithProfile directly; the var lets tests
+// inject a fake without bringing the profile DB up. Reuse means
+// portmaster's auto-creation flow stays in-play whenever the var is
+// the default.
+var getProcessWithProfile = process.GetProcessWithProfile
+
 // NewProcessProfileLookup returns a ProfileLookup that maps a PID to
 // the matched portmaster Profile via process.GetProcessWithProfile.
 // LookupResult.Store reads and writes CfgOptionFileAccessRulesKey
 // ("fileaccess/rules") on the local Profile underneath the
 // LayeredProfile, which transparently carries the existing persistence
 // (profile database) and sync paths.
+//
+// Profile auto-creation for unknown processes is fully delegated to
+// portmaster's existing code:
+//
+//	process.GetProcessWithProfile
+//	  -> process.GetOrFindProcess   (reads /proc, builds *Process)
+//	  -> process.GetProfile
+//	    -> profile.GetLocalProfile  (with MatchingData from /proc)
+//	      -> findProfile            (search-by-fingerprint)
+//	      -> if no match: New(...)  (path-fingerprint default)
+//
+// A first-time-seen exe at /usr/bin/foo therefore lands a fresh local
+// profile named "Foo" with a single path-equals fingerprint pointing
+// at the exe. Verified live 2026-06-12 with cat against a watched
+// directory: a previously-unseen process produced
+// profiles/local/<scopedID> with Fingerprints = [{path, equals,
+// /usr/bin/cat}] in the profile DB. We do NOT roll our own auto-
+// creation logic -- if portmaster's code path changes, our behavior
+// follows it.
 func NewProcessProfileLookup() ProfileLookup {
 	return &processProfileLookup{}
 }
@@ -35,7 +61,7 @@ type ruleCacheEntry struct {
 }
 
 func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupResult, error) {
-	p, err := process.GetProcessWithProfile(ctx, int(pid))
+	p, err := getProcessWithProfile(ctx, int(pid))
 	if err != nil {
 		return LookupResult{}, err
 	}

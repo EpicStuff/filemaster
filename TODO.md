@@ -141,6 +141,40 @@ Footgun captured during live test:
   events out from under the test or stall waiting on prompts the test
   isn't responding to.
 
+## Phase 3.5 — recursive watch + auto-profiles [DONE]
+
+Goal: subdir recursion on watched paths, and confirm portmaster's
+existing GetLocalProfile auto-creation actually fires for previously-
+unseen exes.
+
+- [x] **Subdirectory recursion.** fanotifySource walks each watch root
+      and adds a fanotify mark per directory in the tree (symlinks not
+      followed). The kernel's FAN_MARK_ADD is idempotent, so the live-
+      reload hook re-walks every requested root on each config commit
+      -- subdirs created since the last walk get marked, deleted ones
+      get their stale marks dropped (ENOENT on remove is treated as
+      success since the kernel implicitly drops marks for vanished
+      inodes). `roots map[string]map[string]struct{}` tracks per-root
+      mark sets so removing a root unmarks every subdir under it.
+      Verified live 2026-06-12 with `cat
+      /tmp/filemaster-test/nested/deeper/secret.txt` -- the daemon
+      logs the deep path and the kernel routes the open to the
+      verdict path.
+- [x] **Auto-profile-creation via portmaster.** Verified live
+      2026-06-12: with no profile in the DB for `/usr/bin/cat`,
+      accessing a watched file with cat caused portmaster's
+      GetLocalProfile to create a fresh local profile named "Cat"
+      with `Fingerprints=[{path, equals, /usr/bin/cat}]` and the
+      content-addressed ScopedID. The fileaccess package does NOT
+      have its own auto-create path -- our processProfileLookup
+      consumes whatever process.GetProcessWithProfile returns, and
+      that function already invokes portmaster's existing
+      auto-creation chain (see doc-comment on
+      NewProcessProfileLookup). A test
+      (TestProcessProfileLookupGoesThroughPortmasterHook) locks down
+      the indirection so a future change can't accidentally bypass
+      the portmaster path.
+
 ## Phase 4 — UI [DONE]
 
 Goal: existing Angular/Tauri shell renders file prompts instead of

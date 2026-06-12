@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"unsafe"
@@ -26,16 +28,27 @@ const envWatchPaths = "FM_WATCH_PATHS"
 // fanotifySource is a Linux fanotify-backed Source. One fd per source;
 // Run reads events from it, Close releases it. Construction does both
 // fanotify_init and fanotify_mark so errors surface to module startup.
+//
+// Each user-requested root expands to a fanotify mark per *existing*
+// subdirectory at SetWatchPaths time (subdirectory recursion). New
+// subdirs created after the most-recent SetWatchPaths aren't tracked
+// until the next config change re-walks the tree -- accepted limit
+// for now; using FAN_REPORT_FID would let us autotrack but is a
+// larger refactor.
 type fanotifySource struct {
 	log    logger
 	fd     int
 	ownPID int32
 
-	// marksMu guards marks AND markMask. fanotify_mark itself is safe
-	// to call concurrently, but we keep the in-memory set under a
+	// marksMu guards roots AND markMask. fanotify_mark itself is safe
+	// to call concurrently, but we keep the in-memory state under a
 	// lock so two SetWatchPaths racing produce a coherent end state.
-	marksMu  sync.Mutex
-	marks    map[string]struct{}
+	marksMu sync.Mutex
+	// roots maps each user-requested watch root to the set of paths
+	// the kernel currently has marks on (always includes the root +
+	// each subdirectory discovered by the walk). markRemove uses this
+	// to find exactly what to unmark when a root goes away.
+	roots    map[string]map[string]struct{}
 	markMask uint64
 }
 
@@ -135,7 +148,7 @@ func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
 		log:      log,
 		fd:       fd,
 		ownPID:   int32(os.Getpid()),
-		marks:    make(map[string]struct{}),
+		roots:    make(map[string]map[string]struct{}),
 		markMask: resolveMarkMask(),
 	}
 
@@ -180,11 +193,12 @@ func diffWatchPaths(current, want map[string]struct{}) (toAdd, toRemove []string
 	return toAdd, toRemove
 }
 
-// SetWatchPaths reconciles the current mark set with paths: marks new
-// entries, unmarks ones that are gone, leaves the rest alone. Errors
-// per-path are joined but the rest of the diff is still applied.
-// Also picks up perm-event mask changes (the InterceptReads toggle) by
-// re-marking surviving entries when the mask shifted.
+// SetWatchPaths reconciles the current mark set with paths: walks +
+// marks new roots (recursively), unmarks ones that are gone, leaves
+// roots that didn't change alone. Errors per-path are joined but the
+// rest of the diff is still applied. Also picks up perm-event mask
+// changes (the InterceptReads toggle) by re-marking the existing
+// subtree with the new mask.
 func (s *fanotifySource) SetWatchPaths(paths []string) error {
 	want := normalizeWatchPaths(paths)
 
@@ -197,63 +211,147 @@ func (s *fanotifySource) SetWatchPaths(paths []string) error {
 	maskChanged := newMask != s.markMask
 	oldMask := s.markMask
 
-	// If the mask changed, drop existing marks with the old mask
-	// before re-adding them with the new one. Kernel requires
-	// add/remove to use the same mask the mark was created with.
+	// Mask change: tear every existing mark down with the old mask,
+	// then let the add-pass below re-mark every requested root with
+	// the new mask. Kernel requires add/remove to use the same mask
+	// the mark was created with.
 	if maskChanged {
-		for p := range s.marks {
-			if err := unix.FanotifyMark(s.fd, unix.FAN_MARK_REMOVE, oldMask, unix.AT_FDCWD, p); err != nil {
-				errs = append(errs, fmt.Errorf("remask remove %s: %w", p, err))
+		for root, marked := range s.roots {
+			for p := range marked {
+				if err := unix.FanotifyMark(s.fd, unix.FAN_MARK_REMOVE, oldMask, unix.AT_FDCWD, p); err != nil {
+					errs = append(errs, fmt.Errorf("remask remove %s: %w", p, err))
+				}
 			}
+			// Wipe the per-root set so the add-pass walks fresh.
+			s.roots[root] = make(map[string]struct{})
 		}
 		s.markMask = newMask
-		s.marks = make(map[string]struct{}, len(want))
 	}
 
-	// Add new (or re-add all if mask changed) paths.
-	for p := range want {
-		if _, ok := s.marks[p]; ok {
-			continue
+	// Walk every requested root. The kernel's FAN_MARK_ADD is
+	// idempotent on already-marked inodes, so re-walking an unchanged
+	// root is cheap on the syscall side and lets us pick up subdirs
+	// created since the last reload. Dirs that vanished get their
+	// kernel mark dropped below.
+	for root := range want {
+		marked, err := s.walkAndMark(root)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("add %s: %w", root, err))
 		}
-		if err := s.markAdd(p); err != nil {
-			errs = append(errs, fmt.Errorf("add %s: %w", p, err))
-			continue
+		previous := s.roots[root]
+		if previous == nil {
+			s.roots[root] = make(map[string]struct{}, len(marked))
 		}
-		s.marks[p] = struct{}{}
-		if !maskChanged {
-			s.log.Info("fanotify mark added", "path", p)
+		// Drop marks for subdirs that disappeared since last walk.
+		// When a watched dir is deleted, the kernel implicitly drops
+		// the mark (marks are inode-keyed); a FAN_MARK_REMOVE by path
+		// for the gone dir returns ENOENT, which is the desired
+		// post-condition, so swallow it.
+		for p := range previous {
+			if _, kept := marked[p]; kept {
+				continue
+			}
+			if err := s.markRemove(p); err != nil && !errors.Is(err, unix.ENOENT) {
+				errs = append(errs, fmt.Errorf("stale %s: %w", p, err))
+			}
+			delete(s.roots[root], p)
+		}
+		// Adopt the freshly-walked set.
+		added := 0
+		for p := range marked {
+			if _, ok := s.roots[root][p]; !ok {
+				added++
+			}
+			s.roots[root][p] = struct{}{}
+		}
+		if !maskChanged && (previous == nil || added > 0) {
+			s.log.Info("fanotify root marked", "root", root, "subdirs", len(marked), "newly_added", added)
 		}
 	}
 	if maskChanged {
-		s.log.Info("fanotify mask updated", "mask", fmt.Sprintf("0x%x", newMask), "paths", len(s.marks))
+		var total int
+		for _, m := range s.roots {
+			total += len(m)
+		}
+		s.log.Info("fanotify mask updated", "mask", fmt.Sprintf("0x%x", newMask), "marks", total)
 	}
 
-	// Remove gone paths.
-	for p := range s.marks {
-		if _, keep := want[p]; keep {
+	// Remove roots that are no longer wanted.
+	for root, marked := range s.roots {
+		if _, keep := want[root]; keep {
 			continue
 		}
-		if err := s.markRemove(p); err != nil {
-			// Still drop from the map: if the path is gone (e.g. the
-			// dir was deleted) the kernel mark went with it, and
-			// retrying every reload would be noise.
-			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
+		for p := range marked {
+			if err := s.markRemove(p); err != nil && !errors.Is(err, unix.ENOENT) {
+				// ENOENT means the kernel already dropped the mark
+				// when the dir disappeared (marks are inode-keyed);
+				// the post-condition is what we wanted, so swallow.
+				// Other errors are surfaced and the per-root entry
+				// is still dropped -- retrying every reload would be
+				// noise.
+				errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
+			}
 		}
-		delete(s.marks, p)
-		s.log.Info("fanotify mark removed", "path", p)
+		delete(s.roots, root)
+		s.log.Info("fanotify root unmarked", "root", root, "subdirs", len(marked))
 	}
 	return errors.Join(errs...)
 }
 
-func (s *fanotifySource) markAdd(path string) error {
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return fmt.Errorf("create watch dir: %w", err)
+// walkAndMark walks root recursively and adds a fanotify mark per
+// existing subdirectory (including root itself). Symlinks aren't
+// followed (filepath.WalkDir behavior) so we can't accidentally walk
+// out of the tree. Per-path mark errors are joined; the returned set
+// holds exactly the paths the kernel accepted.
+func (s *fanotifySource) walkAndMark(root string) (map[string]struct{}, error) {
+	return s.walkAndMarkVia(root, s.markOne)
+}
+
+// walkAndMarkVia is the test-hookable inner walker -- the production
+// path passes s.markOne; tests can pass a recording stub so the walk
+// semantics can be verified without a live fanotify fd.
+func (s *fanotifySource) walkAndMarkVia(root string, mark func(string) error) (map[string]struct{}, error) {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("create watch dir: %w", err)
 	}
-	// Inode-scoped mark + FAN_EVENT_ON_CHILD. Do NOT use
-	// FAN_MARK_MOUNT here: that marks the entire mount containing
-	// the path, which on a root-fs watch dir routes every system
-	// open to this daemon and freezes the host when verdicts can't
-	// keep up.
+
+	marked := make(map[string]struct{})
+	var errs []error
+
+	walkErr := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			// Permission denied / disappeared underneath us. Record
+			// and keep walking siblings -- a single unreadable subtree
+			// shouldn't void the whole root.
+			errs = append(errs, walkErr)
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if err := mark(p); err != nil {
+			errs = append(errs, fmt.Errorf("mark %s: %w", p, err))
+			return nil
+		}
+		marked[p] = struct{}{}
+		return nil
+	})
+	if walkErr != nil {
+		errs = append(errs, walkErr)
+	}
+	return marked, errors.Join(errs...)
+}
+
+// markOne adds a single fanotify mark with the current mask. Inode-
+// scoped + FAN_EVENT_ON_CHILD on every subdir means we see opens of
+// files in any nested directory. Do NOT use FAN_MARK_MOUNT here: that
+// marks the entire mount containing the path, which on a root-fs
+// watch dir routes every system open to this daemon and freezes the
+// host when verdicts can't keep up.
+func (s *fanotifySource) markOne(path string) error {
 	return unix.FanotifyMark(
 		s.fd,
 		unix.FAN_MARK_ADD,
