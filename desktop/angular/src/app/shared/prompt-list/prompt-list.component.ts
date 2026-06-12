@@ -56,13 +56,13 @@ export class PromptListComponent implements OnInit, OnDestroy {
 
 	ngOnInit() {
 		// filter the stream of all notifications to only emit
-		// file-access prompts (fileaccess:open prefix).
+		// file-access prompts (fileaccess:<op> prefix).
 		const prompts$: Observable<FileAccessPrompt[]> = this.notifService
 			.new$
 			.pipe(
 				map(notifs => notifs.filter(notif => {
 					return notif.Type === NotificationType.Prompt &&
-						notif.EventID.startsWith('fileaccess:open');
+						notif.EventID.startsWith('fileaccess:');
 				})),
 			);
 

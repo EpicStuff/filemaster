@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -29,6 +30,39 @@ type fanotifySource struct {
 	log    logger
 	fd     int
 	ownPID int32
+
+	// marksMu guards marks AND markMask. fanotify_mark itself is safe
+	// to call concurrently, but we keep the in-memory set under a
+	// lock so two SetWatchPaths racing produce a coherent end state.
+	marksMu  sync.Mutex
+	marks    map[string]struct{}
+	markMask uint64
+}
+
+// resolveMarkMask builds the perm-event mask. OPEN_PERM and
+// OPEN_EXEC_PERM are always on; ACCESS_PERM is gated behind the
+// InterceptReads config option (off by default because it fires per
+// read() syscall and can be very chatty).
+func resolveMarkMask() uint64 {
+	mask := uint64(unix.FAN_OPEN_PERM | unix.FAN_OPEN_EXEC_PERM | unix.FAN_EVENT_ON_CHILD)
+	if cfgOptionInterceptReads != nil && cfgOptionInterceptReads() {
+		mask |= uint64(unix.FAN_ACCESS_PERM)
+	}
+	return mask
+}
+
+// opFromMask decodes a perm-event mask into the matching FileOp,
+// most-specific first. The kernel only ever sets one perm-event bit
+// per event, but a stray combination still maps deterministically.
+func opFromMask(mask uint64) FileOp {
+	switch {
+	case mask&unix.FAN_OPEN_EXEC_PERM != 0:
+		return OpExec
+	case mask&unix.FAN_ACCESS_PERM != 0:
+		return OpRead
+	default:
+		return OpOpen
+	}
 }
 
 // newPlatformSource returns the Source implementation for this OS.
@@ -97,36 +131,146 @@ func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
 		return nil, fmt.Errorf("fanotify_init: %w", err)
 	}
 
-	for _, path := range paths {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			_ = unix.Close(fd)
-			return nil, fmt.Errorf("create watch dir %s: %w", path, err)
-		}
+	s := &fanotifySource{
+		log:      log,
+		fd:       fd,
+		ownPID:   int32(os.Getpid()),
+		marks:    make(map[string]struct{}),
+		markMask: resolveMarkMask(),
+	}
 
-		// Inode-scoped mark + FAN_EVENT_ON_CHILD. Do NOT use
-		// FAN_MARK_MOUNT here: that marks the entire mount containing
-		// the path, which on a root-fs watch dir routes every system
-		// open to this daemon and freezes the host when verdicts can't
-		// keep up.
-		if err := unix.FanotifyMark(
-			fd,
-			unix.FAN_MARK_ADD,
-			unix.FAN_OPEN_PERM|unix.FAN_EVENT_ON_CHILD,
-			unix.AT_FDCWD,
-			path,
-		); err != nil {
-			_ = unix.Close(fd)
-			return nil, fmt.Errorf("fanotify_mark %s: %w", path, err)
-		}
+	if err := s.SetWatchPaths(paths); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
 	}
 
 	log.Info("fanotify source ready", "paths", paths, "fd", fd)
+	return s, nil
+}
 
-	return &fanotifySource{
-		log:    log,
-		fd:     fd,
-		ownPID: int32(os.Getpid()),
-	}, nil
+// normalizeWatchPaths trims whitespace and drops empty entries from a
+// raw path list, returning a deduplicated set. Pure so tests can pin
+// the diff semantics without touching the kernel.
+func normalizeWatchPaths(paths []string) map[string]struct{} {
+	want := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		want[p] = struct{}{}
+	}
+	return want
+}
+
+// diffWatchPaths returns the (add, remove) deltas needed to bring
+// current up to want. Pure; tests cover the corner cases (no-op,
+// overlap, full swap).
+func diffWatchPaths(current, want map[string]struct{}) (toAdd, toRemove []string) {
+	for p := range want {
+		if _, ok := current[p]; !ok {
+			toAdd = append(toAdd, p)
+		}
+	}
+	for p := range current {
+		if _, ok := want[p]; !ok {
+			toRemove = append(toRemove, p)
+		}
+	}
+	return toAdd, toRemove
+}
+
+// SetWatchPaths reconciles the current mark set with paths: marks new
+// entries, unmarks ones that are gone, leaves the rest alone. Errors
+// per-path are joined but the rest of the diff is still applied.
+// Also picks up perm-event mask changes (the InterceptReads toggle) by
+// re-marking surviving entries when the mask shifted.
+func (s *fanotifySource) SetWatchPaths(paths []string) error {
+	want := normalizeWatchPaths(paths)
+
+	s.marksMu.Lock()
+	defer s.marksMu.Unlock()
+
+	var errs []error
+
+	newMask := resolveMarkMask()
+	maskChanged := newMask != s.markMask
+	oldMask := s.markMask
+
+	// If the mask changed, drop existing marks with the old mask
+	// before re-adding them with the new one. Kernel requires
+	// add/remove to use the same mask the mark was created with.
+	if maskChanged {
+		for p := range s.marks {
+			if err := unix.FanotifyMark(s.fd, unix.FAN_MARK_REMOVE, oldMask, unix.AT_FDCWD, p); err != nil {
+				errs = append(errs, fmt.Errorf("remask remove %s: %w", p, err))
+			}
+		}
+		s.markMask = newMask
+		s.marks = make(map[string]struct{}, len(want))
+	}
+
+	// Add new (or re-add all if mask changed) paths.
+	for p := range want {
+		if _, ok := s.marks[p]; ok {
+			continue
+		}
+		if err := s.markAdd(p); err != nil {
+			errs = append(errs, fmt.Errorf("add %s: %w", p, err))
+			continue
+		}
+		s.marks[p] = struct{}{}
+		if !maskChanged {
+			s.log.Info("fanotify mark added", "path", p)
+		}
+	}
+	if maskChanged {
+		s.log.Info("fanotify mask updated", "mask", fmt.Sprintf("0x%x", newMask), "paths", len(s.marks))
+	}
+
+	// Remove gone paths.
+	for p := range s.marks {
+		if _, keep := want[p]; keep {
+			continue
+		}
+		if err := s.markRemove(p); err != nil {
+			// Still drop from the map: if the path is gone (e.g. the
+			// dir was deleted) the kernel mark went with it, and
+			// retrying every reload would be noise.
+			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
+		}
+		delete(s.marks, p)
+		s.log.Info("fanotify mark removed", "path", p)
+	}
+	return errors.Join(errs...)
+}
+
+func (s *fanotifySource) markAdd(path string) error {
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return fmt.Errorf("create watch dir: %w", err)
+	}
+	// Inode-scoped mark + FAN_EVENT_ON_CHILD. Do NOT use
+	// FAN_MARK_MOUNT here: that marks the entire mount containing
+	// the path, which on a root-fs watch dir routes every system
+	// open to this daemon and freezes the host when verdicts can't
+	// keep up.
+	return unix.FanotifyMark(
+		s.fd,
+		unix.FAN_MARK_ADD,
+		s.markMask,
+		unix.AT_FDCWD,
+		path,
+	)
+}
+
+func (s *fanotifySource) markRemove(path string) error {
+	return unix.FanotifyMark(
+		s.fd,
+		unix.FAN_MARK_REMOVE,
+		s.markMask,
+		unix.AT_FDCWD,
+		path,
+	)
 }
 
 // Run reads events from the fanotify fd until ctx is cancelled or the fd
@@ -207,7 +351,10 @@ func (s *fanotifySource) handleEvent(ctx context.Context, h Handler, meta *unix.
 	}
 	defer func() { _ = unix.Close(int(meta.Fd)) }()
 
-	isPerm := meta.Mask&unix.FAN_ALL_PERM_EVENTS != 0
+	// FAN_ALL_PERM_EVENTS in x/sys/unix is OPEN|ACCESS (0x30000) -- it
+	// predates OPEN_EXEC_PERM (0x40000), so check our own mask.
+	const allPerm = uint64(unix.FAN_OPEN_PERM | unix.FAN_ACCESS_PERM | unix.FAN_OPEN_EXEC_PERM)
+	isPerm := uint64(meta.Mask)&allPerm != 0
 
 	// Drop self-events to avoid deadlocking the daemon against itself
 	// (an open inside Decide blocking on a verdict from Decide).
@@ -226,7 +373,7 @@ func (s *fanotifySource) handleEvent(ctx context.Context, h Handler, meta *unix.
 	event := FileEvent{
 		PID:  meta.Pid,
 		Path: readlinkSilent(fmt.Sprintf("/proc/self/fd/%d", meta.Fd)),
-		Op:   OpOpen,
+		Op:   opFromMask(uint64(meta.Mask)),
 	}
 
 	verdict := VerdictAllow

@@ -36,7 +36,7 @@ export class PromptEntryPointComponent implements OnInit {
 			.new$
 			.pipe(
 				map(notifs => {
-					return notifs.filter(n => n.Type === NotificationType.Prompt && n.EventID.startsWith('fileaccess:open'))
+					return notifs.filter(n => n.Type === NotificationType.Prompt && n.EventID.startsWith('fileaccess:'))
 				}),
 				switchMap(notifications => {
 					// Group by profile when we have one, otherwise by the

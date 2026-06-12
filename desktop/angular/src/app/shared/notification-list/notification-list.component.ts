@@ -85,7 +85,7 @@ export class NotificationListComponent implements OnInit, OnDestroy {
       .pipe(
         // filter out any prompts as they are handled by a different widget.
         map(notifs => {
-          return notifs.filter(notif => !notif.SelectedActionID && !(notif.Type === NotificationType.Prompt && notif.EventID.startsWith("fileaccess:open")))
+          return notifs.filter(notif => !notif.SelectedActionID && !(notif.Type === NotificationType.Prompt && notif.EventID.startsWith("fileaccess:")))
         })
       )
       .subscribe(list => {

@@ -244,12 +244,33 @@ Still on the list:
       `fileaccess/watchPaths`. Registered from `fileaccess.New()` so it
       lands before `config.Start` writes `cfgInitialized`. Priority
       chain in `resolveWatchPaths()`: config option (when non-empty),
-      then `FM_WATCH_PATHS` env var, then the hardcoded default. Live
-      reload (re-mark on config change) is a follow-up; for now the
-      paths are read once at `Start`. Verified 2026-06-12 by writing
+      then `FM_WATCH_PATHS` env var, then the hardcoded default.
+      Verified 2026-06-12 by writing
       `{"fileaccess":{"watchPaths":["/tmp/fm-conf-target"]}}` to
       `<dataDir>/config.json` and observing the daemon mark that path
       (and not the default).
+- [x] **Live reload.** `Source.SetWatchPaths(paths)` is now part of
+      the interface (fanotify_linux maintains a path-set and diffs;
+      non-linux nopSource no-ops). `fileaccess.Start()` subscribes to
+      `EventConfigChange` and calls `SetWatchPaths(resolveWatchPaths())`
+      on every config commit, so edits to `fileaccess/watchPaths`
+      (and the new `fileaccess/interceptReads` toggle) take effect
+      without a daemon restart. Mask changes (toggle-reads) also
+      trigger a re-mark with the new mask.
+- [x] **Read/write/exec op distinction.** FileOp gains OpRead +
+      OpExec alongside OpOpen; fanotify_linux's mask now includes
+      FAN_OPEN_PERM + FAN_OPEN_EXEC_PERM by default, with
+      FAN_ACCESS_PERM gated behind the new
+      `fileaccess/interceptReads` BoolOption (off by default --
+      FAN_ACCESS_PERM fires per read() syscall and would storm the
+      prompt path on a chatty consumer). `opFromMask` decodes events
+      most-specific-first; the prompt message uses an op-appropriate
+      verb ("execute" / "read" / "open") and the EventID prefix
+      becomes `fileaccess:<op>:N` so the UI filter is now
+      `fileaccess:` (anything). A "write" op is intentionally absent:
+      fanotify perm events are fired before the open completes, so
+      the open-flag distinction can't be made without inspecting
+      userspace state racily.
 - [x] **Endpoints scaffolding deleted.** `service/profile/endpoints/`
       package gone. `service/intel/`, `service/network/` stubs gone.
       `service/profile/profile-layered.go` lost its MatchEndpoint /

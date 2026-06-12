@@ -19,3 +19,5 @@ func (s *nopSource) Run(ctx context.Context, h Handler) error {
 }
 
 func (s *nopSource) Close() error { return nil }
+
+func (s *nopSource) SetWatchPaths([]string) error { return nil }

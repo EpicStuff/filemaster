@@ -2,20 +2,35 @@ package fileaccess
 
 import "context"
 
-// FileOp is the kind of file access being requested.
+// FileOp is the kind of file access being requested. The fanotify
+// source decodes the perm-event mask into one of these; the Linux
+// kernel itself doesn't surface a "write" distinction at perm-event
+// time (the syscall hasn't completed yet, so we can't inspect open
+// flags on the new fd), so OpWrite is not currently emitted.
 type FileOp uint8
 
 const (
-	// OpOpen is the only op surfaced by the phase-1 fanotify source.
-	// Read/Write/Exec come later when we move to FAN_ACCESS_PERM and
-	// FAN_OPEN_EXEC_PERM.
+	// OpOpen is fired by FAN_OPEN_PERM -- any open() the kernel
+	// reports that isn't matched by a more-specific perm event.
 	OpOpen FileOp = iota
+	// OpRead is fired by FAN_ACCESS_PERM -- a read() against the
+	// watched file. Only enabled when the InterceptReads config
+	// option is on, because FAN_ACCESS_PERM fires per syscall and
+	// can be very chatty.
+	OpRead
+	// OpExec is fired by FAN_OPEN_EXEC_PERM -- the kernel opening
+	// a file for execve(). Always enabled.
+	OpExec
 )
 
 func (op FileOp) String() string {
 	switch op {
 	case OpOpen:
 		return "open"
+	case OpRead:
+		return "read"
+	case OpExec:
+		return "exec"
 	default:
 		return "unknown"
 	}

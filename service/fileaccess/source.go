@@ -10,6 +10,13 @@ import "context"
 type Source interface {
 	Run(ctx context.Context, h Handler) error
 	Close() error
+
+	// SetWatchPaths reconciles the current mark set with paths: marks
+	// new entries, unmarks ones that are gone, leaves the rest alone.
+	// Safe to call concurrently with Run. The platform may return an
+	// error for an individual path (e.g. unmarkable mount); per-path
+	// errors are wrapped and joined so the caller can log them all.
+	SetWatchPaths(paths []string) error
 }
 
 // logger is the small subset of mgr.Manager / mgr.WorkerCtx that sources

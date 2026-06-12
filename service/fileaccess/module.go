@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"github.com/safing/portmaster/base/config"
 	"github.com/safing/portmaster/service/mgr"
 )
 
@@ -37,7 +38,33 @@ func (fa *FileAccess) Start() error {
 	fa.mgr.Go("file-access source", func(w *mgr.WorkerCtx) error {
 		return fa.source.Run(w.Ctx(), fa.handler)
 	})
+
+	// Subscribe to live config changes so updates to
+	// fileaccess/watchPaths re-mark without a restart. The config
+	// module fires EventConfigChange after every successful set.
+	if cfg, ok := fa.instance.(configAccessor); ok {
+		cfg.Config().EventConfigChange.AddCallback(
+			"fileaccess watchPaths reload",
+			func(_ *mgr.WorkerCtx, _ struct{}) (bool, error) {
+				if fa.source == nil {
+					return false, nil
+				}
+				paths := resolveWatchPaths()
+				if err := fa.source.SetWatchPaths(paths); err != nil {
+					fa.mgr.Warn("fileaccess: live reload had errors", "err", err)
+				}
+				return false, nil
+			},
+		)
+	}
 	return nil
+}
+
+// configAccessor is the slice of the instance we need to subscribe to
+// config-change events. Kept local so the module's instance field can
+// stay an empty interface.
+type configAccessor interface {
+	Config() *config.Config
 }
 
 // Stop stops the module by closing the source. The Run goroutine

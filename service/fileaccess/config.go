@@ -10,9 +10,22 @@ import (
 // initializes; it just has no marks to issue).
 const CfgOptionWatchPathsKey = "fileaccess/watchPaths"
 
-const cfgOptionWatchPathsOrder = 10
+// CfgOptionInterceptReadsKey toggles FAN_ACCESS_PERM in the fanotify
+// mask. Off by default: read events fire per read() syscall and a
+// chatty consumer (cat, grep) can produce thousands of prompts before
+// a rule is in place. Turn on when you specifically want read-vs-open
+// rule granularity.
+const CfgOptionInterceptReadsKey = "fileaccess/interceptReads"
 
-var cfgOptionWatchPaths config.StringArrayOption
+const (
+	cfgOptionWatchPathsOrder     = 10
+	cfgOptionInterceptReadsOrder = 20
+)
+
+var (
+	cfgOptionWatchPaths     config.StringArrayOption
+	cfgOptionInterceptReads config.BoolOption
+)
 
 func registerConfig() error {
 	err := config.Register(&config.Option{
@@ -34,5 +47,22 @@ func registerConfig() error {
 		return err
 	}
 	cfgOptionWatchPaths = config.Concurrent.GetAsStringArray(CfgOptionWatchPathsKey, []string{})
+
+	err = config.Register(&config.Option{
+		Name:         "Intercept Read Syscalls",
+		Key:          CfgOptionInterceptReadsKey,
+		Description:  "Also intercept read() syscalls against watched files, not just open() and execve(). Off by default because FAN_ACCESS_PERM fires per read syscall and can be very chatty.",
+		OptType:      config.OptTypeBool,
+		DefaultValue: false,
+		Annotations: config.Annotations{
+			config.DisplayOrderAnnotation: cfgOptionInterceptReadsOrder,
+			config.CategoryAnnotation:     "File Access",
+		},
+	})
+	if err != nil {
+		return err
+	}
+	cfgOptionInterceptReads = config.Concurrent.GetAsBool(CfgOptionInterceptReadsKey, false)
+
 	return nil
 }

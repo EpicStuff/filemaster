@@ -48,9 +48,9 @@ type NotificationsPrompter struct {
 
 // Prompt implements Prompter.
 func (p *NotificationsPrompter) Prompt(ctx context.Context, e FileEvent, timeout time.Duration) (string, bool) {
-	nid := fmt.Sprintf("fileaccess:open:%d", p.id.Add(1))
+	nid := fmt.Sprintf("fileaccess:%s:%d", e.Op, p.id.Add(1))
 	title := "File access request"
-	msg := fmt.Sprintf("%s (pid %d) wants to open %s", displayExe(e.Exe), e.PID, e.Path)
+	msg := fmt.Sprintf("%s (pid %d) wants to %s %s", displayExe(e.Exe), e.PID, opVerb(e.Op), e.Path)
 
 	data := &FilePromptData{
 		Profile: FilePromptProfile{
@@ -98,4 +98,19 @@ func displayExe(exe string) string {
 		return "an unknown program"
 	}
 	return exe
+}
+
+// opVerb returns the user-facing verb for a FileOp ("open" / "read" /
+// "execute"). Kept separate from FileOp.String so the wire-format
+// strings (op=open, op=read, op=exec) stay stable for logs and the
+// EventID prefix.
+func opVerb(op FileOp) string {
+	switch op {
+	case OpRead:
+		return "read"
+	case OpExec:
+		return "execute"
+	default:
+		return "open"
+	}
 }

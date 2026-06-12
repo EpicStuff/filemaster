@@ -11,10 +11,12 @@ import (
 type fakeSource struct {
 	events []FileEvent
 
-	mu       sync.Mutex
-	decided  []decision
-	closeErr error
-	closed   chan struct{}
+	mu         sync.Mutex
+	decided    []decision
+	closeErr   error
+	closed     chan struct{}
+	pathsAsked [][]string
+	pathsErr   error
 }
 
 type decision struct {
@@ -58,6 +60,27 @@ func (s *fakeSource) Close() error {
 		close(s.closed)
 	}
 	return s.closeErr
+}
+
+// SetWatchPaths records the latest paths the caller asked for. The
+// fake source doesn't have marks; tests can read pathsAsked to verify
+// the module's live-reload hook delegated through.
+func (s *fakeSource) SetWatchPaths(paths []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pathsAsked = append(s.pathsAsked, append([]string(nil), paths...))
+	return s.pathsErr
+}
+
+// PathsAsked returns each SetWatchPaths call's path list, in order.
+func (s *fakeSource) PathsAsked() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][]string, len(s.pathsAsked))
+	for i, p := range s.pathsAsked {
+		out[i] = append([]string(nil), p...)
+	}
+	return out
 }
 
 func (s *fakeSource) Decisions() []decision {

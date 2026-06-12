@@ -123,7 +123,7 @@ export class NavigationComponent implements OnInit {
       .subscribe(notif => {
 
 
-        if (notif.some(n => n.Type === NotificationType.Prompt && n.EventID.startsWith("fileaccess:open"))) {
+        if (notif.some(n => n.Type === NotificationType.Prompt && n.EventID.startsWith("fileaccess:"))) {
           this.hasNewPrompts = true;
 
           if (this.integration instanceof TauriIntegrationService) {
@@ -137,7 +137,7 @@ export class NavigationComponent implements OnInit {
           }
         }
 
-        if (notif.some(n => !n.EventID.startsWith("fileaccess:open"))) {
+        if (notif.some(n => !n.EventID.startsWith("fileaccess:"))) {
           this.hasNewNotifications = true;
         } else {
           this.hasNewNotifications = false;
