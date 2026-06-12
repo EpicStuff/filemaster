@@ -23,6 +23,11 @@ verdict. Proves the kernel plumbing works before we wire anything else.
       daemon logs `{pid, exe, path}`, syscall proceeds. Verified
       2026-06-12 with bash + cat events. Smoke binary at
       `cmds/fanotify-smoke/`.
+- [x] Configurable watch paths via `FM_WATCH_PATHS` env var
+      (colon-separated). Defaults to `/tmp/filemaster-test` so the
+      existing demo/smoke binaries still work unchanged. Verified
+      multi-path: marks land on each path independently, and opens
+      outside any watched path correctly bypass the daemon.
 
 Lessons / footguns:
 - `FAN_MARK_MOUNT` marks the *entire mount*, not the path. On a root-

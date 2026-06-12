@@ -7,14 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
-// Phase-1 watch scope: a single hard-coded directory plus its immediate
-// children. Replaced with a real per-app config when phase 2/3 lands.
-const watchPath = "/tmp/filemaster-test"
+// defaultWatchPath is used when the env var is unset; mainly so the
+// demo / smoke binaries continue to work out of the box.
+const defaultWatchPath = "/tmp/filemaster-test"
+
+// envWatchPaths is the colon-separated list of directories the source
+// marks. Set by ops / demo scripts; the daemon's config option
+// supersedes this once we have one.
+const envWatchPaths = "FM_WATCH_PATHS"
 
 // fanotifySource is a Linux fanotify-backed Source. One fd per source;
 // Run reads events from it, Close releases it. Construction does both
@@ -26,14 +32,35 @@ type fanotifySource struct {
 }
 
 // newPlatformSource returns the Source implementation for this OS.
-// On Linux this is the fanotify-backed one.
+// On Linux this is the fanotify-backed one, watching whatever paths
+// are listed in FM_WATCH_PATHS (colon-separated) or the default if
+// unset.
 func newPlatformSource(log logger) (Source, error) {
-	return newFanotifySource(watchPath, log)
+	return newFanotifySource(watchPathsFromEnv(), log)
 }
 
-func newFanotifySource(path string, log logger) (*fanotifySource, error) {
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return nil, fmt.Errorf("create watch dir %s: %w", path, err)
+// watchPathsFromEnv parses FM_WATCH_PATHS or returns the single
+// default. Empty entries are dropped.
+func watchPathsFromEnv() []string {
+	raw := os.Getenv(envWatchPaths)
+	if raw == "" {
+		return []string{defaultWatchPath}
+	}
+	var out []string
+	for _, p := range strings.Split(raw, ":") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return []string{defaultWatchPath}
+	}
+	return out
+}
+
+func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("no watch paths configured")
 	}
 
 	fd, err := unix.FanotifyInit(
@@ -47,22 +74,30 @@ func newFanotifySource(path string, log logger) (*fanotifySource, error) {
 		return nil, fmt.Errorf("fanotify_init: %w", err)
 	}
 
-	// Inode-scoped mark + FAN_EVENT_ON_CHILD. Do NOT use FAN_MARK_MOUNT
-	// here: that marks the entire mount containing the path, which on a
-	// root-fs watch dir routes every system open to this daemon and
-	// freezes the host when verdicts can't keep up.
-	if err := unix.FanotifyMark(
-		fd,
-		unix.FAN_MARK_ADD,
-		unix.FAN_OPEN_PERM|unix.FAN_EVENT_ON_CHILD,
-		unix.AT_FDCWD,
-		path,
-	); err != nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("fanotify_mark %s: %w", path, err)
+	for _, path := range paths {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			_ = unix.Close(fd)
+			return nil, fmt.Errorf("create watch dir %s: %w", path, err)
+		}
+
+		// Inode-scoped mark + FAN_EVENT_ON_CHILD. Do NOT use
+		// FAN_MARK_MOUNT here: that marks the entire mount containing
+		// the path, which on a root-fs watch dir routes every system
+		// open to this daemon and freezes the host when verdicts can't
+		// keep up.
+		if err := unix.FanotifyMark(
+			fd,
+			unix.FAN_MARK_ADD,
+			unix.FAN_OPEN_PERM|unix.FAN_EVENT_ON_CHILD,
+			unix.AT_FDCWD,
+			path,
+		); err != nil {
+			_ = unix.Close(fd)
+			return nil, fmt.Errorf("fanotify_mark %s: %w", path, err)
+		}
 	}
 
-	log.Info("fanotify source ready", "path", path, "fd", fd)
+	log.Info("fanotify source ready", "paths", paths, "fd", fd)
 
 	return &fanotifySource{
 		log:    log,
