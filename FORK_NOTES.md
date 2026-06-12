@@ -61,25 +61,45 @@ As of 2026-06-11 the tree builds cleanly:
 - `go vet ./...` exits 0 with no warnings.
 - `go build -o pm-core ./cmds/portmaster-core/` produces a 26 MB binary.
 
-## Stubs we restored to keep network endpoint matchers compiling
+## Stubs restored to keep network endpoint matchers compiling [DELETED]
 
-These exist solely so the (now dead) IP/domain/country/ASN/scope matchers under
-`service/profile/endpoints/` still compile. They will be deleted in one sweep
-when file-flavored endpoints land.
+These were re-added when we kept the network endpoint matchers as dead
+scaffolding (the option-A decision). With the file-rule path now
+fully on its own track (PathRule + ProfileHandler + Profile config
+storage), the matchers and their stubs were deleted in one sweep on
+2026-06-12:
 
-- `service/intel/entity.go` — `Entity` struct with `IP`, `IPScope`, `Domain`,
-  `Port`, `Protocol`, `CNAME` fields and stub methods (`Init`, `DstPort`,
-  `GetDomain`, `GetASN`, `GetCountryInfo`, `CNAMECheckEnabled`,
-  `EnableCNAMECheck`, `EnableReverseResolving`, `ResolveSubDomainLists`,
-  `MatchLists`, `ListBlockReason`) that all return zero-values. Plus a
-  `CountryInfo` type with `Code`, `Name`, and a nested `Continent`.
-- `service/network/netutils/netutils.go` — `IPScope` type, the 8 scope
-  constants (`Undefined`, `Invalid`, `HostLocal`, `LinkLocal`, `SiteLocal`,
-  `Global`, `LocalMulticast`, `GlobalMulticast`), `IsValidFqdn`.
-- `service/network/reference/reference.go` — `GetProtocolName`,
-  `GetProtocolNumber`, `GetPortName`, `GetPortNumber`, `IsICMP` — used by the
-  endpoint rule parser to recognise `tcp`/`http`/`https` names. Stub returns
-  numeric strings and `false` for unknown names.
+- `service/profile/endpoints/` -- the whole package: endpoint.go,
+  endpoints.go, endpoint-{any,asn,continent,country,domain,ip,iprange,
+  lists,scopes}.go, annotations.go, reason.go. ~1100 LOC.
+- `service/intel/entity.go` -- the Entity / CountryInfo stub.
+- `service/network/netutils/netutils.go` -- the IPScope + IsValidFqdn stub.
+- `service/network/reference/reference.go` -- the protocol-number stub.
+- `service/profile/profile-layered.go` shrunk from 569 -> ~237 lines:
+  dropped MatchEndpoint, MatchServiceEndpoint, MatchSplitTunUsagePolicy,
+  MatchSPNUsagePolicy, MatchFilterLists, StackedTransitHubPolicies,
+  StackedExitHubPolicies, the 17 wrap{Bool,Int,String}Option fields
+  (DisableAutoPermit / BlockScope* / Filter* / UseSPN / etc.), and the
+  intel.Entity import.
+- `service/profile/profile.go` shrunk from 605 -> ~470 lines: dropped
+  the endpoints / serviceEndpoints / filterListsSet / filterListIDs /
+  spn* / splitTun fields, the parseConfig blocks that populated them,
+  and the GetEndpoints / GetServiceEndpoints / AddEndpoint /
+  AddServiceEndpoint methods. Renamed addEndpointEntry ->
+  addStringArrayEntry (generic over rule-list cfg keys).
+- `service/profile/config.go` rewritten from 967 -> ~95 lines: kept
+  only the DefaultAction option (still used by ProfileHandler) and the
+  FileAccessRules option. Dropped Block*, Filter*, History, SPN,
+  SplitTun, FilterLists, all related cfgOption* accessors, all
+  endpoints-package annotations / validation.
+- `service/profile/config-update.go` reduced to DefaultAction
+  propagation only.
+- `service/profile/special.go` cleaned: each special profile
+  (SystemResolver, Portmaster, PortmasterApp, PortmasterNotifier) keeps
+  only DefaultAction in its bootstrap config; the network-rule
+  overrides are gone.
+
+Net diff for the strip: ~2700 lines removed, ~70 added.
 
 ## More surgical strips (added since previous note)
 

@@ -169,35 +169,10 @@ func createSpecialProfile(profileID string, path string) *Profile {
 			Source:           SourceLocal,
 			PresentationPath: path,
 			Config: map[string]interface{}{
-				// Explicitly setting the default action to "permit" will improve the
-				// user experience for people who set the global default to "prompt".
-				// Resolved domain from the system resolver are checked again when
-				// attributed to a connection of a regular process. Otherwise, users
-				// would see two connection prompts for the same domain.
+				// Permit by default so the system resolver doesn't
+				// prompt on every file access (DNS resolver is rarely
+				// what users want to gate).
 				CfgOptionDefaultActionKey: DefaultActionPermitValue,
-				// Disable force blockers.
-				CfgOptionBlockScopeInternetKey: false,
-				CfgOptionBlockScopeLANKey:      false,
-				CfgOptionBlockScopeLocalKey:    false,
-				CfgOptionBlockP2PKey:           false,
-				CfgOptionBlockInboundKey:       false,
-				// Explicitly allow localhost and answers to multicast protocols that
-				// are commonly used by system resolvers.
-				// TODO: When the Portmaster gains the ability to attribute multicast
-				// responses to their requests, these rules can probably be removed
-				// again.
-				CfgOptionServiceEndpointsKey: []string{
-					"+ Localhost",    // Allow everything from localhost.
-					"+ LAN UDP/5353", // Allow inbound mDNS requests and multicast replies.
-					"+ LAN UDP/5355", // Allow inbound LLMNR requests and multicast replies.
-					"+ LAN UDP/1900", // Allow inbound SSDP requests and multicast replies.
-					"- *",            // Deny everything else.
-				},
-				// Explicitly disable all filter lists, as these will be checked later
-				// with the attributed connection. As this is the system resolver, this
-				// list can instead be used as a global enforcement of filter lists, if
-				// the system resolver is used. Users who want to
-				CfgOptionFilterListsKey: []string{},
 			},
 		})
 
@@ -207,26 +182,9 @@ func createSpecialProfile(profileID string, path string) *Profile {
 			Source:           SourceLocal,
 			PresentationPath: path,
 			Config: map[string]interface{}{
-				// In case anything slips through the internal self-allow, be sure to
-				// allow everything explicitly.
-				// Blocking connections here can lead to a very literal deadlock.
-				// This can currently happen, as fast-tracked connections are also
-				// reset in the OS integration and might show up in the connection
-				// handling if a packet in the other direction hits the firewall first.
-				CfgOptionDefaultActionKey:      DefaultActionPermitValue,
-				CfgOptionBlockScopeInternetKey: false,
-				CfgOptionBlockScopeLANKey:      false,
-				CfgOptionBlockScopeLocalKey:    false,
-				CfgOptionBlockP2PKey:           false,
-				CfgOptionBlockInboundKey:       false,
-				CfgOptionEndpointsKey: []string{
-					"+ *",
-				},
-				CfgOptionServiceEndpointsKey: []string{
-					"+ Localhost",
-					"+ LAN",
-					"- *",
-				},
+				// Self-process: permit everything to avoid the daemon
+				// blocking on its own opens during decision handling.
+				CfgOptionDefaultActionKey: DefaultActionPermitValue,
 			},
 			Internal: true,
 		})
@@ -237,22 +195,11 @@ func createSpecialProfile(profileID string, path string) *Profile {
 			Source:           SourceLocal,
 			PresentationPath: path,
 			Config: map[string]interface{}{
-				// Block all connections by default for the Portmaster UI profile,
-				// since the only required connections are to the Portmaster Core,
-				// which are fast-tracked.
-				//
-				// This ensures that any unexpected connections —
-				// possibly made by the internal WebView implementation —
-				// are blocked.
-				CfgOptionDefaultActionKey:      DefaultActionBlockValue,
-				CfgOptionBlockScopeInternetKey: false, // This is stronger than the rules, and thus must be false in order to access safing.io.
-				CfgOptionBlockScopeLANKey:      true,
-				CfgOptionBlockScopeLocalKey:    true,
-				CfgOptionBlockP2PKey:           true,
-				CfgOptionBlockInboundKey:       true,
-				CfgOptionEndpointsKey: []string{
-					"+ .safing.io",
-				},
+				// The UI process: tighten by default. File access
+				// prompts surface through the UI itself, so denying
+				// here lets us tighten the surface without breaking
+				// the prompt loop.
+				CfgOptionDefaultActionKey: DefaultActionBlockValue,
 			},
 			Internal: true,
 		})
@@ -263,15 +210,7 @@ func createSpecialProfile(profileID string, path string) *Profile {
 			Source:           SourceLocal,
 			PresentationPath: path,
 			Config: map[string]interface{}{
-				CfgOptionDefaultActionKey:      DefaultActionBlockValue,
-				CfgOptionBlockScopeInternetKey: false,
-				CfgOptionBlockScopeLANKey:      false,
-				CfgOptionBlockScopeLocalKey:    false,
-				CfgOptionBlockP2PKey:           false,
-				CfgOptionBlockInboundKey:       true,
-				CfgOptionEndpointsKey: []string{
-					"+ Localhost",
-				},
+				CfgOptionDefaultActionKey: DefaultActionBlockValue,
 			},
 			Internal: true,
 		})

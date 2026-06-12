@@ -16,7 +16,6 @@ import (
 	"github.com/safing/portmaster/base/log"
 	"github.com/safing/portmaster/base/utils"
 	"github.com/safing/portmaster/service/profile/binmeta"
-	"github.com/safing/portmaster/service/profile/endpoints"
 )
 
 // ProfileSource is the source of the profile.
@@ -113,17 +112,9 @@ type Profile struct { //nolint:maligned // not worth the effort
 	layeredProfile *LayeredProfile
 
 	// Interpreted Data
-	configPerspective   *config.Perspective
-	dataParsed          bool
-	defaultAction       uint8
-	endpoints           endpoints.Endpoints
-	serviceEndpoints    endpoints.Endpoints
-	filterListsSet      bool
-	filterListIDs       []string
-	spnUsagePolicy      endpoints.Endpoints
-	spnTransitHubPolicy endpoints.Endpoints
-	spnExitHubPolicy    endpoints.Endpoints
-	splitTunUsagePolicy endpoints.Endpoints
+	configPerspective *config.Perspective
+	dataParsed        bool
+	defaultAction     uint8
 
 	// Lifecycle Management
 	outdated   *abool.AtomicBool
@@ -171,65 +162,6 @@ func (profile *Profile) parseConfig() error {
 			profile.defaultAction = DefaultActionBlock
 		default:
 			lastErr = fmt.Errorf(`default action "%s" invalid`, action)
-		}
-	}
-
-	list, ok := profile.configPerspective.GetAsStringArray(CfgOptionEndpointsKey)
-	profile.endpoints = nil
-	if ok {
-		profile.endpoints, err = endpoints.ParseEndpoints(list)
-		if err != nil {
-			lastErr = err
-		}
-	}
-
-	list, ok = profile.configPerspective.GetAsStringArray(CfgOptionServiceEndpointsKey)
-	profile.serviceEndpoints = nil
-	if ok {
-		profile.serviceEndpoints, err = endpoints.ParseEndpoints(list)
-		if err != nil {
-			lastErr = err
-		}
-	}
-
-	// Block-list resolution removed in filemaster — `filterlists` package is gone.
-	profile.filterListsSet = false
-	profile.filterListIDs = nil
-	_, _ = profile.configPerspective.GetAsStringArray(CfgOptionFilterListsKey)
-
-	list, ok = profile.configPerspective.GetAsStringArray(CfgOptionSplitTunUsagePolicyKey)
-	profile.splitTunUsagePolicy = nil
-	if ok {
-		profile.splitTunUsagePolicy, err = endpoints.ParseEndpoints(list)
-		if err != nil {
-			lastErr = err
-		}
-	}
-
-	list, ok = profile.configPerspective.GetAsStringArray(CfgOptionSPNUsagePolicyKey)
-	profile.spnUsagePolicy = nil
-	if ok {
-		profile.spnUsagePolicy, err = endpoints.ParseEndpoints(list)
-		if err != nil {
-			lastErr = err
-		}
-	}
-
-	list, ok = profile.configPerspective.GetAsStringArray(CfgOptionTransitHubPolicyKey)
-	profile.spnTransitHubPolicy = nil
-	if ok {
-		profile.spnTransitHubPolicy, err = endpoints.ParseEndpoints(list)
-		if err != nil {
-			lastErr = err
-		}
-	}
-
-	list, ok = profile.configPerspective.GetAsStringArray(CfgOptionExitHubPolicyKey)
-	profile.spnExitHubPolicy = nil
-	if ok {
-		profile.spnExitHubPolicy, err = endpoints.ParseEndpoints(list)
-		if err != nil {
-			lastErr = err
 		}
 	}
 
@@ -340,28 +272,6 @@ func (profile *Profile) IsOutdated() bool {
 	return profile.outdated.IsSet()
 }
 
-// GetEndpoints returns the endpoint list of the profile. This functions
-// requires the profile to be read locked.
-func (profile *Profile) GetEndpoints() endpoints.Endpoints {
-	return profile.endpoints
-}
-
-// GetServiceEndpoints returns the service endpoint list of the profile. This
-// functions requires the profile to be read locked.
-func (profile *Profile) GetServiceEndpoints() endpoints.Endpoints {
-	return profile.serviceEndpoints
-}
-
-// AddEndpoint adds an endpoint to the endpoint list, saves the profile and reloads the configuration.
-func (profile *Profile) AddEndpoint(newEntry string) {
-	profile.addEndpointEntry(CfgOptionEndpointsKey, newEntry)
-}
-
-// AddServiceEndpoint adds a service endpoint to the endpoint list, saves the profile and reloads the configuration.
-func (profile *Profile) AddServiceEndpoint(newEntry string) {
-	profile.addEndpointEntry(CfgOptionServiceEndpointsKey, newEntry)
-}
-
 // GetFileAccessRules returns the per-profile file-access rule list as
 // raw strings; parsing into PathRules lives in service/fileaccess.
 // Requires the profile to be read-locked.
@@ -385,14 +295,16 @@ func (profile *Profile) DefaultAction() uint8 {
 
 // AddFileAccessRule appends an entry (e.g. "+ /tmp/foo" or "- /etc/shadow")
 // to the per-profile file-access rule list, saves the profile, and reloads
-// the configuration. Duplicate entries are dropped. Calls into the same
-// helper that powers AddEndpoint, so persistence + reload semantics are
-// identical to the network-rule path.
+// the configuration. Duplicate entries are dropped.
 func (profile *Profile) AddFileAccessRule(newEntry string) {
-	profile.addEndpointEntry(CfgOptionFileAccessRulesKey, newEntry)
+	profile.addStringArrayEntry(CfgOptionFileAccessRulesKey, newEntry)
 }
 
-func (profile *Profile) addEndpointEntry(cfgKey, newEntry string) {
+// addStringArrayEntry prepends an entry to a profile-stored StringArray
+// option, persisting + reparsing the profile. Duplicate entries with
+// the same first-token prefix as newEntry within the leading run are
+// dropped (cheap dedup that costs ~nothing for a list keyed by "+ "/"-").
+func (profile *Profile) addStringArrayEntry(cfgKey, newEntry string) {
 	changed := false
 
 	// When finished, save the profile.
@@ -403,7 +315,7 @@ func (profile *Profile) addEndpointEntry(cfgKey, newEntry string) {
 
 		err := profile.Save()
 		if err != nil {
-			log.Warningf("profile: failed to save profile %s after add an endpoint rule: %s", profile.ScopedID(), err)
+			log.Warningf("profile: failed to save profile %s after add rule: %s", profile.ScopedID(), err)
 		}
 	}()
 
@@ -411,40 +323,35 @@ func (profile *Profile) addEndpointEntry(cfgKey, newEntry string) {
 	profile.Lock()
 	defer profile.Unlock()
 
-	// Get the endpoint list configuration value and add the new entry.
-	endpointList, ok := profile.configPerspective.GetAsStringArray(cfgKey)
+	// Get the current list and add the new entry.
+	list, ok := profile.configPerspective.GetAsStringArray(cfgKey)
 	if ok {
-		// A list already exists, check for duplicates within the same prefix.
+		// A list already exists, check for duplicates within the leading
+		// same-prefix run.
 		newEntryPrefix := strings.Split(newEntry, " ")[0] + " "
-		for _, entry := range endpointList {
+		for _, entry := range list {
 			if !strings.HasPrefix(entry, newEntryPrefix) {
-				// We found an entry with a different prefix than the new entry.
-				// Beyond this entry we cannot possibly know if identical entries will
-				// match, so we will have to add the new entry no matter what the rest
-				// of the list has.
 				break
 			}
-
 			if entry == newEntry {
-				// An identical entry is already in the list, abort.
-				log.Debugf("profile: ignoring new endpoint rule for %s, as identical is already present: %s", profile, newEntry)
+				log.Debugf("profile: ignoring new rule for %s, identical already present: %s", profile, newEntry)
 				return
 			}
 		}
-		endpointList = append([]string{newEntry}, endpointList...)
+		list = append([]string{newEntry}, list...)
 	} else {
-		endpointList = []string{newEntry}
+		list = []string{newEntry}
 	}
 
 	// Save new value back to profile.
-	config.PutValueIntoHierarchicalConfig(profile.Config, cfgKey, endpointList)
+	config.PutValueIntoHierarchicalConfig(profile.Config, cfgKey, list)
 	changed = true
 
-	// Reload the profile manually in order to parse the newly added entry.
+	// Reload the profile manually so the newly added entry is parsed.
 	profile.dataParsed = false
 	err := profile.parseConfig()
 	if err != nil {
-		log.Errorf("profile: failed to parse %s config after adding endpoint: %s", profile, err)
+		log.Errorf("profile: failed to parse %s config after adding rule: %s", profile, err)
 	}
 }
 

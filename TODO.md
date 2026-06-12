@@ -215,8 +215,15 @@ Still on the list:
       `{"fileaccess":{"watchPaths":["/tmp/fm-conf-target"]}}` to
       `<dataDir>/config.json` and observing the daemon mark that path
       (and not the default).
-- [ ] Delete `service/profile/endpoints/` IP/domain/country matchers +
-      the intel.Entity / netutils / reference stubs once nothing in the
-      tree depends on them (currently still referenced by the
-      LayeredProfile network-rule getters). This is the largest hunk
-      of upstream code we carry but don't use.
+- [x] **Endpoints scaffolding deleted.** `service/profile/endpoints/`
+      package gone. `service/intel/`, `service/network/` stubs gone.
+      `service/profile/profile-layered.go` lost its MatchEndpoint /
+      MatchServiceEndpoint / MatchSplitTunUsagePolicy /
+      MatchSPNUsagePolicy / MatchFilterLists / StackedTransitHub /
+      StackedExitHub methods plus 17 wrap*Option fields. `Profile`
+      lost its endpoints / serviceEndpoints / splitTun* / spn* fields
+      and matching accessors. `Profile.AddFileAccessRule` now calls
+      the renamed-and-generalised `addStringArrayEntry`. Special
+      profiles keep only DefaultAction in their bootstrap config.
+      Total: ~2700 LOC removed for ~70 added. Daemon boots cleanly;
+      26 fileaccess tests still green.

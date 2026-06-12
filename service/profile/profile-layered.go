@@ -1,7 +1,6 @@
 package profile
 
 import (
-	"context"
 	"sync"
 	"sync/atomic"
 
@@ -9,8 +8,6 @@ import (
 	"github.com/safing/portmaster/base/database/record"
 	"github.com/safing/portmaster/base/log"
 	"github.com/safing/portmaster/base/runtime"
-	"github.com/safing/portmaster/service/intel"
-	"github.com/safing/portmaster/service/profile/endpoints"
 )
 
 // LayeredProfile combines multiple Profiles.
@@ -29,29 +26,10 @@ type LayeredProfile struct {
 
 	// These functions give layered access to configuration options and require
 	// the layered profile to be read locked.
-
-	// TODO(ppacher): we need JSON tags here so the layeredProfile can be exposed
-	// via the API. If we ever switch away from JSON to something else supported
-	// by DSD this WILL BREAK!
-
-	DisableAutoPermit   config.BoolOption   `json:"-"`
-	BlockScopeLocal     config.BoolOption   `json:"-"`
-	BlockScopeLAN       config.BoolOption   `json:"-"`
-	BlockScopeInternet  config.BoolOption   `json:"-"`
-	BlockP2P            config.BoolOption   `json:"-"`
-	BlockInbound        config.BoolOption   `json:"-"`
-	RemoveOutOfScopeDNS config.BoolOption   `json:"-"`
-	RemoveBlockedDNS    config.BoolOption   `json:"-"`
-	FilterSubDomains    config.BoolOption   `json:"-"`
-	FilterCNAMEs        config.BoolOption   `json:"-"`
-	PreventBypassing    config.BoolOption   `json:"-"`
-	DomainHeuristics    config.BoolOption   `json:"-"`
-	UseSPN              config.BoolOption   `json:"-"`
-	SPNRoutingAlgorithm config.StringOption `json:"-"`
-	EnableHistory       config.BoolOption   `json:"-"`
-	KeepHistory         config.IntOption    `json:"-"`
-	UseSplitTun         config.BoolOption   `json:"-"`
-	SplitTunInterface   config.StringOption `json:"-"`
+	//
+	// The network-flavored options (Block*/Filter*/UseSPN/etc.) were removed
+	// during the filemaster strip; only profile-wide settings that still make
+	// sense for the file-access prompt loop remain.
 }
 
 // NewLayeredProfile returns a new layered profile based on the given local profile.
@@ -66,79 +44,6 @@ func NewLayeredProfile(localProfile *Profile) *LayeredProfile {
 		RevisionCounter:    1,
 		securityLevel:      &securityLevelVal,
 	}
-
-	lp.DisableAutoPermit = lp.wrapBoolOption(
-		CfgOptionDisableAutoPermitKey,
-		cfgOptionDisableAutoPermit,
-	)
-	lp.BlockScopeLocal = lp.wrapBoolOption(
-		CfgOptionBlockScopeLocalKey,
-		cfgOptionBlockScopeLocal,
-	)
-	lp.BlockScopeLAN = lp.wrapBoolOption(
-		CfgOptionBlockScopeLANKey,
-		cfgOptionBlockScopeLAN,
-	)
-	lp.BlockScopeInternet = lp.wrapBoolOption(
-		CfgOptionBlockScopeInternetKey,
-		cfgOptionBlockScopeInternet,
-	)
-	lp.BlockP2P = lp.wrapBoolOption(
-		CfgOptionBlockP2PKey,
-		cfgOptionBlockP2P,
-	)
-	lp.BlockInbound = lp.wrapBoolOption(
-		CfgOptionBlockInboundKey,
-		cfgOptionBlockInbound,
-	)
-	lp.RemoveOutOfScopeDNS = lp.wrapBoolOption(
-		CfgOptionRemoveOutOfScopeDNSKey,
-		cfgOptionRemoveOutOfScopeDNS,
-	)
-	lp.RemoveBlockedDNS = lp.wrapBoolOption(
-		CfgOptionRemoveBlockedDNSKey,
-		cfgOptionRemoveBlockedDNS,
-	)
-	lp.FilterSubDomains = lp.wrapBoolOption(
-		CfgOptionFilterSubDomainsKey,
-		cfgOptionFilterSubDomains,
-	)
-	lp.FilterCNAMEs = lp.wrapBoolOption(
-		CfgOptionFilterCNAMEKey,
-		cfgOptionFilterCNAME,
-	)
-	lp.PreventBypassing = lp.wrapBoolOption(
-		CfgOptionPreventBypassingKey,
-		cfgOptionPreventBypassing,
-	)
-	lp.DomainHeuristics = lp.wrapBoolOption(
-		CfgOptionDomainHeuristicsKey,
-		cfgOptionDomainHeuristics,
-	)
-	lp.UseSplitTun = lp.wrapBoolOption(
-		CfgOptionSplitTunUseKey,
-		cfgOptionSplitTunUse,
-	)
-	lp.SplitTunInterface = lp.wrapStringOption(
-		CfgOptionSplitTunInterfaceKey,
-		cfgOptionSplitTunInterface,
-	)
-	lp.UseSPN = lp.wrapBoolOption(
-		CfgOptionUseSPNKey,
-		cfgOptionUseSPN,
-	)
-	lp.SPNRoutingAlgorithm = lp.wrapStringOption(
-		CfgOptionRoutingAlgorithmKey,
-		cfgOptionRoutingAlgorithm,
-	)
-	lp.EnableHistory = lp.wrapBoolOption(
-		CfgOptionEnableHistoryKey,
-		cfgOptionEnableHistory,
-	)
-	lp.KeepHistory = lp.wrapIntOption(
-		CfgOptionKeepHistoryKey,
-		cfgOptionKeepHistory,
-	)
 
 	lp.LayerIDs = append(lp.LayerIDs, localProfile.ScopedID())
 	lp.layers = append(lp.layers, localProfile)
@@ -325,203 +230,6 @@ func (lp *LayeredProfile) DefaultAction() uint8 {
 	return cfgDefaultAction
 }
 
-// MatchEndpoint checks if the given endpoint matches an entry in any of the profiles. This functions requires the layered profile to be read locked.
-func (lp *LayeredProfile) MatchEndpoint(ctx context.Context, entity *intel.Entity) (endpoints.EPResult, endpoints.Reason) {
-	for _, layer := range lp.layers {
-		if layer.endpoints.IsSet() {
-			result, reason := layer.endpoints.Match(ctx, entity)
-			if endpoints.IsDecision(result) {
-				return result, reason
-			}
-		}
-	}
-
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	return cfgEndpoints.Match(ctx, entity)
-}
-
-// MatchServiceEndpoint checks if the given endpoint of an inbound connection matches an entry in any of the profiles. This functions requires the layered profile to be read locked.
-func (lp *LayeredProfile) MatchServiceEndpoint(ctx context.Context, entity *intel.Entity) (endpoints.EPResult, endpoints.Reason) {
-	entity.EnableReverseResolving()
-
-	for _, layer := range lp.layers {
-		if layer.serviceEndpoints.IsSet() {
-			result, reason := layer.serviceEndpoints.Match(ctx, entity)
-			if endpoints.IsDecision(result) {
-				return result, reason
-			}
-		}
-	}
-
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	return cfgServiceEndpoints.Match(ctx, entity)
-}
-
-// MatchSplitTunUsagePolicy checks if the given endpoint matches an entry in any Split Tunnel usage policy in any of the profiles. This functions requires the layered profile to be read locked.
-func (lp *LayeredProfile) MatchSplitTunUsagePolicy(ctx context.Context, entity *intel.Entity) (endpoints.EPResult, endpoints.Reason) {
-	for _, layer := range lp.layers {
-		if layer.splitTunUsagePolicy.IsSet() {
-			result, reason := layer.splitTunUsagePolicy.Match(ctx, entity)
-			if endpoints.IsDecision(result) {
-				return result, reason
-			}
-		}
-	}
-
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	return cfgSplitTunUsagePolicy.Match(ctx, entity)
-}
-
-// MatchSPNUsagePolicy checks if the given endpoint matches an entry in any of the profiles. This functions requires the layered profile to be read locked.
-func (lp *LayeredProfile) MatchSPNUsagePolicy(ctx context.Context, entity *intel.Entity) (endpoints.EPResult, endpoints.Reason) {
-	for _, layer := range lp.layers {
-		if layer.spnUsagePolicy.IsSet() {
-			result, reason := layer.spnUsagePolicy.Match(ctx, entity)
-			if endpoints.IsDecision(result) {
-				return result, reason
-			}
-		}
-	}
-
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	return cfgSPNUsagePolicy.Match(ctx, entity)
-}
-
-// StackedTransitHubPolicies returns all transit hub policies of the layered profile, including the global one.
-func (lp *LayeredProfile) StackedTransitHubPolicies() []endpoints.Endpoints {
-	policies := make([]endpoints.Endpoints, 0, len(lp.layers)+3) // +1 for global policy, +2 for intel policies
-
-	for _, layer := range lp.layers {
-		if layer.spnTransitHubPolicy.IsSet() {
-			policies = append(policies, layer.spnTransitHubPolicy)
-		}
-	}
-
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	policies = append(policies, cfgSPNTransitHubPolicy)
-
-	return policies
-}
-
-// StackedExitHubPolicies returns all exit hub policies of the layered profile, including the global one.
-func (lp *LayeredProfile) StackedExitHubPolicies() []endpoints.Endpoints {
-	policies := make([]endpoints.Endpoints, 0, len(lp.layers)+3) // +1 for global policy, +2 for intel policies
-
-	for _, layer := range lp.layers {
-		if layer.spnExitHubPolicy.IsSet() {
-			policies = append(policies, layer.spnExitHubPolicy)
-		}
-	}
-
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	policies = append(policies, cfgSPNExitHubPolicy)
-
-	return policies
-}
-
-// MatchFilterLists matches the entity against the set of filter
-// lists. This functions requires the layered profile to be read locked.
-func (lp *LayeredProfile) MatchFilterLists(ctx context.Context, entity *intel.Entity) (endpoints.EPResult, endpoints.Reason) {
-	entity.ResolveSubDomainLists(ctx, lp.FilterSubDomains())
-	entity.EnableCNAMECheck(ctx, lp.FilterCNAMEs())
-
-	for _, layer := range lp.layers {
-		// Search for the first layer that has filter lists set.
-		if layer.filterListsSet {
-			if entity.MatchLists(layer.filterListIDs) {
-				// In filemaster ListBlockReason returns a string; we drop it
-				// here because no code path actually reaches this matcher
-				// (filter lists are gone). nil keeps the Reason type happy.
-				_ = entity.ListBlockReason()
-				return endpoints.Denied, nil
-			}
-
-			return endpoints.NoMatch, nil
-		}
-	}
-
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	if len(cfgFilterLists) > 0 {
-		if entity.MatchLists(cfgFilterLists) {
-			_ = entity.ListBlockReason()
-			return endpoints.Denied, nil
-		}
-	}
-
-	return endpoints.NoMatch, nil
-}
-
-func (lp *LayeredProfile) wrapBoolOption(configKey string, globalConfig config.BoolOption) config.BoolOption {
-	var revCnt uint64 = 0
-	var value bool
-	var refreshLock sync.Mutex
-
-	return func() bool {
-		refreshLock.Lock()
-		defer refreshLock.Unlock()
-
-		// Check if we need to refresh the value.
-		if revCnt != lp.RevisionCounter {
-			revCnt = lp.RevisionCounter
-
-			// Go through all layers to find an active value.
-			found := false
-			for _, layer := range lp.layers {
-				layerValue, ok := layer.configPerspective.GetAsBool(configKey)
-				if ok {
-					found = true
-					value = layerValue
-					break
-				}
-			}
-			if !found {
-				value = globalConfig()
-			}
-		}
-
-		return value
-	}
-}
-
-func (lp *LayeredProfile) wrapIntOption(configKey string, globalConfig config.IntOption) config.IntOption {
-	var revCnt uint64 = 0
-	var value int64
-	var refreshLock sync.Mutex
-
-	return func() int64 {
-		refreshLock.Lock()
-		defer refreshLock.Unlock()
-
-		// Check if we need to refresh the value.
-		if revCnt != lp.RevisionCounter {
-			revCnt = lp.RevisionCounter
-
-			// Go through all layers to find an active value.
-			found := false
-			for _, layer := range lp.layers {
-				layerValue, ok := layer.configPerspective.GetAsInt(configKey)
-				if ok {
-					found = true
-					value = layerValue
-					break
-				}
-			}
-			if !found {
-				value = globalConfig()
-			}
-		}
-
-		return value
-	}
-}
-
 // GetProfileSource returns the database key of the first profile in the
 // layers that has the given configuration key set. If it returns an empty
 // string, the global profile can be assumed to have been effective.
@@ -534,36 +242,4 @@ func (lp *LayeredProfile) GetProfileSource(configKey string) string {
 
 	// Global Profile
 	return ""
-}
-
-func (lp *LayeredProfile) wrapStringOption(configKey string, globalConfig config.StringOption) config.StringOption {
-	var revCnt uint64 = 0
-	var value string
-	var refreshLock sync.Mutex
-
-	return func() string {
-		refreshLock.Lock()
-		defer refreshLock.Unlock()
-
-		// Check if we need to refresh the value.
-		if revCnt != lp.RevisionCounter {
-			revCnt = lp.RevisionCounter
-
-			// Go through all layers to find an active value.
-			found := false
-			for _, layer := range lp.layers {
-				layerValue, ok := layer.configPerspective.GetAsString(configKey)
-				if ok {
-					found = true
-					value = layerValue
-					break
-				}
-			}
-			if !found {
-				value = globalConfig()
-			}
-		}
-
-		return value
-	}
 }
