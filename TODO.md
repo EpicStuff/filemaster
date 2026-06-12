@@ -40,21 +40,44 @@ Open questions deferred to phase 2/3:
 - `FAN_REPORT_FID` for cross-mount support — punt until the rule shape
   forces the decision.
 
-## Phase 2 — file-flavored Endpoint
+## Phase 2 — file rule matching [DONE; profile-storage integration deferred]
 
-Goal: replace the dead IP/domain endpoint scaffolding for the first real
-case (path match). Existing rule storage/serialisation gets reused.
+Standalone PathRule + PathRules live in `service/fileaccess/rule.go`.
+Pattern syntax: exact, single-segment glob, `/**` recursive. Used by
+PromptHandler directly. Per-exe lookup keying landed in phase 2.5.
 
-- [ ] `service/profile/endpoints/endpoint_path.go` — `EndpointPath` with
-      glob or prefix match against a `FileEntity{Path, Op, PID, Exe}`.
-- [ ] Parser entry in `endpoints.go` for `path:` / `glob:` rule strings.
-- [ ] Replace `*intel.Entity` parameter on `Endpoint.Matches` with an
-      interface or new `FileEntity` type — touches every endpoint file.
-      (Easier: define a small `Subject` interface both can satisfy during
-      the transition.)
+The endpoints-package integration (originally the plan) is deferred:
+that path requires retrofitting the `Endpoint.Matches(*intel.Entity)`
+signature, which is a bigger refactor than the file-rule logic itself.
+For now phase-3 storage is the in-memory PromptHandler map, which is
+enough to demo and to design phase-5 against.
+
+Still to do (post-phase-3):
+- [ ] Decide whether file rules ride on the existing
+      `service/profile/endpoints/` infrastructure or get their own
+      storage layer in `service/fileaccess/`.
+- [ ] On that decision: either add `EndpointPath` alongside the
+      existing endpoints (intel.Entity gets a Path field), or build a
+      parallel rule storage hierarchy.
 - [ ] Delete the IP/domain/country/ASN/scope endpoint files +
-      `service/intel/entity.go` + `netutils` + `reference` stubs in one
-      sweep once `EndpointPath` is the only matcher in use.
+      `service/intel/entity.go` + `netutils` + `reference` stubs once
+      the path is decided and the scaffolding is no longer load-bearing.
+
+## Phase 2.5 — per-app rules [DONE]
+
+PromptHandler keys its rule list by `FileEvent.Exe`, so a rule
+established by `/usr/bin/vim` for `/home/alice/notes.txt` doesn't
+auto-allow that path for `/usr/bin/cat`. Verified end-to-end:
+- Unit test `TestPromptHandlerPerExeIsolation`.
+- Live demo 2026-06-12: bash and cat each had to prompt once for the
+  same file, then both got silent rule-hits on second access.
+
+Still pending:
+- [ ] Map exe paths to profile fingerprints (`process.GetProcessWith-
+      Profile`) so rules survive renames/upgrades of the same app.
+- [ ] Persist per-exe rule lists across restarts. Likely via the
+      profile package's database once the storage shape is decided in
+      phase 2.
 
 ## Phase 3 — prompt loop end-to-end [logic done, live test pending]
 
