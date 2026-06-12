@@ -1,4 +1,4 @@
-import { getEnumKey, IntelEntity, Record } from '@safing/portmaster-api';
+import { getEnumKey, Record } from '@safing/portmaster-api';
 
 /**
  * BaseAction defines a user selectable action and can
@@ -121,13 +121,24 @@ export enum NotificationType {
   Error = 3,
 }
 
-export interface ConnectionPromptData {
+/**
+ * FilePromptData is the EventData payload attached to a
+ * fileaccess:open:* notification. Mirrors the FilePromptData struct in
+ * service/fileaccess/prompt_notifications.go.
+ */
+export interface FilePromptData {
   Profile: {
     ID: string;
+    Source: string;
+    Name: string;
     LinkedPath: string;
-    Source: 'local';
   };
-  Entity: IntelEntity;
+  Subject: {
+    PID: number;
+    Exe: string;
+    Path: string;
+    Op: string;
+  };
 }
 
 /**
@@ -208,4 +219,4 @@ export interface Notification<T = any> extends Record {
   SelectedActionID: string;
 }
 
-export type ConnectionPrompt = Notification<ConnectionPromptData>;
+export type FileAccessPrompt = Notification<FilePromptData>;

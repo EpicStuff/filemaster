@@ -43,11 +43,22 @@ func (v Verdict) String() string {
 // FileEvent is a single file-access request from a Source. All resolution
 // (PID -> exe path, fd -> file path) is the source's responsibility so
 // handlers can stay free of /proc and fanotify specifics.
+//
+// ProfileID / ProfileSource / ProfileName / ProfileLinkedPath are
+// optional and only filled in by handlers that resolve a profile
+// (ProfileHandler). The fanotify source leaves them empty; prompters
+// that surface the event to a UI use them when set and fall back to Exe
+// otherwise.
 type FileEvent struct {
 	PID  int32
 	Exe  string
 	Path string
 	Op   FileOp
+
+	ProfileID         string
+	ProfileSource     string
+	ProfileName       string
+	ProfileLinkedPath string
 }
 
 // Handler decides a Verdict for a FileEvent. Implementations must return

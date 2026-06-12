@@ -52,6 +52,13 @@ type LookupResult struct {
 	// DefaultActionAsk when no profile resolved, so default-deny isn't
 	// silently applied to processes the lookup couldn't identify.
 	DefaultAction uint8
+
+	// Profile metadata, mirrored into the FileEvent before the prompter
+	// is called so the UI can group + render the prompt. All empty when
+	// Store is nil.
+	ProfileSource     string
+	ProfileName       string
+	ProfileLinkedPath string
 }
 
 // ProfileLookup resolves a PID to a LookupResult. Production binding
@@ -131,6 +138,14 @@ func (h *ProfileHandler) Decide(ctx context.Context, e FileEvent) Verdict {
 	if res.Store == nil {
 		return h.fallback.Decide(ctx, e)
 	}
+
+	// Stamp the profile metadata onto the event so the prompter (and
+	// its EventData payload) can show the user which app this is and
+	// the UI can group prompts by profile.
+	e.ProfileID = res.Store.ID()
+	e.ProfileSource = res.ProfileSource
+	e.ProfileName = res.ProfileName
+	e.ProfileLinkedPath = res.ProfileLinkedPath
 
 	// Profile resolved -- match against its pre-parsed rules.
 	if v, ok := res.ParsedRules.Lookup(e.Path); ok {

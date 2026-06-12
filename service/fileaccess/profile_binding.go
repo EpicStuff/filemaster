@@ -64,10 +64,16 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	id := local.ScopedID()
 	rawRules := local.GetFileAccessRules()
 	defAct := local.DefaultAction()
+	source := string(local.Source)
+	name := local.Name
+	linkedPath := local.LinkedPath
 	local.RUnlock()
 
 	res.Store = &profileRuleStore{p: local, id: id}
 	res.ParsedRules = l.parsedRulesFor(id, rawRules)
+	res.ProfileSource = source
+	res.ProfileName = name
+	res.ProfileLinkedPath = linkedPath
 	if defAct != profile.DefaultActionNotSet {
 		res.DefaultAction = defAct
 	}

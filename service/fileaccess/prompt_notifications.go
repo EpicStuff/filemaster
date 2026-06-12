@@ -9,6 +9,34 @@ import (
 	"github.com/safing/portmaster/base/notifications"
 )
 
+// FilePromptProfile is the profile slice attached to a file-access
+// notification's EventData. Matches the field names the Angular UI
+// expects so it can group prompts by profile.
+type FilePromptProfile struct {
+	ID         string `json:"ID"`
+	Source     string `json:"Source"`
+	Name       string `json:"Name"`
+	LinkedPath string `json:"LinkedPath"`
+}
+
+// FilePromptSubject describes the file access being requested. Replaces
+// the IP/domain "Entity" payload used by the upstream network prompt
+// flow.
+type FilePromptSubject struct {
+	PID  int32  `json:"PID"`
+	Exe  string `json:"Exe"`
+	Path string `json:"Path"`
+	Op   string `json:"Op"`
+}
+
+// FilePromptData is the EventData payload for a fileaccess:open:N
+// notification. The UI reads Profile + Subject to render the prompt
+// card.
+type FilePromptData struct {
+	Profile FilePromptProfile `json:"Profile"`
+	Subject FilePromptSubject `json:"Subject"`
+}
+
 // NotificationsPrompter is the production Prompter. It posts the
 // prompt via base/notifications and waits on the notification's
 // Response channel.
@@ -24,12 +52,34 @@ func (p *NotificationsPrompter) Prompt(ctx context.Context, e FileEvent, timeout
 	title := "File access request"
 	msg := fmt.Sprintf("%s (pid %d) wants to open %s", displayExe(e.Exe), e.PID, e.Path)
 
-	n := notifications.NotifyPrompt(nid, title, msg,
-		notifications.Action{ID: ActionAllow, Text: "Allow once"},
-		notifications.Action{ID: ActionDeny, Text: "Deny once"},
-		notifications.Action{ID: ActionAllowAlways, Text: "Always allow this path"},
-		notifications.Action{ID: ActionDenyAlways, Text: "Always deny this path"},
-	)
+	data := &FilePromptData{
+		Profile: FilePromptProfile{
+			ID:         e.ProfileID,
+			Source:     e.ProfileSource,
+			Name:       e.ProfileName,
+			LinkedPath: e.ProfileLinkedPath,
+		},
+		Subject: FilePromptSubject{
+			PID:  e.PID,
+			Exe:  e.Exe,
+			Path: e.Path,
+			Op:   e.Op.String(),
+		},
+	}
+
+	n := notifications.Notify(&notifications.Notification{
+		EventID:   nid,
+		Type:      notifications.Prompt,
+		Title:     title,
+		Message:   msg,
+		EventData: data,
+		AvailableActions: []*notifications.Action{
+			{ID: ActionAllow, Text: "Allow once"},
+			{ID: ActionDeny, Text: "Deny once"},
+			{ID: ActionAllowAlways, Text: "Always allow this path"},
+			{ID: ActionDenyAlways, Text: "Always deny this path"},
+		},
+	})
 
 	select {
 	case action := <-n.Response():

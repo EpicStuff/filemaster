@@ -29,13 +29,8 @@
         [@moveInOutList]="(profile.showAll ? profile.prompts : profile.promptsLimited).length">
         <div class="prompt"
           *ngFor="let prompt of (profile.showAll ? profile.prompts : profile.promptsLimited); trackBy: trackPrompts">
-          <span class="entity">
-            <ng-container *ngIf="!prompt.domain; else: domainView">
-              {{ prompt.EventData?.Entity?.IP || 'N/A' }}
-            </ng-container>
-            <ng-template #domainView>
-              <span *ngIf="!!prompt.subdomain" class="subdomain">{{prompt.subdomain}}.</span>{{prompt.domain}}
-            </ng-template>
+          <span class="entity break-all">
+            {{ prompt.EventData?.Subject?.Path || 'N/A' }}
           </span>
 
           <span class="actions">

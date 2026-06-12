@@ -64,20 +64,12 @@
         <!-- Quick Settings -->
         <div class="flex flex-row flex-wrap gap-2 items-stretch whitespace-nowrap text-xxs" *ngIf="!collapseHeader" [@fadeIn]
           [@fadeOut]>
+          <!-- Scaffolding kept; will be repurposed to file-access allow/block. -->
           <app-qs-internet [settings]="profileSettings" (save)="saveSetting($event)">
           </app-qs-internet>
 
           <app-qs-history [canUse]="canUseHistory" [settings]="profileSettings" (save)="saveSetting($event)">
           </app-qs-history>
-
-          <app-qs-use-spn [canUse]="canUseSPN" [settings]="profileSettings" (save)="saveSetting($event)">
-          </app-qs-use-spn>
-
-          <app-qs-select-exit [canUse]="canUseSPN" [settings]="profileSettings" (save)="saveSetting($event)">
-          </app-qs-select-exit>
-
-          <app-qs-use-splittun [settings]="profileSettings" (save)="saveSetting($event)">
-          </app-qs-use-splittun>
 
           <button class="flex flex-row gap-2 items-center px-4 bg-gray-300 btn" cdkOverlayOrigin #overlayOrigin="cdkOverlayOrigin" (click)="profileMenu.dropdown.toggle(overlayOrigin)">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
@@ -98,55 +90,6 @@
         </div>
       </div>
 
-      <!-- Statistics -->
-      <div class="flex flex-row flex-wrap flex-grow gap-4 justify-end items-center pr-8"
-        *ngIf="!!stats && stats.size > 0">
-        <div [ngClass]="{
-            'h-20 sfng-lg:w-32 sfng-lg:h-24': !collapseHeader
-          }"
-          class="flex flex-col justify-center items-center px-4 py-1 w-24 bg-gray-300 bg-opacity-75 rounded border border-gray-300 shadow transition-all duration-200">
-          <h2 class="p-0 m-0 text-lg sfng-lg:text-xl text-primary">{{ stats!.size | prettyCount }}</h2>
-          <span class="text-secondary">Connections</span>
-        </div>
-
-        <div [ngClass]="{
-            'h-20 sfng-lg:w-32 sfng-lg:h-24': !collapseHeader
-          }"
-          class="flex flex-col justify-center items-center px-4 py-1 w-24 bg-gray-300 bg-opacity-75 rounded border border-gray-300 shadow transition-all duration-200">
-          <h2 class="p-0 m-0 text-lg sfng-lg:text-xl text-primary">{{ (100 / stats!.size) * (stats!.size
-            - stats!.countAllowed) | number:'1.0-1' }}%</h2>
-          <span class="text-secondary">Blocked</span>
-        </div>
-
-        <div [ngClass]="{
-            'h-20 sfng-lg:w-32 sfng-lg:h-24': !collapseHeader
-          }"
-          class="flex flex-col justify-center items-center px-4 py-1 w-24 bg-gray-300 bg-opacity-75 rounded border border-gray-300 shadow transition-all duration-200">
-          <h2 *ngIf="canViewBW; else: cannotViewBW"
-            class="p-0 m-0 text-lg whitespace-nowrap sfng-lg:text-xl text-primary">
-            {{ stats.bytes_received | bytes }}
-          </h2>
-          <ng-template #cannotViewBW>
-            <span routerLink="/dashboard"
-              class="p-0 pb-2.5 m-0 text-opacity-50 whitespace-nowrap text-xxs sfng-lg:text-xs text-tertiary hover:underline">
-              Available in Plus
-            </span>
-          </ng-template>
-          <span class="text-secondary">Received</span>
-        </div>
-
-        <div [ngClass]="{
-            'h-20 sfng-lg:w-32 sfng-lg:h-24': !collapseHeader
-          }"
-          class="flex flex-col justify-center items-center px-4 py-1 w-24 bg-gray-300 bg-opacity-75 rounded border border-gray-300 shadow transition-all duration-200">
-          <h2 *ngIf="canViewBW; else: cannotViewBW"
-            class="p-0 m-0 text-lg whitespace-nowrap sfng-lg:text-xl text-primary">
-            {{ stats.bytes_sent | bytes }}
-          </h2>
-          <span class="text-secondary">Sent</span>
-        </div>
-
-      </div>
     </div>
 
     <div class="absolute bottom-0 right-10 z-10 cursor-pointer hover:text-primary text-secondary"
@@ -159,7 +102,7 @@
   </div>
 
   <sfng-tab-group class="flex overflow-hidden flex-col flex-grow p-4 px-12 w-full">
-    <!-- Connections -->
+    <!-- Connections (scaffolding repurposed for future file-access activity per app) -->
     <sfng-tab id="connections" title="Connections">
       <div *sfngTabContent>
         <sfng-netquery-viewer [filters]="['allowed', 'as_owner', 'country', 'domain']"

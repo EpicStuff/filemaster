@@ -86,6 +86,12 @@ func registerConfiguration() error { //nolint:maintidx
 			config.StackableAnnotation:      true,
 			config.DisplayOrderAnnotation:   cfgOptionFileAccessRulesOrder,
 			config.CategoryAnnotation:       "Rules",
+			// Render via the +/- rule-list editor in the UI. The
+			// hint is a frontend-only string; the value matches
+			// ExternalOptionHint.EndpointList in the Angular config
+			// types so the same component (app-rule-list) draws our
+			// path-rule list with Allow/Block prefix labels.
+			config.DisplayHintAnnotation: "endpoint list",
 		},
 	})
 	if err != nil {

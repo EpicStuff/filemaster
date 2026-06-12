@@ -141,19 +141,54 @@ Footgun captured during live test:
   events out from under the test or stall waiting on prompts the test
   isn't responding to.
 
-## Phase 4 — UI
+## Phase 4 — UI [DONE]
 
 Goal: existing Angular/Tauri shell renders file prompts instead of
-network prompts. Defer until phase 3 settles the field shape.
+network prompts.
 
-- [ ] Map `FileEntity` fields into whatever the prompt component expects
-      (probably rename `Entity` → `Subject` in the API payload).
-- [ ] Replace network-specific labels in the prompt component
-      (`Connection from ...` → `Access to ...`).
-- [ ] App-list view: per-app rules render `path:` lines instead of
-      `domain:`/`ip:`.
-- [ ] Strip out tabs/panels that no longer make sense (network monitor,
-      DNS settings, SPN).
+- [x] **EventData payload.** `NotificationsPrompter` now sets
+      `EventData = FilePromptData{Profile{ID,Source,Name,LinkedPath},
+      Subject{PID,Exe,Path,Op}}` (see
+      `service/fileaccess/prompt_notifications.go`). The TS mirror
+      lives at `services/notifications.types.ts` (`FilePromptData`
+      replaces `ConnectionPromptData`; `FileAccessPrompt` replaces
+      `ConnectionPrompt`). `LookupResult` carries the profile metadata
+      so `ProfileHandler.Decide` stamps Profile fields onto the
+      `FileEvent` before calling the prompter.
+- [x] **Prompt-entrypoint window.** `prompt-entrypoint.ts` filters
+      on `fileaccess:open` EventID prefix, groups by Profile when one
+      resolved and by exe path when not. `prompt.html` renders
+      `Path:` + `Op:` (with pid) rows instead of `Domain:` + `IP:`.
+      Unknown-process events fall through to a "Unknown program" group.
+- [x] **In-app prompt list.** `shared/prompt-list/` rewired to the
+      same EventID prefix and FileAccessPrompt shape. `allow/block`
+      buttons map to the `allow`/`deny` (+/-always) action IDs the
+      backend emits; the domain-parsing path is gone.
+- [x] **App-list view: per-app rules render path entries.** Set
+      `DisplayHintAnnotation: "endpoint list"` on
+      `CfgOptionFileAccessRulesKey` so the existing `app-rule-list`
+      component draws `+ <pattern>` / `- <pattern>` entries with the
+      default Allow/Block symbol map. No frontend change required.
+- [x] **Sidebar strip.** Removed SPN nav button, "Re-Initialize SPN",
+      "Logout Completely", "Clear DNS Cache", "Cleanup Network
+      History" menu items, and all "Pause SPN for ..." pause-menu
+      items. Removed `SPNService`/`BoolSetting` imports +
+      `spnEnabled`/`pauseSPN`/`reinitSPN`/`logoutCompletely`/
+      `clearDNSCache`/`cleanupHistory` methods. `/spn` route gone.
+      `/monitor` route, "Network Activity" nav button, "Connections"
+      and "Insights" tabs, `app-qs-internet` and `app-qs-history`
+      tiles kept as scaffolding for future file-access activity views.
+- [x] **EventID prefix flipped everywhere.** `filter:prompt` →
+      `fileaccess:open` in navigation tray badge and notification list
+      filter so prompts aren't double-rendered in the notification
+      panel.
+- [x] **Stats block removed.** The per-app header tiles (Active
+      Connections / Blocked % / Received / Sent) only made sense
+      against netquery and are gone. The "Active Connections" and
+      "Network History" detail lines stay (they're inside the
+      header-detail block and tied to the kept scaffolding).
+- [x] Compiles: `npm run build-libs:dev && ng build --configuration
+      development` is green; 26 Go tests still pass.
 
 ## Phase 5 — per-app sandboxing (Storage-Scopes-style)
 

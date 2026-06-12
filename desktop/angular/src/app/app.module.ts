@@ -27,9 +27,6 @@ import { NavigationComponent } from './layout/navigation/navigation';
 import { SideDashComponent } from './layout/side-dash/side-dash';
 import { AppOverviewComponent, AppViewComponent, QuickSettingInternetButtonComponent } from './pages/app-view';
 import { QsHistoryComponent } from './pages/app-view/qs-history/qs-history.component';
-import { QuickSettingSelectExitButtonComponent } from './pages/app-view/qs-select-exit/qs-select-exit';
-import { QuickSettingUseSPNButtonComponent } from './pages/app-view/qs-use-spn/qs-use-spn';
-import { QuickSettingUseSplitTunButtonComponent } from './pages/app-view/qs-use-splittun/qs-use-splittun';
 import { DashboardPageComponent } from './pages/dashboard/dashboard.component';
 import { FeatureCardComponent } from './pages/dashboard/feature-card/feature-card.component';
 import { MonitorPageComponent } from './pages/monitor';
@@ -55,15 +52,15 @@ import { SfngMenuModule } from './shared/menu';
 import { SfngMultiSwitchModule } from './shared/multi-switch';
 import { NetqueryModule } from './shared/netquery';
 import { NetworkScoutComponent } from './shared/network-scout';
+import { SPNAccountDetailsComponent } from './shared/spn-account-details';
+import { SPNLoginComponent } from './shared/spn-login';
+import { SPNStatusComponent } from './shared/spn-status';
 import { NotificationListComponent } from './shared/notification-list/notification-list.component';
 import { NotificationComponent } from './shared/notification/notification';
 import { CommonPipesModule } from './shared/pipes';
 import { ProcessDetailsDialogComponent } from './shared/process-details-dialog';
 import { PromptListComponent } from './shared/prompt-list/prompt-list.component';
 import { SecurityLockComponent } from './shared/security-lock';
-import { SPNAccountDetailsComponent } from './shared/spn-account-details';
-import { SPNLoginComponent } from './shared/spn-login';
-import { SPNStatusComponent } from './shared/spn-status';
 import { PlaceholderComponent } from './shared/text-placeholder';
 import { DashboardWidgetComponent } from './pages/dashboard/dashboard-widget/dashboard-widget.component';
 import { MergeProfileDialogComponent } from './pages/app-view/merge-profile-dialog/merge-profile-dialog.component';
@@ -137,9 +134,6 @@ const localeConfig = {
     FuzzySearchPipe,
     AppViewComponent,
     QuickSettingInternetButtonComponent,
-    QuickSettingUseSPNButtonComponent,
-    QuickSettingSelectExitButtonComponent,
-    QuickSettingUseSplitTunButtonComponent,
     AppOverviewComponent,
     PlaceholderComponent,
     LoadingComponent,
