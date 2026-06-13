@@ -83,7 +83,9 @@ func registerUpdateConfig() error {
 		ExpertiseLevel:  config.ExpertiseLevelExpert,
 		ReleaseLevel:    config.ReleaseLevelStable,
 		RequiresRestart: false,
-		DefaultValue:    true,
+		// filemaster: default off. This daemon is local-only and the
+		// upstream safing.io update index isn't ours to phone home to.
+		DefaultValue:    false,
 		Annotations: config.Annotations{
 			config.DisplayOrderAnnotation: -12,
 			config.CategoryAnnotation:     "Updates",
@@ -101,7 +103,10 @@ func registerUpdateConfig() error {
 		ExpertiseLevel:  config.ExpertiseLevelExpert,
 		ReleaseLevel:    config.ReleaseLevelStable,
 		RequiresRestart: false,
-		DefaultValue:    true,
+		// filemaster: default off. Intel updates (geoip, filter lists,
+		// news) are network-stack features we've stripped; nothing
+		// consumes the downloads.
+		DefaultValue:    false,
 		Annotations: config.Annotations{
 			config.DisplayOrderAnnotation: -11,
 			config.CategoryAnnotation:     "Updates",
@@ -116,8 +121,8 @@ func registerUpdateConfig() error {
 
 func initUpdateConfig() {
 	releaseChannel = config.Concurrent.GetAsString(ReleaseChannelKey, ReleaseChannelStable)
-	enableSoftwareUpdates = config.Concurrent.GetAsBool(enableSoftwareUpdatesKey, true)
-	enableIntelUpdates = config.Concurrent.GetAsBool(enableIntelUpdatesKey, true)
+	enableSoftwareUpdates = config.Concurrent.GetAsBool(enableSoftwareUpdatesKey, false)
+	enableIntelUpdates = config.Concurrent.GetAsBool(enableIntelUpdatesKey, false)
 
 	initialReleaseChannel = releaseChannel()
 

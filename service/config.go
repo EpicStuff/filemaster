@@ -134,7 +134,7 @@ func MakeUpdateConfigs(svcCfg *ServiceConfig) (binaryUpdateConfig, intelUpdateCo
 			IndexURLs:         svcCfg.BinariesIndexURLs,  // May be changed by config during instance startup.
 			IndexFile:         "index.json",
 			Verify:            svcCfg.VerifyBinaryUpdates,
-			AutoCheck:         true, // May be changed by config during instance startup.
+			AutoCheck:         false, // filemaster: never phone home to safing.io; this is a local-only file-access daemon.
 			AutoDownload:      false,
 			AutoApply:         false,
 			NeedsRestart:      true,
@@ -148,9 +148,9 @@ func MakeUpdateConfigs(svcCfg *ServiceConfig) (binaryUpdateConfig, intelUpdateCo
 			IndexURLs:         svcCfg.IntelIndexURLs,
 			IndexFile:         "index.json",
 			Verify:            svcCfg.VerifyIntelUpdates,
-			AutoCheck:         true, // May be changed by config during instance startup.
-			AutoDownload:      true,
-			AutoApply:         true,
+			AutoCheck:         false, // filemaster: never phone home to safing.io; this is a local-only file-access daemon.
+			AutoDownload:      false,
+			AutoApply:         false,
 			NeedsRestart:      false,
 			Notify:            false,
 		}
@@ -165,7 +165,7 @@ func MakeUpdateConfigs(svcCfg *ServiceConfig) (binaryUpdateConfig, intelUpdateCo
 			IndexURLs:         svcCfg.BinariesIndexURLs, // May be changed by config during instance startup.
 			IndexFile:         "index.json",
 			Verify:            svcCfg.VerifyBinaryUpdates,
-			AutoCheck:         true, // May be changed by config during instance startup.
+			AutoCheck:         false, // filemaster: never phone home to safing.io; this is a local-only file-access daemon.
 			AutoDownload:      false,
 			AutoApply:         false,
 			NeedsRestart:      true,
@@ -194,9 +194,9 @@ func MakeUpdateConfigs(svcCfg *ServiceConfig) (binaryUpdateConfig, intelUpdateCo
 			IndexURLs:         svcCfg.IntelIndexURLs,
 			IndexFile:         "index.json",
 			Verify:            svcCfg.VerifyIntelUpdates,
-			AutoCheck:         true, // May be changed by config during instance startup.
-			AutoDownload:      true,
-			AutoApply:         true,
+			AutoCheck:         false, // filemaster: never phone home to safing.io; this is a local-only file-access daemon.
+			AutoDownload:      false,
+			AutoApply:         false,
 			NeedsRestart:      false,
 			Notify:            false,
 		}
