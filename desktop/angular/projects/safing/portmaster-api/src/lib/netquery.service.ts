@@ -239,11 +239,20 @@ export class Netquery {
     return this.http.post<{ results: QueryResult[] }>(`${this.httpAPI}/v1/netquery/query`, query, {
       params: new HttpParams().set("origin", origin)
     })
-      .pipe(map(res => res.results || []));
+      .pipe(
+        map(res => res.results || []),
+        // The netquery backend was stripped with the rest of the
+        // network stack. Returning empty results on 404 keeps every
+        // downstream subscribe() alive (otherwise combineLatest /
+        // loading-spinner streams get stuck) and lets widgets render
+        // their empty state instead of staying in "Loading...".
+        catchError(() => of([] as QueryResult[])),
+      );
   }
 
   batch<T extends BatchRequest>(queries: T): Observable<BatchResponse<T>> {
     return this.http.post<BatchResponse<T>>(`${this.httpAPI}/v1/netquery/query/batch`, queries)
+      .pipe(catchError(() => of({} as BatchResponse<T>)));
   }
 
   cleanProfileHistory(profileIDs: string | string[]): Observable<HttpResponse<any>> {
@@ -291,6 +300,7 @@ export class Netquery {
     })
       .pipe(
         map(response => response.results),
+        catchError(() => of([] as BandwidthChartResult<K>[])),
       )
   }
 
@@ -359,7 +369,9 @@ export class Netquery {
         }
 
         return data;
-      }));
+      }),
+      catchError(() => of([] as ChartResult[])),
+      );
   }
 
   getActiveProfileIDs(): Observable<string[]> {

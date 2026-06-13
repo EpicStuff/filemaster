@@ -12,8 +12,8 @@ import {
   trackById,
 } from '@safing/portmaster-api';
 import { SfngDialogService } from '@safing/ui';
-import { BehaviorSubject, Subscription, combineLatest, forkJoin } from 'rxjs';
-import { debounceTime, filter, startWith } from 'rxjs/operators';
+import { BehaviorSubject, Subscription, combineLatest, forkJoin, of } from 'rxjs';
+import { catchError, debounceTime, filter, startWith } from 'rxjs/operators';
 import {
   fadeInAnimation,
   fadeInListAnimation,
@@ -205,7 +205,15 @@ export class AppOverviewComponent implements OnInit, OnDestroy {
     this.subscription = combineLatest([
       this.profileService.watchProfiles(),
       this.onSearch.pipe(debounceTime(100), startWith('')),
-      this.netquery.getActiveProfileIDs().pipe(startWith([] as string[])),
+      // getActiveProfileIDs() hits the netquery backend, which was
+      // stripped with the rest of the network stack -- the HTTP call
+      // 404s and bubbles an error up combineLatest, blanking the
+      // whole list. Swallow the error so the profile list still
+      // renders with an empty "active" set.
+      this.netquery.getActiveProfileIDs().pipe(
+        startWith([] as string[]),
+        catchError(() => of([] as string[])),
+      ),
     ]).subscribe(([profiles, searchTerm, activeProfiles]) => {
       this.loading = false;
 
