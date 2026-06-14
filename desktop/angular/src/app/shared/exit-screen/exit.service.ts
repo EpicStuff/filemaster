@@ -9,9 +9,9 @@ import { ActionIndicatorService } from '../action-indicator';
 import { ExitScreenComponent } from './exit-screen';
 import { INTEGRATION_SERVICE } from 'src/app/integration';
 
-const MessageConnecting = 'Connecting to Portmaster';
-const MessageShutdown = 'Shutting Down Portmaster';
-const MessageRestart = 'Restarting Portmaster';
+const MessageConnecting = 'Connecting to filemaster';
+const MessageShutdown = 'Shutting Down filemaster';
+const MessageRestart = 'Restarting filemaster';
 const MessageHidden = '';
 
 export type OverlayMessage = typeof MessageConnecting
@@ -124,14 +124,14 @@ export class ExitService {
   shutdownPortmaster() {
     this.dialog.confirm({
       canCancel: true,
-      header: 'Shutting Down Portmaster',
-      message: 'Shutting down the Portmaster will stop all Portmaster components and will leave your system unprotected!',
+      header: 'Shutting Down filemaster',
+      message: 'Shutting down filemaster will stop all file-access prompts and leave watched paths unprotected.',
       caption: 'Caution',
       buttons: [
         {
           id: 'shutdown',
           class: 'danger',
-          text: 'Shut Down Portmaster'
+          text: 'Shut Down filemaster'
         }
       ]
     })

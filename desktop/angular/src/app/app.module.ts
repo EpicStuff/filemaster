@@ -19,6 +19,7 @@ import MyYamlFile from 'js-yaml-loader!../i18n/helptexts.yaml';
 import * as i18n from 'ng-zorro-antd/i18n';
 import { MarkdownModule } from 'ngx-markdown';
 import { firstValueFrom } from 'rxjs';
+import { timeout } from 'rxjs/operators';
 import { environment } from 'src/environments/environment';
 import { AppRoutingModule } from './app-routing.module';
 import { AppComponent } from './app.component';
@@ -74,7 +75,14 @@ function loadAndSetLocaleInitializer(configService: ConfigService) {
     let nzLocaleID: string = 'en_GB';
 
     try {
-      const setting = await firstValueFrom(configService.get("core/locale"))
+      // 3s timeout so the app still bootstraps if the daemon isn't
+      // reachable yet. Without this, firstValueFrom hangs forever
+      // when pm-core is down, and Angular never compiles app-root
+      // -- the user sees a black screen instead of the
+      // "Connecting to filemaster" overlay.
+      const setting = await firstValueFrom(
+        configService.get("core/locale").pipe(timeout(3000)),
+      )
 
       const currentValue = getActualValue(setting as StringSetting);
       switch (currentValue) {
