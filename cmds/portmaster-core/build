@@ -2,7 +2,7 @@
 
 # Gather build metadata.
 VERSION="$(git tag --points-at)" || true
-test -z "$VERSION" && DEV_VERSION="$(git describe --tags --first-parent --abbrev=0)" || true
+test -z "$VERSION" && DEV_VERSION="$(git describe --tags --first-parent --abbrev=0 2>/dev/null)" || true
 test -n "$DEV_VERSION" && VERSION="${DEV_VERSION}_dev_build"
 test -z "$VERSION" && VERSION="dev_build"
 SOURCE=$( ( git remote -v | cut -f2 | cut -d" " -f1 | head -n 1 ) || echo "unknown" )
