@@ -69,7 +69,7 @@ func download(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start logging.
-	err = log.Start(log.InfoLevel.Name(), true, "")
+	err = log.Start(log.InfoLevel.Name())
 	if err != nil {
 		return err
 	}

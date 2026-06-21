@@ -43,25 +43,17 @@ func TriggerWriterChannel() chan struct{} {
 }
 
 func startWriter() {
-	if GlobalWriter.isStdout {
-		fmt.Fprintf(GlobalWriter,
-			"%s%s%s %sBOF %s%s\n",
+	fmt.Fprintf(GlobalWriter,
+		"%s%s%s %sBOF %s%s\n",
 
-			dimColor(),
-			time.Now().Format(timeFormat),
-			endDimColor(),
+		dimColor(),
+		time.Now().Format(timeFormat),
+		endDimColor(),
 
-			blueColor(),
-			rightArrow,
-			endColor(),
-		)
-	} else {
-		fmt.Fprintf(GlobalWriter,
-			"%s BOF %s\n",
-			time.Now().Format(timeFormat),
-			rightArrow,
-		)
-	}
+		blueColor(),
+		rightArrow,
+		endColor(),
+	)
 	writeVersion()
 
 	shutdownWaitGroup.Add(1)
@@ -69,40 +61,32 @@ func startWriter() {
 }
 
 func writeVersion() {
-	if GlobalWriter.isStdout {
-		fmt.Fprintf(GlobalWriter, "%s%s%s running %s%s%s\n",
-			dimColor(),
-			time.Now().Format(timeFormat),
-			endDimColor(),
+	fmt.Fprintf(GlobalWriter, "%s%s%s running %s%s%s\n",
+		dimColor(),
+		time.Now().Format(timeFormat),
+		endDimColor(),
 
-			blueColor(),
-			info.CondensedVersion(),
-			endColor())
-	} else {
-		fmt.Fprintf(GlobalWriter, "%s running %s\n", time.Now().Format(timeFormat), info.CondensedVersion())
-	}
+		blueColor(),
+		info.CondensedVersion(),
+		endColor())
 }
 
 func writeLogLevelChange(from, to string) {
 	if GlobalWriter == nil {
 		return
 	}
-	if GlobalWriter.isStdout {
-		fmt.Fprintf(GlobalWriter, "%s%s%s log level changed from %s%s%s to %s%s%s\n",
-			dimColor(),
-			time.Now().Format(timeFormat),
-			endDimColor(),
+	fmt.Fprintf(GlobalWriter, "%s%s%s log level changed from %s%s%s to %s%s%s\n",
+		dimColor(),
+		time.Now().Format(timeFormat),
+		endDimColor(),
 
-			blueColor(),
-			from,
-			endColor(),
+		blueColor(),
+		from,
+		endColor(),
 
-			blueColor(),
-			to,
-			endColor())
-	} else {
-		fmt.Fprintf(GlobalWriter, "%s log level changed from %s to %s\n", time.Now().Format(timeFormat), from, to)
-	}
+		blueColor(),
+		to,
+		endColor())
 }
 
 func writerManager() {
@@ -225,25 +209,17 @@ func finalizeWriting() {
 		case line := <-logBuffer:
 			GlobalWriter.WriteMessage(line, 0)
 		case <-time.After(10 * time.Millisecond):
-			if GlobalWriter.isStdout {
-				fmt.Fprintf(GlobalWriter,
-					"%s%s%s %sEOF %s%s\n",
+			fmt.Fprintf(GlobalWriter,
+				"%s%s%s %sEOF %s%s\n",
 
-					dimColor(),
-					time.Now().Format(timeFormat),
-					endDimColor(),
+				dimColor(),
+				time.Now().Format(timeFormat),
+				endDimColor(),
 
-					blueColor(),
-					leftArrow,
-					endColor(),
-				)
-			} else {
-				fmt.Fprintf(GlobalWriter,
-					"%s EOF %s\n",
-					time.Now().Format(timeFormat),
-					leftArrow,
-				)
-			}
+				blueColor(),
+				leftArrow,
+				endColor(),
+			)
 			return
 		}
 	}

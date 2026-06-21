@@ -61,7 +61,7 @@ func RunService(cmd *cobra.Command, args []string) {
 
 	// Start logging.
 	// Note: Must be created before the service instance, so that they use the right logger.
-	err := log.Start(SvcConfig.LogLevel, SvcConfig.LogToStdout, SvcConfig.LogDir)
+	err := log.Start(SvcConfig.LogLevel)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(4)

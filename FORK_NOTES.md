@@ -130,6 +130,12 @@ Net diff for the strip: ~2700 lines removed, ~70 added.
 - `cmds/integrationtest/` — deleted (network-state tester).
 - `service/control/` — deleted whole package (pause/resume orchestration for
   interception + SPN, both gone).
+- `base/log/` — dropped file-logging path entirely. `Start()` now takes only
+  `level`; `NewFileWriter`/`CleanOldLogs` removed; `LogWriter.isStdout`
+  field gone (always stdout). `--log-stdout` and `--log-dir` flags removed
+  from `portmaster-core`; the daemon always logs to stdout. `ServiceConfig`
+  loses `LogToStdout` and `LogDir`. Color output in `output.go` simplified
+  to always-on (slog handler still gates color on isatty).
 
 ## Tests removed
 

@@ -150,7 +150,7 @@ rule persists, next access of the same path is auto-decided.
           "fileaccess":{"watchPaths":["/tmp/filemaster-test"]}}
          EOF`
       2. `setsid pm-core --data-dir <dataDir> --bin-dir <binDir> \
-                       --log-dir <logDir> > /tmp/pm.log 2>&1 &`
+                       > /tmp/pm.log 2>&1 &`
       3. `cd desktop/angular && ng serve --host 0.0.0.0 \
               --port 4200 --proxy-config ./proxy.json`
       4. Open `http://<host>:4200/` in a browser. Trigger a file

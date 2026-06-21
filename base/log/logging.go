@@ -199,7 +199,9 @@ func ParseLevel(level string) Severity {
 }
 
 // Start starts the logging system. Must be called in order to see logs.
-func Start(level string, logToStdout bool, logDir string) error {
+// filemaster always logs to stdout; file logging was removed with the rest
+// of the network stack.
+func Start(level string) error {
 	if !initializing.SetToIf(false, true) {
 		return nil
 	}
@@ -214,17 +216,7 @@ func Start(level string, logToStdout bool, logDir string) error {
 		}
 	}
 
-	// Setup writer.
-	if logToStdout {
-		GlobalWriter = NewStdoutWriter()
-	} else {
-		// Create file log writer.
-		var err error
-		GlobalWriter, err = NewFileWriter(logDir)
-		if err != nil {
-			return fmt.Errorf("failed to initialize log file: %w", err)
-		}
-	}
+	GlobalWriter = NewStdoutWriter()
 
 	// Init logging systems.
 	SetLogLevel(initialLogLevel)
@@ -237,14 +229,6 @@ func Start(level string, logToStdout bool, logDir string) error {
 
 	started.Set()
 	close(startedSignal)
-
-	// Delete all logs older than one month.
-	if !logToStdout {
-		err := CleanOldLogs(logDir, 30*24*time.Hour)
-		if err != nil {
-			Errorf("log: failed to clean old log files: %s", err)
-		}
-	}
 
 	return nil
 }

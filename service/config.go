@@ -17,9 +17,7 @@ type ServiceConfig struct {
 	BinDir  string
 	DataDir string
 
-	LogToStdout bool
-	LogDir      string
-	LogLevel    string
+	LogLevel string
 
 	BinariesIndexURLs   []string
 	IntelIndexURLs      []string
@@ -42,9 +40,6 @@ func (sc *ServiceConfig) Init() error {
 		if sc.DataDir == "" {
 			sc.DataDir = filepath.FromSlash("$ProgramData/Portmaster")
 		}
-		if sc.LogDir == "" {
-			sc.LogDir = filepath.Join(sc.DataDir, "logs")
-		}
 
 	case "linux":
 		// Fall back to defaults.
@@ -53,9 +48,6 @@ func (sc *ServiceConfig) Init() error {
 		}
 		if sc.DataDir == "" {
 			sc.DataDir = "/var/lib/portmaster"
-		}
-		if sc.LogDir == "" {
-			sc.LogDir = "/var/log/portmaster"
 		}
 
 	default:
@@ -66,15 +58,11 @@ func (sc *ServiceConfig) Init() error {
 		if sc.DataDir == "" {
 			return errors.New("binary directory must be configured - auto-detection not supported on this platform")
 		}
-		if !sc.LogToStdout && sc.LogDir == "" {
-			return errors.New("logging directory must be configured - auto-detection not supported on this platform")
-		}
 	}
 
 	// Expand path variables.
 	sc.BinDir = os.ExpandEnv(sc.BinDir)
 	sc.DataDir = os.ExpandEnv(sc.DataDir)
-	sc.LogDir = os.ExpandEnv(sc.LogDir)
 
 	// Apply defaults for required fields.
 	if len(sc.BinariesIndexURLs) == 0 {

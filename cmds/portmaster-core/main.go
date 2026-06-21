@@ -26,9 +26,7 @@ var (
 	binDir  string
 	dataDir string
 
-	logToStdout bool
-	logDir      string
-	logLevel    string
+	logLevel string
 
 	printVersion bool
 )
@@ -39,8 +37,6 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "set directory for variable data (rw)")
 
 	// Add flags for service only.
-	rootCmd.Flags().BoolVar(&logToStdout, "log-stdout", false, "log to stdout instead of file")
-	rootCmd.Flags().StringVar(&logDir, "log-dir", "", "set directory for logs")
 	rootCmd.Flags().StringVar(&logLevel, "log", "", "set log level to [trace|debug|info|warning|error|critical]")
 	rootCmd.Flags().BoolVar(&printVersion, "version", false, "print version (backward compatibility; use command instead)")
 	rootCmd.Flags().BoolVar(&cmdbase.PrintStackOnExit, "print-stack-on-exit", false, "prints the stack before of shutting down")
@@ -85,9 +81,7 @@ func initializeGlobals(cmd *cobra.Command, args []string) {
 		BinDir:  binDir,
 		DataDir: dataDir,
 
-		LogToStdout: logToStdout,
-		LogDir:      logDir,
-		LogLevel:    logLevel,
+		LogLevel: logLevel,
 
 		BinariesIndexURLs:   configure.DefaultStableBinaryIndexURLs,
 		IntelIndexURLs:      configure.DefaultIntelIndexURLs,
