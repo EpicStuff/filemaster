@@ -9,7 +9,7 @@ import (
 )
 
 // DefaultAPIListenAddress is the default listen address for the API.
-var DefaultAPIListenAddress = "127.0.0.1:817"
+var DefaultAPIListenAddress = "127.0.0.1:818"
 
 // Base is the base module.
 type Base struct {

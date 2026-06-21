@@ -67,7 +67,7 @@ func registerDebugEndpoints() error {
 This data needs to gathered over a period of time, which is specified using the duration parameter.
 
 You can easily view this data in your browser with this command (with Go installed):
-"go tool pprof -http :8888 http://127.0.0.1:817/api/v1/debug/cpu"
+"go tool pprof -http :8888 http://127.0.0.1:818/api/v1/debug/cpu"
 `, `"`, "`"),
 		Parameters: []Parameter{{
 			Method:      http.MethodGet,
@@ -88,7 +88,7 @@ You can easily view this data in your browser with this command (with Go install
 		Description: strings.ReplaceAll(`Gather and return the heap memory profile.
 		
 		You can easily view this data in your browser with this command (with Go installed):
-		"go tool pprof -http :8888 http://127.0.0.1:817/api/v1/debug/heap"
+		"go tool pprof -http :8888 http://127.0.0.1:818/api/v1/debug/heap"
 		`, `"`, "`"),
 	}); err != nil {
 		return err
@@ -103,7 +103,7 @@ You can easily view this data in your browser with this command (with Go install
 		Description: strings.ReplaceAll(`Gather and return the memory allocation profile.
 		
 		You can easily view this data in your browser with this command (with Go installed):
-		"go tool pprof -http :8888 http://127.0.0.1:817/api/v1/debug/allocs"
+		"go tool pprof -http :8888 http://127.0.0.1:818/api/v1/debug/allocs"
 		`, `"`, "`"),
 	}); err != nil {
 		return err

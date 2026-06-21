@@ -81,7 +81,7 @@ From the project root (the folder containing this [README.md](./)) there are onl
 
 Run `ng serve` for a dev server. Navigate to `http://localhost:4200/`. The app will automatically reload if you change any of the source files.
 
-In development mode (that is, you don't pass `--prod`) the UI expects portmaster running at `ws://127.0.0.1:817/api/database/v1`. See [environment](./src/app/environments/environment.ts).
+In development mode (that is, you don't pass `--prod`) the UI expects filemaster-core running at `ws://127.0.0.1:818/api/database/v1`. To point the dashboard at a different daemon port, open the UI once with `?api-port=NNNN` — the choice is persisted in `localStorage`. See [environment](./src/environments/environment.ts).
 
 ### Code scaffolding
 

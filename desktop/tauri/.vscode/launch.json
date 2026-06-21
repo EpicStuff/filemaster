@@ -13,7 +13,7 @@
         "request": "launch",
         "name": "Debug Dev",
         "cargo": {"args": ["build", "--manifest-path=./src-tauri/Cargo.toml", "--no-default-features"]},
-        "env": { "TAURI_PM_URL": "http://127.0.0.1:817" }
+        "env": { "TAURI_PM_URL": "http://127.0.0.1:818" }
       },
       {
         "type": "lldb",
@@ -28,7 +28,7 @@
         "program": "${workspaceRoot}/src-tauri/target/debug/portmaster.exe",
         "cwd": "${workspaceRoot}",
         "preLaunchTask": "build:debug",
-        "env": { "TAURI_PM_URL": "http://127.0.0.1:817" }
+        "env": { "TAURI_PM_URL": "http://127.0.0.1:818" }
       }
     ]
   }

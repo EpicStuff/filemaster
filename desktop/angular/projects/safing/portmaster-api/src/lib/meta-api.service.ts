@@ -46,7 +46,7 @@ export class MetaAPI {
     @Inject(PORTMASTER_HTTP_API_ENDPOINT) @Optional() private httpEndpoint: string,
   ) { 
       if (!this.httpEndpoint) {
-        this.httpEndpoint = `http://localhost:817/api`;
+        this.httpEndpoint = `http://localhost:818/api`;
         console.warn("[portmaster-api: MetaAPI] No HTTP API endpoint provided, using default: " + this.httpEndpoint);
       }
   }
