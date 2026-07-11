@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, ChangeDetectorRef, Component, HostBinding, OnDestroy, OnInit, TrackByFunction } from '@angular/core';
 import { AppProfile, AppProfileService, deepClone, setAppSetting } from '@safing/portmaster-api';
-import { combineLatest, forkJoin, Observable, Subscription } from 'rxjs';
-import { map, switchMap } from 'rxjs/operators';
+import { combineLatest, forkJoin, Observable, of, Subscription } from 'rxjs';
+import { catchError, map, switchMap } from 'rxjs/operators';
 import { Action, FileAccessPrompt, NotificationsService, NotificationType } from 'src/app/services';
 import { moveInOutAnimation, moveInOutListAnimation } from 'src/app/shared/animations';
 import { ActionIndicatorService } from '../action-indicator';
@@ -68,12 +68,15 @@ export class PromptListComponent implements OnInit, OnDestroy {
 
 		// each time the notification list is emitted make sure we have an
 		// up-to-date copy of the linked application profile as well.
+		//
+		// catchError per-lookup so a single 404 (profile auto-created
+		// by the daemon but not yet persisted when the prompt arrived,
+		// or stale prompt for a deleted profile) does NOT tear down
+		// the whole subscription -- which is the failure shape that
+		// shows up to users as "yellow badge but No Prompts panel".
 		const profiles$ = prompts$
 			.pipe(
 				switchMap(notifs => {
-					// collect all profile keys in a distict set so we don't load
-					// them more that once. Drop prompts without a resolved
-					// profile -- the in-app list only renders per-profile groups.
 					var profileKeys = new Set<string>();
 					notifs.forEach(n => {
 						const prof = n.EventData?.Profile;
@@ -82,11 +85,16 @@ export class PromptListComponent implements OnInit, OnDestroy {
 						}
 					});
 					if (profileKeys.size === 0) {
-						return forkJoin([] as Observable<AppProfile>[]).pipe(map(() => [] as AppProfile[]));
+						return of([] as AppProfile[]);
 					}
-					// load all of them in parallel
 					return forkJoin(
-						Array.from(profileKeys).map(key => this.profileService.getAppProfileFromKey(key))
+						Array.from(profileKeys).map(key =>
+							this.profileService.getAppProfileFromKey(key).pipe(
+								catchError(() => of(null as AppProfile | null)),
+							)
+						)
+					).pipe(
+						map(results => results.filter((p): p is AppProfile => p !== null)),
 					)
 				})
 			);
@@ -99,29 +107,56 @@ export class PromptListComponent implements OnInit, OnDestroy {
 			]).subscribe(([prompts, profiles]) => {
 
 				let promptsByProfile = new Map<string, FileAccessPrompt[]>();
+				let placeholders = new Map<string, ProfilePrompts>();
+
+				const profilesByID = new Map<string, AppProfile>();
+				profiles.forEach(p => profilesByID.set(p.ID, p));
 
 				prompts.forEach(prompt => {
 					if (!prompt.EventData) {
 						return;
 					}
 
-					const profileID = prompt.EventData.Profile?.ID;
-					if (!profileID) {
-						return;
-					}
+					const subject = prompt.EventData.Subject;
+					const profMeta = prompt.EventData.Profile;
+					// Use the profile's ID when available, fall back to
+					// the exe path so prompts still group when the
+					// profile lookup failed (race or stale).
+					const groupID = profMeta?.ID || subject?.Exe || 'unknown';
 
-					let entries = promptsByProfile.get(profileID);
+					let entries = promptsByProfile.get(groupID);
 					if (!entries) {
 						entries = [];
-						promptsByProfile.set(profileID, entries);
+						promptsByProfile.set(groupID, entries);
 					}
 					entries.push(prompt);
+
+					// If the profile didn't load, synthesise just enough
+					// to render the group header so the prompt is still
+					// actionable. ID intentionally matches groupID.
+					// AppProfile has many fields the template doesn't
+					// read in this view; cast through unknown to skip
+					// the structural check.
+					if (!profilesByID.has(groupID)) {
+						placeholders.set(groupID, {
+							ID: groupID,
+							Source: profMeta?.Source || '',
+							Name: profMeta?.Name || subject?.Exe || 'Unknown application',
+							LinkedPath: profMeta?.LinkedPath || subject?.Exe || '',
+							Config: {},
+							showAll: false,
+							promptsLimited: [],
+							prompts: [],
+						} as unknown as ProfilePrompts);
+					}
 				});
 
-				// Convert the list of application profiles into a set of ProfilePrompts
-				// objects that we can use to actually display the prompts with pagination
-				// applied.
-				this.profiles = profiles
+				const allGroups: AppProfile[] = [
+					...profiles,
+					...Array.from(placeholders.values()).filter(p => !profilesByID.has(p.ID)),
+				];
+
+				this.profiles = allGroups
 					.filter(profile => !!promptsByProfile.get(profile.ID))
 					.map(profile => {
 						const prompts = promptsByProfile.get(profile.ID)!;
