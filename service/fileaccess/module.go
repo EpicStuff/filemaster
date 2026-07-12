@@ -33,6 +33,19 @@ func (fa *FileAccess) Start() error {
 	if err != nil {
 		return err
 	}
+
+	// Standalone smoke and demo tools do not expose the daemon config
+	// module. Let them opt into paths explicitly through FM_WATCH_PATHS,
+	// while keeping an empty daemon config authoritative.
+	if _, ok := fa.instance.(configAccessor); !ok {
+		if paths := watchPathsFromEnv(); len(paths) > 0 {
+			if err := src.SetWatchPaths(paths); err != nil {
+				_ = src.Close()
+				return fmt.Errorf("set standalone watch paths: %w", err)
+			}
+		}
+	}
+
 	fa.source = src
 
 	fa.mgr.Go("file-access source", func(w *mgr.WorkerCtx) error {
