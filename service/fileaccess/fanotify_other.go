@@ -2,11 +2,14 @@
 
 package fileaccess
 
-import "context"
+import (
+	"context"
+	"os"
+)
 
 func newPlatformSource(log logger) (Source, error) {
-	if src, ok, err := fakeFanotifyFromEnv(log); ok || err != nil {
-		return src, err
+	if path := os.Getenv("FM_FAKE_SOCKET"); path != "" {
+		return newSocketSource(path, log)
 	}
 	return &nopSource{log: log}, nil
 }
