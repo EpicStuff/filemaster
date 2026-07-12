@@ -37,8 +37,13 @@ func (scriptedPrompter) Prompt(_ context.Context, e fileaccess.FileEvent, _ time
 type stubInstance struct{}
 
 func main() {
-	watchPaths := strings.TrimSpace(os.Getenv("FM_WATCH_PATHS"))
-	if watchPaths == "" {
+	var watchPaths []string
+	for _, p := range strings.Split(os.Getenv("FM_WATCH_PATHS"), ":") {
+		if p = strings.TrimSpace(p); p != "" {
+			watchPaths = append(watchPaths, p)
+		}
+	}
+	if len(watchPaths) == 0 {
 		fmt.Fprintln(os.Stderr, "set FM_WATCH_PATHS to the directories to watch")
 		os.Exit(2)
 	}
@@ -67,7 +72,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "start:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("phase-3 demo watching %s; sleeping 15s\n", watchPaths)
+	fmt.Printf("phase-3 demo watching %s; sleeping 15s\n", strings.Join(watchPaths, ":"))
 	time.Sleep(15 * time.Second)
 	if err := fa.Stop(); err != nil {
 		fmt.Fprintln(os.Stderr, "stop:", err)

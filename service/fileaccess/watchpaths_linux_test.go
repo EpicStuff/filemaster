@@ -53,7 +53,7 @@ func TestNormalizeWatchPaths(t *testing.T) {
 		"  ",
 		"/a", // duplicate -> deduped
 	})
-	want := map[string]struct{}{ "/a": {}, "/b": {} }
+	want := map[string]struct{}{"/a": {}, "/b": {}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalize = %v, want %v", got, want)
 	}
