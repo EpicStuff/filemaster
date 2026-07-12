@@ -270,6 +270,31 @@ export const subsystems : SubsystemWithExpertise[] = [
     }
   },
   {
+    minimumExpertise: ExpertiseLevelNumber.user,
+    isDisabled: false,
+    hasUserDefinedValues: false,
+    ID: "fileaccess",
+    Name: "File Access",
+    Description: "Control application access to files and directories",
+    Modules: [
+      {
+        Name: "fileaccess",
+        Enabled: true
+      }
+    ],
+    ToggleOptionKey: "",
+    ExpertiseLevel: "user",
+    ReleaseLevel: 0,
+    ConfigKeySpace: "config:fileaccess/",
+    _meta: {
+      Created: 0,
+      Modified: 0,
+      Expires: 0,
+      Deleted: 0,
+      Key: "runtime:subsystems/fileaccess"
+    }
+  },
+  {
   minimumExpertise: ExpertiseLevelNumber.user,  // User level since UI is user-facing
   isDisabled: false,
   hasUserDefinedValues: false,

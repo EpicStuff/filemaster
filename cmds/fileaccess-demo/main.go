@@ -5,9 +5,9 @@
 //
 // Run (as root, in host userns):
 //
-//	go run ./cmds/fileaccess-demo &
-//	cat /tmp/filemaster-test/normal-file   # succeeds
-//	cat /tmp/filemaster-test/blocked-file  # fails: Permission denied
+//	FM_WATCH_PATHS=/path/to/watch go run ./cmds/fileaccess-demo &
+//	cat /path/to/watch/normal-file   # succeeds
+//	cat /path/to/watch/blocked-file  # fails: Permission denied
 package main
 
 import (
@@ -37,6 +37,17 @@ func (scriptedPrompter) Prompt(_ context.Context, e fileaccess.FileEvent, _ time
 type stubInstance struct{}
 
 func main() {
+	var watchPaths []string
+	for _, p := range strings.Split(os.Getenv("FM_WATCH_PATHS"), ":") {
+		if p = strings.TrimSpace(p); p != "" {
+			watchPaths = append(watchPaths, p)
+		}
+	}
+	if len(watchPaths) == 0 {
+		fmt.Fprintln(os.Stderr, "set FM_WATCH_PATHS to the directories to watch")
+		os.Exit(2)
+	}
+
 	fa, err := fileaccess.New(stubInstance{})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "new:", err)
@@ -61,9 +72,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "start:", err)
 		os.Exit(1)
 	}
-	fmt.Println("phase-3 demo up; sleeping 15s")
-	fmt.Println("    try: cat /tmp/filemaster-test/normal")
-	fmt.Println("    try: cat /tmp/filemaster-test/blocked-thing")
+	fmt.Printf("phase-3 demo watching %s; sleeping 15s\n", strings.Join(watchPaths, ":"))
 	time.Sleep(15 * time.Second)
 	if err := fa.Stop(); err != nil {
 		fmt.Fprintln(os.Stderr, "stop:", err)
