@@ -19,27 +19,29 @@ func TestResolveWatchPathsHonorsEmptyConfig(t *testing.T) {
 	}
 }
 
-func TestResolveWatchPathsUsesEnvWithoutConfig(t *testing.T) {
+func TestResolveWatchPathsReturnsEmptyWithoutConfig(t *testing.T) {
 	previous := cfgOptionWatchPaths
 	cfgOptionWatchPaths = nil
 	defer func() { cfgOptionWatchPaths = previous }()
 
-	t.Setenv(envWatchPaths, "/a:/b")
-	got := resolveWatchPaths()
-	want := []string{"/a", "/b"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("resolveWatchPaths() = %v, want %v", got, want)
+	if got := resolveWatchPaths(); len(got) != 0 {
+		t.Fatalf("resolveWatchPaths() = %v, want no paths", got)
 	}
 }
 
-func TestResolveWatchPathsReturnsEmptyWithoutConfigOrEnv(t *testing.T) {
-	previous := cfgOptionWatchPaths
-	cfgOptionWatchPaths = nil
-	defer func() { cfgOptionWatchPaths = previous }()
+func TestWatchPathsFromEnv(t *testing.T) {
+	t.Setenv(envWatchPaths, " /a :/b:: ")
+	got := watchPathsFromEnv()
+	want := []string{"/a", "/b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("watchPathsFromEnv() = %v, want %v", got, want)
+	}
+}
 
+func TestWatchPathsFromEnvReturnsEmptyWhenUnset(t *testing.T) {
 	t.Setenv(envWatchPaths, "")
-	if got := resolveWatchPaths(); len(got) != 0 {
-		t.Fatalf("resolveWatchPaths() = %v, want no paths", got)
+	if got := watchPathsFromEnv(); len(got) != 0 {
+		t.Fatalf("watchPathsFromEnv() = %v, want no paths", got)
 	}
 }
 
