@@ -16,13 +16,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// defaultWatchPath is used when the env var is unset; mainly so the
-// demo / smoke binaries continue to work out of the box.
-const defaultWatchPath = "/tmp/filemaster-test"
-
 // envWatchPaths is the colon-separated list of directories the source
-// marks. Set by ops / demo scripts; the daemon's config option
-// supersedes this once we have one.
+// marks. It is only used by standalone smoke and demo binaries that do
+// not register the daemon config option.
 const envWatchPaths = "FM_WATCH_PATHS"
 
 // fanotifySource is a Linux fanotify-backed Source. One fd per source;
@@ -79,38 +75,25 @@ func opFromMask(mask uint64) FileOp {
 }
 
 // newPlatformSource returns the Source implementation for this OS.
-// On Linux this is the fanotify-backed one. Watch paths come from, in
-// priority order:
-//
-//  1. cfgOptionWatchPaths -- the registered StringArrayOption. In a
-//     fully-booted daemon this is the only source that matters; the
-//     config module overrides it from disk + UI.
-//  2. FM_WATCH_PATHS env var (colon-separated). Useful for the
-//     standalone smoke/demo binaries that don't bring up the config
-//     module.
-//  3. defaultWatchPath -- a single hardcoded directory so the
-//     out-of-box demo / smoke flow keeps working without setup.
+// On Linux this is the fanotify-backed one. The registered daemon
+// config is authoritative, including when its value is empty. The
+// FM_WATCH_PATHS environment variable is only used by standalone
+// smoke and demo binaries that do not register the config option.
 func newPlatformSource(log logger) (Source, error) {
 	return newFanotifySource(resolveWatchPaths(), log)
 }
 
-// resolveWatchPaths runs the priority chain documented on
-// newPlatformSource and returns the resulting path list. Always
-// returns at least one entry.
+// resolveWatchPaths returns the configured watch paths. An empty
+// registered config value deliberately means no paths are watched.
 func resolveWatchPaths() []string {
 	if cfgOptionWatchPaths != nil {
-		if v := cfgOptionWatchPaths(); len(v) > 0 {
-			return v
-		}
+		return cfgOptionWatchPaths()
 	}
-	if env := watchPathsFromEnv(); env != nil {
-		return env
-	}
-	return []string{defaultWatchPath}
+	return watchPathsFromEnv()
 }
 
 // watchPathsFromEnv parses FM_WATCH_PATHS into a slice, or returns nil
-// if unset / empty after trimming. Caller decides what to do on nil.
+// if unset or empty after trimming.
 func watchPathsFromEnv() []string {
 	raw := os.Getenv(envWatchPaths)
 	if raw == "" {
@@ -129,10 +112,6 @@ func watchPathsFromEnv() []string {
 }
 
 func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
-	if len(paths) == 0 {
-		return nil, errors.New("no watch paths configured")
-	}
-
 	fd, err := unix.FanotifyInit(
 		unix.FAN_CLASS_CONTENT|unix.FAN_CLOEXEC,
 		unix.O_RDONLY|unix.O_LARGEFILE|unix.O_CLOEXEC,
