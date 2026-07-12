@@ -43,7 +43,7 @@
 }
 
 .dotted {
-  width: min(100%, 24rem);
+  @apply w-full;
   @apply rounded;
   @apply p-1;
   @apply border-2;
