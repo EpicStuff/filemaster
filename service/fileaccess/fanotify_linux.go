@@ -91,6 +91,9 @@ func opFromMask(mask uint64) FileOp {
 //  3. defaultWatchPath -- a single hardcoded directory so the
 //     out-of-box demo / smoke flow keeps working without setup.
 func newPlatformSource(log logger) (Source, error) {
+	if src, ok, err := fakeFanotifyFromEnv(log); ok || err != nil {
+		return src, err
+	}
 	return newFanotifySource(resolveWatchPaths(), log)
 }
 

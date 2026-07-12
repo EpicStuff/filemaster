@@ -5,6 +5,9 @@ package fileaccess
 import "context"
 
 func newPlatformSource(log logger) (Source, error) {
+	if src, ok, err := fakeFanotifyFromEnv(log); ok || err != nil {
+		return src, err
+	}
 	return &nopSource{log: log}, nil
 }
 
