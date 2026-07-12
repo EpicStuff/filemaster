@@ -16,11 +16,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// envWatchPaths is the colon-separated list of directories the source
-// marks. It is only used by standalone smoke and demo binaries that do
-// not register the daemon config option.
-const envWatchPaths = "FM_WATCH_PATHS"
-
 // fanotifySource is a Linux fanotify-backed Source. One fd per source;
 // Run reads events from it, Close releases it. Construction does both
 // fanotify_init and fanotify_mark so errors surface to module startup.
@@ -75,10 +70,8 @@ func opFromMask(mask uint64) FileOp {
 }
 
 // newPlatformSource returns the Source implementation for this OS.
-// On Linux this is the fanotify-backed one. The registered daemon
-// config is authoritative, including when its value is empty. The
-// FM_WATCH_PATHS environment variable is only used by standalone
-// smoke and demo binaries that do not register the config option.
+// The registered daemon config is authoritative, including when its
+// value is empty.
 func newPlatformSource(log logger) (Source, error) {
 	return newFanotifySource(resolveWatchPaths(), log)
 }
@@ -89,26 +82,7 @@ func resolveWatchPaths() []string {
 	if cfgOptionWatchPaths != nil {
 		return cfgOptionWatchPaths()
 	}
-	return watchPathsFromEnv()
-}
-
-// watchPathsFromEnv parses FM_WATCH_PATHS into a slice, or returns nil
-// if unset or empty after trimming.
-func watchPathsFromEnv() []string {
-	raw := os.Getenv(envWatchPaths)
-	if raw == "" {
-		return nil
-	}
-	var out []string
-	for _, p := range strings.Split(raw, ":") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
+	return nil
 }
 
 func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
