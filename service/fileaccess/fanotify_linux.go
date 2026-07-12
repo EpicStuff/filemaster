@@ -73,6 +73,9 @@ func opFromMask(mask uint64) FileOp {
 // The registered daemon config is authoritative, including when its
 // value is empty.
 func newPlatformSource(log logger) (Source, error) {
+	if path := os.Getenv("FM_FAKE_SOCKET"); path != "" {
+		return newSocketSource(path, log)
+	}
 	return newFanotifySource(resolveWatchPaths(), log)
 }
 
