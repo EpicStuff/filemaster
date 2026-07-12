@@ -45,7 +45,7 @@
 .new-entry {
   position: relative;
   cursor: pointer;
-  @apply w-full;
+  width: min(100%, 24rem);
   @apply rounded;
   @apply p-1;
   @apply border-2;
