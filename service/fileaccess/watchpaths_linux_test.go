@@ -8,6 +8,41 @@ import (
 	"testing"
 )
 
+func TestResolveWatchPathsHonorsEmptyConfig(t *testing.T) {
+	previous := cfgOptionWatchPaths
+	cfgOptionWatchPaths = func() []string { return []string{} }
+	defer func() { cfgOptionWatchPaths = previous }()
+
+	t.Setenv(envWatchPaths, "/tmp/should-not-be-used")
+	if got := resolveWatchPaths(); len(got) != 0 {
+		t.Fatalf("resolveWatchPaths() = %v, want no paths", got)
+	}
+}
+
+func TestResolveWatchPathsUsesEnvWithoutConfig(t *testing.T) {
+	previous := cfgOptionWatchPaths
+	cfgOptionWatchPaths = nil
+	defer func() { cfgOptionWatchPaths = previous }()
+
+	t.Setenv(envWatchPaths, "/a:/b")
+	got := resolveWatchPaths()
+	want := []string{"/a", "/b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolveWatchPaths() = %v, want %v", got, want)
+	}
+}
+
+func TestResolveWatchPathsReturnsEmptyWithoutConfigOrEnv(t *testing.T) {
+	previous := cfgOptionWatchPaths
+	cfgOptionWatchPaths = nil
+	defer func() { cfgOptionWatchPaths = previous }()
+
+	t.Setenv(envWatchPaths, "")
+	if got := resolveWatchPaths(); len(got) != 0 {
+		t.Fatalf("resolveWatchPaths() = %v, want no paths", got)
+	}
+}
+
 func TestNormalizeWatchPaths(t *testing.T) {
 	got := normalizeWatchPaths([]string{
 		"/a",
@@ -16,7 +51,7 @@ func TestNormalizeWatchPaths(t *testing.T) {
 		"  ",
 		"/a", // duplicate -> deduped
 	})
-	want := map[string]struct{}{"/a": {}, "/b": {}}
+	want := map[string]struct{}{ "/a": {}, "/b": {} }
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalize = %v, want %v", got, want)
 	}
