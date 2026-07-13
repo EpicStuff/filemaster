@@ -3,3 +3,5 @@ dist
 dist-extension
 dist-lib
 .angular
+playwright-report
+test-results

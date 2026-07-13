@@ -67,4 +67,8 @@ desktop/tauri/src-tauri/intel/
 windows_kext/test/_testcert/
 windows_kext/test/_out/
 windows_kext/test/_delme/
+
 .claude/
+.serena/
+.token-savior-cache.json
+fake-fanotify
