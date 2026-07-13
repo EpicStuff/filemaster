@@ -42,7 +42,15 @@ Current unit coverage is mostly `NotificationsService`, plus smoke tests for
 
 ## Playwright
 
-All Playwright tests:
+Full browser E2E suite:
+
+```bash
+npm run e2e
+```
+
+`npm run e2e` runs the Playwright suite.
+
+Playwright directly:
 
 ```bash
 npm run e2e:playwright
@@ -91,13 +99,10 @@ checks the file, tries a read like `cat <file>`, clicks `Deny once`, checks the
 read is blocked, then opens `/monitor` and checks the read/write activity is
 shown in the app.
 
-The prompt and allow/block parts currently run. The `/monitor` assertion exposes
-the missing file-access activity UI until that page is implemented.
-
 ## Legacy Protractor
 
 Legacy Angular E2E target:
 
 ```bash
-npm run e2e
+npm run e2e:protractor
 ```

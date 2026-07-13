@@ -41,7 +41,15 @@ substantial specs there at the moment.
 
 ## Playwright
 
-Run the Playwright tests with:
+Run the full browser E2E suite with:
+
+```bash
+npm run e2e
+```
+
+`npm run e2e` runs the Playwright suite.
+
+Run Playwright directly with:
 
 ```bash
 npm run e2e:playwright
@@ -76,8 +84,39 @@ the built Angular app serves, boots, mounts the root component, and reaches the
 default route in a real browser. Add deeper Playwright tests for user flows,
 navigation, settings screens, onboarding, and backend/proxy behavior.
 
+## File Access E2E
+
+Run the fake fanotify file-access test with:
+
+```bash
+npm run e2e:fileaccess
+```
+
+Run the same test in a visible browser with:
+
+```bash
+npm run e2e:fileaccess:headed
+```
+
+Run against real Linux fanotify with:
+
+```bash
+npm run e2e:fileaccess:real
+```
+
+Real mode requires an environment where `fanotify_init` works, usually
+`CAP_SYS_ADMIN` in the init user namespace.
+
+The file-access test starts a test `portmaster-core`, points Angular at it,
+tries a watched-file write like `echo test > <file>`, clicks `Allow once`,
+checks the file, tries a read like `cat <file>`, clicks `Deny once`, checks the
+read is blocked, then opens `/monitor` and checks the read/write activity is
+shown in the app.
+
 ## Legacy Protractor
 
-The existing `npm run e2e` script still runs Angular's Protractor target. Keep it
-for any legacy tests that still matter, but use Playwright for new full-browser
-E2E coverage.
+The old Angular Protractor target is still available for legacy checks:
+
+```bash
+npm run e2e:protractor
+```

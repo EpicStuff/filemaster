@@ -43,8 +43,9 @@ ported block) with a comment, rather than interspersing it throughout.
 
 ## Commit and push autonomy
 
-Commit at every coherent stopping point — no need to ask. Push immediately
-after every commit. Do not batch commits waiting for permission to push.
+Feel free to commit at every coherent stopping point — no need to ask. Push
+immediately after every commit. Do not batch commits waiting for permission to
+push.
 
 ## Test before every commit
 

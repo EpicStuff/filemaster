@@ -2,6 +2,7 @@ package binmeta
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -11,9 +12,17 @@ func TestFindIcon(t *testing.T) {
 	}
 	t.Parallel()
 
-	home := os.Getenv("HOME")
-	testFindIcon(t, "evolution", home)
-	testFindIcon(t, "nextcloud", home)
+	home := t.TempDir()
+	iconDir := filepath.Join(home, ".local/share/icons/hicolor/48x48/apps")
+	if err := os.MkdirAll(iconDir, 0o700); err != nil {
+		t.Fatalf("create icon dir: %s", err)
+	}
+	for _, name := range []string{"filemaster-test-evolution", "filemaster-test-nextcloud"} {
+		if err := os.WriteFile(filepath.Join(iconDir, name+".png"), []byte("png"), 0o600); err != nil {
+			t.Fatalf("write icon: %s", err)
+		}
+		testFindIcon(t, name, home)
+	}
 }
 
 func testFindIcon(t *testing.T, binName string, homeDir string) {

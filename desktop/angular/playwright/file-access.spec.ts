@@ -73,9 +73,9 @@ test('prompts for watched file write and read decisions and records them in the 
 		expect(readResult.exitCode).not.toBe(0);
 
 		await page.goto(`/monitor?api-port=${core.apiPort}`);
-		await expect(page.getByText(target)).toBeVisible();
-		await expect(page.getByText('write')).toBeVisible();
-		await expect(page.getByText('read')).toBeVisible();
+		const monitorRows = page.locator('tbody tr').filter({ hasText: target });
+		await expect(monitorRows.filter({ hasText: 'write' })).toBeVisible();
+		await expect(monitorRows.filter({ hasText: 'read' })).toBeVisible();
 	} finally {
 		await stopFilemaster(core);
 	}

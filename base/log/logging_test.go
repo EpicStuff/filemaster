@@ -7,7 +7,7 @@ import (
 )
 
 func init() {
-	err := Start("info", true, "")
+	err := Start("info")
 	if err != nil {
 		panic(fmt.Sprintf("start failed: %s", err))
 	}

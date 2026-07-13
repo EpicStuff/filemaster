@@ -1,185 +1,164 @@
-import { TestBed } from '@angular/core/testing';
-import { WebsocketService } from '@safing/portmaster-api';
-import { MockWebSocketSubject } from '@safing/portmaster-api/testing';
-import { PartialObserver } from 'rxjs';
+import { HttpClient } from '@angular/common/http';
+import { fakeAsync, flushMicrotasks, TestBed } from '@angular/core/testing';
+import { Router } from '@angular/router';
+import { PortapiService } from '@safing/portmaster-api';
+import { of, PartialObserver, Subject } from 'rxjs';
+import { INTEGRATION_SERVICE } from '../integration';
+import { ActionIndicatorService } from '../shared/action-indicator';
 import { NotificationsService } from './notifications.service';
-import { Notification, NotificationType } from './notifications.types';
+import { Action, Notification, NotificationState, NotificationType } from './notifications.types';
 
 describe('NotificationsService', () => {
   let service: NotificationsService;
-  let mock: MockWebSocketSubject;
+  let portapi: jasmine.SpyObj<PortapiService>;
+  let watchAllUpdates: Subject<Notification<any>[]>;
 
   beforeEach(() => {
+    watchAllUpdates = new Subject<Notification<any>[]>();
+    portapi = jasmine.createSpyObj<PortapiService>('PortapiService', [
+      'query',
+      'watchAll',
+      'update',
+      'create',
+    ]);
+    portapi.watchAll.and.returnValue(watchAllUpdates);
+
     TestBed.configureTestingModule({
       providers: [
+        NotificationsService,
+        { provide: PortapiService, useValue: portapi },
+        { provide: HttpClient, useValue: {} },
+        { provide: Router, useValue: { navigate: jasmine.createSpy('navigate').and.returnValue(Promise.resolve(true)) } },
         {
-          provide: WebsocketService,
-          useValue: MockWebSocketSubject,
-        }
-      ]
+          provide: ActionIndicatorService,
+          useValue: {
+            error: jasmine.createSpy('error'),
+            getErrorMessgae: (err: any) => String(err),
+            httpObserver: () => null,
+          },
+        },
+        { provide: INTEGRATION_SERVICE, useValue: { openExternal: jasmine.createSpy('openExternal').and.returnValue(Promise.resolve()) } },
+      ],
     });
     service = TestBed.inject(NotificationsService);
-    mock = MockWebSocketSubject.lastMock!;
   });
-
-  afterEach(() => {
-    mock.close();
-  })
 
   it('should be created', () => {
     expect(service).toBeTruthy();
   });
 
   it('should allow to query for notifications', () => {
+    portapi.query.and.returnValue(of(
+      {
+        data: {
+          EventID: 'updates:core-update-available',
+          Message: 'Update available',
+        },
+      } as any,
+      {
+        data: {
+          EventID: 'updates:ui-reload-required',
+          Message: 'UI reload required',
+        },
+      } as any,
+    ));
+
     const observer = createSpyObserver();
-    service.query("updates:").subscribe(observer);
+    service.query('updates:').subscribe(observer);
 
-    mock.expectLastMessage()
-    mock.expectLastMessage('type').toBe('query')
-    mock.expectLastMessage('query').toBe('notifications:all/updates:')
-
-    mock.lastMultiplex!.next({
-      id: mock.lastRequestId!,
-      type: 'ok',
-      data: {
-        ID: 'updates:core-update-available',
-        Message: 'Update available',
-      },
-      key: 'notifications:all/updates:core-update-available'
-    })
-
-    mock.lastMultiplex!.next({
-      id: mock.lastRequestId!,
-      type: 'ok',
-      data: {
-        ID: 'updates:ui-reload-required',
-        Message: 'UI reload required',
-      },
-      key: 'notifications:all/updates:ui-reload-required'
-    })
-
-    // query collects all notifications using toArray
-    // so nothing should be nexted yet.
-    expect(observer.next).not.toHaveBeenCalled()
-    expect(observer.error).not.toHaveBeenCalled()
-    expect(observer.complete).not.toHaveBeenCalled()
-
-    // finish the strea
-    mock.lastMultiplex!.next({
-      id: mock.lastRequestId!,
-      type: 'done'
-    })
-
+    expect(portapi.query).toHaveBeenCalledWith('notifications:all/updates:');
     expect(observer.next).toHaveBeenCalledWith([
       {
-        ID: 'updates:core-update-available',
+        EventID: 'updates:core-update-available',
         Message: 'Update available',
       },
       {
-        ID: 'updates:ui-reload-required',
+        EventID: 'updates:ui-reload-required',
         Message: 'UI reload required',
-      }
-    ])
-    expect(observer.error).not.toHaveBeenCalled()
-    expect(observer.complete).toHaveBeenCalled()
+      },
+    ]);
+    expect(observer.error).not.toHaveBeenCalled();
+    expect(observer.complete).toHaveBeenCalled();
   });
 
   describe('execute notification actions', () => {
-    it('should work using a notif object', () => {
-      let observer = createSpyObserver();
-      let notif: any = {
-        ID: 'updates:core-update-available',
+    it('should work using a notif object', fakeAsync(() => {
+      const update = new Subject<void>();
+      portapi.update.and.returnValue(update);
+      const observer = createSpyObserver();
+      const action = notificationAction('restart', 'Restart');
+      const notif = {
+        EventID: 'updates:core-update-available',
         Message: 'An update is available',
         Type: NotificationType.Info,
-        AvailableActions: [{ ID: "restart", Text: "Restart" }],
-      }
+        AvailableActions: [action],
+      } as Notification;
 
-      service.execute(notif, "restart").subscribe(observer);
+      service.execute(notif, action).subscribe(observer);
+      flushMicrotasks();
 
-      expect(observer.error).not.toHaveBeenCalled()
-
-      mock.expectLastMessage('type').toBe('update');
-      mock.expectLastMessage('key').toBe('notifications:all/updates:core-update-available');
-      mock.expectLastMessage('data').toEqual({
-        ID: 'updates:core-update-available',
+      expect(observer.error).not.toHaveBeenCalled();
+      expect(portapi.update).toHaveBeenCalledWith('notifications:all/updates:core-update-available', {
+        EventID: 'updates:core-update-available',
         SelectedActionID: 'restart',
       });
 
-      mock.lastMultiplex!.next({
-        id: mock.lastRequestId!,
-        type: 'success'
-      })
+      update.next(undefined);
+      update.complete();
+      flushMicrotasks();
 
       expect(observer.next).toHaveBeenCalledWith(undefined);
       expect(observer.error).not.toHaveBeenCalled();
       expect(observer.complete).toHaveBeenCalled();
-    });
+    }));
 
-    it('should throw when executing an unknown action using a notif object', () => {
-      let observer = createSpyObserver();
-      let notif: any = {
-        ID: 'updates:core-update-available',
-        Message: 'An update is available',
-        Type: NotificationType.Info,
-        AvailableActions: [{ ID: "restart", Text: "Restart" }],
-      }
+    it('should work using a key', fakeAsync(() => {
+      const update = new Subject<void>();
+      portapi.update.and.returnValue(update);
+      const observer = createSpyObserver();
 
-      service.execute(notif, "restart-with-typo").subscribe(observer);
+      service.execute('updates:core-update-available', notificationAction('restart', 'Restart')).subscribe(observer);
+      flushMicrotasks();
 
-      expect(observer.error).toHaveBeenCalled()
-      expect(mock.lastMessageSent).toBeUndefined();
-    });
-
-    it('should work using a key', () => {
-      let observer = createSpyObserver();
-      service.execute("updates:core-update-available", "restart").subscribe(observer);
-
-      expect(observer.error).not.toHaveBeenCalled()
-
-      mock.expectLastMessage('type').toBe('update');
-      mock.expectLastMessage('key').toBe('notifications:all/updates:core-update-available');
-      mock.expectLastMessage('data').toEqual({
-        ID: 'updates:core-update-available',
+      expect(observer.error).not.toHaveBeenCalled();
+      expect(portapi.update).toHaveBeenCalledWith('notifications:all/updates:core-update-available', {
+        EventID: 'updates:core-update-available',
         SelectedActionID: 'restart',
       });
 
-      mock.lastMultiplex!.next({
-        id: mock.lastRequestId!,
-        type: 'success'
-      })
+      update.next(undefined);
+      update.complete();
+      flushMicrotasks();
 
       expect(observer.next).toHaveBeenCalledWith(undefined);
       expect(observer.error).not.toHaveBeenCalled();
       expect(observer.complete).toHaveBeenCalled();
-    });
-  })
+    }));
+  });
 
   describe('resolving pending actions', () => {
     it('should work using a notif object', () => {
-      let observer = createSpyObserver();
-      let notif: any = {
-        ID: 'updates:core-update-available',
+      const update = new Subject<void>();
+      portapi.update.and.returnValue(update);
+      const observer = createSpyObserver();
+      const notif = {
+        EventID: 'updates:core-update-available',
         Message: 'An update is available',
         Type: NotificationType.Info,
-        Responded: Math.round(Date.now() / 1000),
-        SelectedActionID: "restart",
-      }
+        State: NotificationState.Responded,
+        SelectedActionID: 'restart',
+      } as Notification;
 
-      service.resolvePending(notif, 100).subscribe(observer)
+      service.resolvePending(notif, 100).subscribe(observer);
 
-      expect(observer.error).not.toHaveBeenCalled()
-
-      mock.expectLastMessage('type').toBe('update');
-      mock.expectLastMessage('key').toBe('notifications:all/updates:core-update-available');
-      mock.expectLastMessage('data').toEqual({
-        ID: 'updates:core-update-available',
-        Executed: 100,
+      expect(observer.error).not.toHaveBeenCalled();
+      expect(portapi.update).toHaveBeenCalledWith('notifications:all/updates:core-update-available', {
+        EventID: 'updates:core-update-available',
+        State: NotificationState.Responded,
       });
 
-      mock.lastMultiplex!.next({
-        id: mock.lastRequestId!,
-        type: 'success'
-      })
+      update.next(undefined);
+      update.complete();
 
       expect(observer.next).toHaveBeenCalledWith(undefined);
       expect(observer.error).not.toHaveBeenCalled();
@@ -187,39 +166,36 @@ describe('NotificationsService', () => {
     });
 
     it('should throw on an executed notification using a notif object', () => {
-      let observer = createSpyObserver();
-      let notif: any = {
-        ID: 'updates:core-update-available',
+      const observer = createSpyObserver();
+      const notif = {
+        EventID: 'updates:core-update-available',
         Message: 'An update is available',
         Type: NotificationType.Info,
         SelectedActionID: 'restart',
-        Responded: Math.round(Date.now() / 1000),
-        Executed: Math.round(Date.now() / 1000),
-      }
+        State: NotificationState.Executed,
+      } as Notification;
 
       service.resolvePending(notif).subscribe(observer);
 
-      expect(observer.error).toHaveBeenCalled()
-      expect(mock.lastMessageSent).toBeUndefined();
+      expect(observer.error).toHaveBeenCalled();
+      expect(portapi.update).not.toHaveBeenCalled();
     });
 
     it('should work using a key', () => {
-      let observer = createSpyObserver();
-      service.resolvePending("updates:core-update-available", 100).subscribe(observer);
+      const update = new Subject<void>();
+      portapi.update.and.returnValue(update);
+      const observer = createSpyObserver();
 
-      expect(observer.error).not.toHaveBeenCalled()
+      service.resolvePending('updates:core-update-available', 100).subscribe(observer);
 
-      mock.expectLastMessage('type').toBe('update');
-      mock.expectLastMessage('key').toBe('notifications:all/updates:core-update-available');
-      mock.expectLastMessage('data').toEqual({
-        ID: 'updates:core-update-available',
-        Executed: 100,
+      expect(observer.error).not.toHaveBeenCalled();
+      expect(portapi.update).toHaveBeenCalledWith('notifications:all/updates:core-update-available', {
+        EventID: 'updates:core-update-available',
+        State: NotificationState.Responded,
       });
 
-      mock.lastMultiplex!.next({
-        id: mock.lastRequestId!,
-        type: 'success'
-      })
+      update.next(undefined);
+      update.complete();
 
       expect(observer.next).toHaveBeenCalledWith(undefined);
       expect(observer.error).not.toHaveBeenCalled();
@@ -232,123 +208,107 @@ describe('NotificationsService', () => {
       const observer = createSpyObserver();
       service.new$.subscribe(observer);
 
-      let send = (msg: any) => {
-        mock.lastMultiplex!.next({
-          id: mock.lastRequestId!,
-          data: msg,
-          type: 'ok',
-          key: "notifications:all/" + msg.ID,
-        })
-      }
-
-      let n1 = {
-        ID: "new-notif-1",
-        Message: "a new notification",
-        Responded: 0,
-        Executed: 0,
+      const n1 = {
+        EventID: 'new-notif-1',
+        Message: 'a new notification',
+        State: NotificationState.Active,
         Expires: Math.round(Date.now() / 1000) + 60 * 60,
-      }
-      let n2 = {
-        ID: "new-notif-2",
-        Message: "a new notification",
-        Responded: 0,
-        Executed: 0,
+      };
+      const n2 = {
+        EventID: 'new-notif-2',
+        Message: 'a new notification',
         Expires: 0,
-        AvailableActions: [{ ID: "action-id", Text: "some action" }],
-      }
-      let expired = {
-        ID: "new-notif-3",
-        Message: "a new notification",
-        Responded: 0,
-        Executed: 0,
+        AvailableActions: [notificationAction('action-id', 'some action')],
+      };
+      const expired = {
+        EventID: 'new-notif-3',
+        Message: 'a new notification',
+        State: NotificationState.Executed,
         Expires: 100,
-      }
-      let pending = {
-        ID: "new-notif-4",
-        Message: "a new notification",
-        Responded: Math.round(Date.now() / 1000),
-        Executed: 0,
-        SelectedActionID: "test",
-      }
+      };
+      const pending = {
+        EventID: 'new-notif-4',
+        Message: 'a new notification',
+        State: NotificationState.Responded,
+        SelectedActionID: 'test',
+      };
 
-      send(n1)
-      send(expired)
-      send(n2)
-      send(pending)
+      watchAllUpdates.next([n1 as Notification]);
+      watchAllUpdates.next([n1 as Notification, expired as Notification]);
+      watchAllUpdates.next([n1 as Notification, expired as Notification, n2 as Notification]);
+      watchAllUpdates.next([n1 as Notification, expired as Notification, n2 as Notification, pending as Notification]);
 
-      expect(observer.complete).not.toHaveBeenCalled()
-      expect(observer.error).not.toHaveBeenCalled()
-      expect(observer.next).toHaveBeenCalledTimes(2)
-      expect(observer.next).toHaveBeenCalledWith(n1)
-      expect(observer.next).toHaveBeenCalledWith(n2)
-    })
-  })
+      expect(portapi.watchAll).toHaveBeenCalledWith('notifications:all/', undefined);
+      expect(observer.complete).not.toHaveBeenCalled();
+      expect(observer.error).not.toHaveBeenCalled();
+      expect(observer.next).toHaveBeenCalledWith([]);
+      expect(observer.next).toHaveBeenCalledWith([n1]);
+      expect(observer.next).toHaveBeenCalledWith([n1, n2]);
+    });
+  });
 
   describe('creating notifications', () => {
     it('should be possible using an object', () => {
-      let notification: Partial<Notification<any>> = {
-        ID: 'my-awesome-notification',
+      const create = new Subject<void>();
+      portapi.create.and.returnValue(create);
+      const notification: Partial<Notification<any>> = {
+        EventID: 'my-awesome-notification',
         AvailableActions: [
-          { ID: 'action-no', Text: 'No' },
-          { ID: 'force-no', Text: 'Hell No' }
+          notificationAction('action-no', 'No'),
+          notificationAction('force-no', 'Hell No'),
         ],
         Message: 'Update complete, do you want to reboot?',
-        Persistent: true,
         Type: NotificationType.Warning,
-      }
+      };
 
-      let observer = createSpyObserver();
+      const observer = createSpyObserver();
       service.create(notification).subscribe(observer);
 
       expect(observer.error).not.toHaveBeenCalled();
+      expect(portapi.create).toHaveBeenCalledWith('notifications:all/my-awesome-notification', notification);
 
-      mock.expectLastMessage('type').toBe('create')
-      mock.expectLastMessage('key').toBe('notifications:all/my-awesome-notification')
-      mock.expectLastMessage('data').toEqual(notification);
-      expect(notification.Created).toBeTruthy();
+      create.next(undefined);
+      create.complete();
 
-      mock.lastMultiplex!.next({
-        type: 'success',
-        id: mock.lastRequestId!,
-      })
-
-      expect(observer.complete).toHaveBeenCalled()
-      expect(observer.error).not.toHaveBeenCalled()
-      expect(observer.next).toHaveBeenCalledWith(undefined)
-    })
+      expect(observer.complete).toHaveBeenCalled();
+      expect(observer.error).not.toHaveBeenCalled();
+      expect(observer.next).toHaveBeenCalledWith(undefined);
+    });
 
     it('should be possible using parameters', () => {
-      let observer = createSpyObserver();
-      service.create('my-param-notification', 'message', NotificationType.Prompt, {
-        Persistent: true,
-        Created: 100,
-      }).subscribe(observer);
+      const create = new Subject<void>();
+      portapi.create.and.returnValue(create);
+      const observer = createSpyObserver();
+
+      service.create('my-param-notification', 'message', NotificationType.Prompt).subscribe(observer);
 
       expect(observer.error).not.toHaveBeenCalled();
-
-      mock.expectLastMessage('type').toBe('create')
-      mock.expectLastMessage('key').toBe('notifications:all/my-param-notification')
-      mock.expectLastMessage('data').toEqual({
+      expect(portapi.create).toHaveBeenCalledWith('notifications:all/my-param-notification', {
         Type: NotificationType.Prompt,
-        ID: 'my-param-notification',
+        EventID: 'my-param-notification',
         Message: 'message',
-        Created: 100,
-        Persistent: true,
+        State: NotificationState.Active,
       });
 
-      mock.lastMultiplex!.next({
-        type: 'success',
-        id: mock.lastRequestId!,
-      })
+      create.next(undefined);
+      create.complete();
 
-      expect(observer.complete).toHaveBeenCalled()
-      expect(observer.error).not.toHaveBeenCalled()
-      expect(observer.next).toHaveBeenCalledWith(undefined)
-
-    })
-  })
+      expect(observer.complete).toHaveBeenCalled();
+      expect(observer.error).not.toHaveBeenCalled();
+      expect(observer.next).toHaveBeenCalledWith(undefined);
+    });
+  });
 });
 
+function notificationAction(ID: string, Text: string): Action {
+  return {
+    ID,
+    Text,
+    Type: '',
+    Visibility: '',
+  };
+}
+
 function createSpyObserver(): PartialObserver<any> {
-  return jasmine.createSpyObj("observer", ["next", "error", "complete"])
+  return jasmine.createSpyObj('observer', ['next', 'error', 'complete']);
 }
