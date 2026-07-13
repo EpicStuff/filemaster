@@ -1,11 +1,17 @@
+import { CommonModule } from "@angular/common";
 import { ChangeDetectionStrategy, ChangeDetectorRef, Component, DestroyRef, Inject, OnInit, Optional, inject } from "@angular/core";
 import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
+import { FontAwesomeModule } from "@fortawesome/angular-fontawesome";
 import { SPNService, UserProfile } from "@safing/portmaster-api";
 import { SFNG_DIALOG_REF, SfngDialogRef } from "@safing/ui";
 import { catchError, delay, of, tap } from "rxjs";
 import { ActionIndicatorService } from "../action-indicator";
+import { ExpertiseModule } from "../expertise/expertise.module";
+import { SPNLoginComponent } from "../spn-login";
 
 @Component({
+  standalone: true,
+  imports: [CommonModule, FontAwesomeModule, ExpertiseModule, SPNLoginComponent],
   templateUrl: './spn-account-details.html',
   styleUrls: ['./spn-account-details.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,

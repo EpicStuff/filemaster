@@ -32,7 +32,6 @@ import { DashboardPageComponent } from './pages/dashboard/dashboard.component';
 import { FeatureCardComponent } from './pages/dashboard/feature-card/feature-card.component';
 import { MonitorPageComponent } from './pages/monitor';
 import { SettingsComponent } from './pages/settings/settings';
-import { SPNModule } from './pages/spn/spn.module';
 import { SupportPageComponent } from './pages/support';
 import { SupportFormComponent } from './pages/support/form';
 import { NotificationsService } from './services';
@@ -53,9 +52,6 @@ import { SfngMenuModule } from './shared/menu';
 import { SfngMultiSwitchModule } from './shared/multi-switch';
 import { NetqueryModule } from './shared/netquery';
 import { NetworkScoutComponent } from './shared/network-scout';
-import { SPNAccountDetailsComponent } from './shared/spn-account-details';
-import { SPNLoginComponent } from './shared/spn-login';
-import { SPNStatusComponent } from './shared/spn-status';
 import { NotificationListComponent } from './shared/notification-list/notification-list.component';
 import { NotificationComponent } from './shared/notification/notification';
 import { CommonPipesModule } from './shared/pipes';
@@ -68,6 +64,8 @@ import { MergeProfileDialogComponent } from './pages/app-view/merge-profile-dial
 import { AppInsightsComponent } from './pages/app-view/app-insights/app-insights.component';
 import { INTEGRATION_SERVICE, integrationServiceFactory } from './integration';
 import { SupportProgressDialogComponent } from './pages/support/progress-dialog';
+import { MapRendererComponent } from './pages/spn/map-renderer';
+import { SPNAccountModule } from './shared/spn-account/spn-account.module';
 
 function loadAndSetLocaleInitializer(configService: ConfigService) {
   return async function () {
@@ -150,10 +148,7 @@ const localeConfig = {
     SupportPageComponent,
     SupportFormComponent,
     SecurityLockComponent,
-    SPNStatusComponent,
     FeatureScoutComponent,
-    SPNLoginComponent,
-    SPNAccountDetailsComponent,
     NetworkScoutComponent,
     EditProfileDialog,
     ProcessDetailsDialogComponent,
@@ -200,9 +195,10 @@ const localeConfig = {
     CountryFlagModule,
     CountIndicatorModule,
     NetqueryModule,
+    MapRendererComponent,
+    SPNAccountModule,
     CommonPipesModule,
     UiModule,
-    SPNModule,
     PortmasterAPIModule.forRoot({
       httpAPI: environment.httpAPI,
       websocketAPI: environment.portAPI,
@@ -237,4 +233,3 @@ export class AppModule {
     library.addIcons(faGithub)
   }
 }
-

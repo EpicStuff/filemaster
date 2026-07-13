@@ -1,12 +1,16 @@
 import { coerceBooleanProperty } from "@angular/cdk/coercion";
+import { CommonModule } from "@angular/common";
 import { ChangeDetectionStrategy, ChangeDetectorRef, Component, DestroyRef, Input, OnInit, inject } from "@angular/core";
 import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
+import { FormsModule } from "@angular/forms";
 import { SPNService, UserProfile } from "@safing/portmaster-api";
 import { catchError, finalize, of } from "rxjs";
 import { ActionIndicatorService } from "../action-indicator";
 
 @Component({
   selector: 'app-spn-login',
+  standalone: true,
+  imports: [CommonModule, FormsModule],
   templateUrl: './spn-login.html',
   styleUrls: ['./spn-login.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush

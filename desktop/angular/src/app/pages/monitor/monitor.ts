@@ -1,6 +1,6 @@
 import { Component, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { BoolSetting, ConfigService, Database, FeatureID, Netquery, SPNService } from '@safing/portmaster-api';
+import { BoolSetting, ConfigService, Database, FeatureID, Filequery, Netquery, SPNService } from '@safing/portmaster-api';
 import { Subject, interval, map, merge, repeat } from 'rxjs';
 import { SessionDataService } from 'src/app/services';
 import { ActionIndicatorService } from 'src/app/shared/action-indicator';
@@ -15,6 +15,7 @@ import { fadeInAnimation, moveInOutListAnimation } from 'src/app/shared/animatio
 export class MonitorPageComponent {
   session = inject(SessionDataService);
   netquery = inject(Netquery);
+  filequery = inject(Filequery);
   reload = new Subject<void>();
 
   configService = inject(ConfigService);
@@ -60,6 +61,12 @@ export class MonitorPageComponent {
           count: result[0].totalCount,
         }
       }),
+      takeUntilDestroyed()
+    );
+
+  fileEvents = this.filequery.getRecentEvents(100)
+    .pipe(
+      repeat({ delay: () => merge(interval(1000), this.reload) }),
       takeUntilDestroyed()
     );
 

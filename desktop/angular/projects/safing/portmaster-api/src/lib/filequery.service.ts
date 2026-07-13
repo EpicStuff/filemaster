@@ -116,4 +116,14 @@ export class Filequery {
       map(results => results as unknown as FileAccessRecord[])
     );
   }
+
+  /** Returns recent file-access events across all profiles. */
+  getRecentEvents(limit = 100): Observable<FileAccessRecord[]> {
+    return this.query({
+      orderBy: [{ field: 'at', desc: true }],
+      pageSize: limit,
+    }).pipe(
+      map(results => results as unknown as FileAccessRecord[])
+    );
+  }
 }

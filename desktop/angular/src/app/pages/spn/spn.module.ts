@@ -36,6 +36,7 @@ import { SPNFeatureCarouselComponent } from './spn-feature-carousel';
     SfngFocusModule,
     SfngAppIconModule,
     SfngToggleSwitchModule,
+    MapRendererComponent,
     TabModule,
     A11yModule,
     ExpertiseModule,
@@ -47,7 +48,6 @@ import { SPNFeatureCarouselComponent } from './spn-feature-carousel';
     RouterModule,
   ],
   declarations: [
-    MapRendererComponent,
     PinOverlayComponent,
     CountryOverlayComponent,
     CountryDetailsComponent,

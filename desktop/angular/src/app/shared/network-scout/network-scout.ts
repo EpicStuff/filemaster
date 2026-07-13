@@ -1,6 +1,6 @@
 import { ChangeDetectionStrategy, ChangeDetectorRef, Component, DestroyRef, OnInit, TrackByFunction, inject } from "@angular/core";
 import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
-import { BoolSetting, Condition, ConfigService, ExpertiseLevel, IProfileStats, Netquery, Pin, SPNService } from "@safing/portmaster-api";
+import { BoolSetting, ConfigService, Filequery, IProfileStats, Pin, SPNService } from "@safing/portmaster-api";
 import { Subject, combineLatest, debounceTime, filter, finalize, interval, retry, startWith, switchMap, take, takeUntil } from "rxjs";
 import { UIStateService } from "src/app/services";
 import { fadeInListAnimation } from "../animations";
@@ -113,7 +113,7 @@ export class NetworkScoutComponent implements OnInit {
   trackPin: TrackByFunction<_Pin> = (_, pin) => pin.ID;
 
   constructor(
-    private netquery: Netquery,
+    private filequery: Filequery,
     private spn: SPNService,
     private configService: ConfigService,
     private stateService: UIStateService,
@@ -236,14 +236,9 @@ export class NetworkScoutComponent implements OnInit {
         .pipe(
           startWith(-1),
           switchMap(() => {
-            let query: Condition = {};
-            if (this.expertise.currentLevel !== ExpertiseLevel.Developer) {
-              query["internal"] = { $eq: false }
-            }
-
             updateInProgress = true
 
-            return this.netquery.getProfileStats(query)
+            return this.filequery.getProfileStats()
               .pipe(
                 finalize(() => updateInProgress = false)
               )
@@ -281,23 +276,20 @@ export class NetworkScoutComponent implements OnInit {
         this.allProfiles = res.map(s => {
           const existing = profileLookupMap.get(s.ID);
           return {
-            ...s,
-            exitPins: s.identities
-              .map(ident => {
-                const pin = pinLookupMap.get(ident.exit_node);
-                if (!pin) {
-                  return null;
-                }
-
-                return {
-                  count: ident.count,
-                  ...pin
-                }
-              })
-              .filter(pin => !!pin),
+            ID: s.ID,
+            Name: s.Name,
+            size: s.size,
+            empty: s.empty,
+            countAllowed: s.countAllowed,
+            countUnpermitted: s.countDenied,
+            countAliveConnections: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
+            identities: [],
+            exitPins: [],
             showMore: existing?.showMore ?? false,
-            expanded: existing?.expanded ?? (this.expandCollapseState === 'expand' && s.identities.length > 1 /* there's always the "direct" identity */),
-          } as _Profile
+            expanded: false,
+          } as unknown as _Profile
         });
 
         this.searchProfiles(searchTerm);
