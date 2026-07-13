@@ -18,6 +18,8 @@ import {
   DebugAPI,
   ExpertiseLevel,
   FeatureID,
+  FileAccessRecord,
+  Filequery,
   FlatConfigObject,
   IProfileStats,
   LayeredProfile,
@@ -93,6 +95,9 @@ export class AppViewComponent implements OnInit, OnDestroy {
    * in the history database for this app
    */
   connectionsInHistory = 0;
+
+  /** File-access events for the currently displayed profile. */
+  fileEvents: FileAccessRecord[] = [];
 
   /**
    * @private
@@ -194,6 +199,7 @@ export class AppViewComponent implements OnInit, OnDestroy {
     private profileService: AppProfileService,
     private route: ActivatedRoute,
     private netquery: Netquery,
+    private filequery: Filequery,
     private cdr: ChangeDetectorRef,
     private configService: ConfigService,
     private router: Router,
@@ -474,10 +480,19 @@ export class AppViewComponent implements OnInit, OnDestroy {
           this.appProfile = profile[0] || null;
           this.layeredProfile = profile[1] || null;
           this.stats = profile[2] || null;
+
+          if (this.appProfile) {
+            const pid = `${this.appProfile.Source}/${this.appProfile.ID}`;
+            this.filequery.getEventsForProfile(pid).subscribe(events => {
+              this.fileEvents = events;
+              this.cdr.markForCheck();
+            });
+          }
         } else {
           this.appProfile = null;
           this.layeredProfile = null;
           this.stats = null;
+          this.fileEvents = [];
         }
 
         this.displayWarning = false;

@@ -8,6 +8,7 @@ import {
 import {
   AppProfile,
   AppProfileService,
+  Filequery,
   Netquery,
   trackById,
 } from '@safing/portmaster-api';
@@ -94,6 +95,7 @@ export class AppOverviewComponent implements OnInit, OnDestroy {
     private changeDetector: ChangeDetectorRef,
     private searchService: FuzzySearchService,
     private netquery: Netquery,
+    private filequery: Filequery,
     private dialog: SfngDialogService,
     private actionIndicator: ActionIndicatorService,
     private router: Router
@@ -210,7 +212,7 @@ export class AppOverviewComponent implements OnInit, OnDestroy {
       // 404s and bubbles an error up combineLatest, blanking the
       // whole list. Swallow the error so the profile list still
       // renders with an empty "active" set.
-      this.netquery.getActiveProfileIDs().pipe(
+      this.filequery.getActiveProfileIDs().pipe(
         startWith([] as string[]),
         catchError(() => of([] as string[])),
       ),

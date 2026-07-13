@@ -11,6 +11,7 @@ export * from './lib/debug-api.service';
 export * from './lib/features';
 export * from './lib/meta-api.service';
 export * from './lib/module';
+export * from './lib/filequery.service';
 export * from './lib/netquery.service';
 export * from './lib/network.types';
 export * from './lib/portapi.service';

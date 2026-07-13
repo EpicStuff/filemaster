@@ -102,12 +102,34 @@
   </div>
 
   <sfng-tab-group class="flex overflow-hidden flex-col flex-grow p-4 px-12 w-full">
-    <!-- Connections (scaffolding repurposed for future file-access activity per app) -->
-    <sfng-tab id="connections" title="Connections">
-      <div *sfngTabContent>
-        <sfng-netquery-viewer [filters]="['allowed', 'as_owner', 'country', 'domain']"
-          [mergeFilter]="{profile: appProfile.Source + '/' + appProfile.ID}">
-        </sfng-netquery-viewer>
+    <!-- File-Access Events per app -->
+    <sfng-tab id="connections" title="File Events">
+      <div *sfngTabContent class="overflow-auto">
+        <table class="w-full text-xs" *ngIf="fileEvents.length > 0; else noEvents">
+          <thead>
+            <tr class="text-left text-secondary border-b border-gray-400">
+              <th class="py-1 pr-4">Time</th>
+              <th class="py-1 pr-4">Op</th>
+              <th class="py-1 pr-4">Verdict</th>
+              <th class="py-1 pr-4">PID</th>
+              <th class="py-1">Path</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let e of fileEvents" class="border-b border-gray-500 hover:bg-gray-300">
+              <td class="py-1 pr-4 whitespace-nowrap">{{ e.at | date:'HH:mm:ss' }}</td>
+              <td class="py-1 pr-4">{{ e.op }}</td>
+              <td class="py-1 pr-4"
+                [class.text-green-500]="e.verdict === 'allow'"
+                [class.text-red-500]="e.verdict !== 'allow'">{{ e.verdict }}</td>
+              <td class="py-1 pr-4">{{ e.pid }}</td>
+              <td class="py-1 truncate max-w-xs" [title]="e.path">{{ e.path }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <ng-template #noEvents>
+          <p class="p-4 text-secondary text-sm">No file-access events recorded yet.</p>
+        </ng-template>
       </div>
     </sfng-tab>
     <!-- App Settings -->

@@ -19,6 +19,7 @@ import (
 	"github.com/safing/portmaster/service/core"
 	"github.com/safing/portmaster/service/core/base"
 	"github.com/safing/portmaster/service/fileaccess"
+	"github.com/safing/portmaster/service/filequery"
 	"github.com/safing/portmaster/service/integration"
 	"github.com/safing/portmaster/service/mgr"
 	"github.com/safing/portmaster/service/process"
@@ -63,7 +64,8 @@ type Instance struct {
 	status        *status.Status
 	broadcasts    *broadcasts.Broadcasts
 	sync          *sync.Sync
-	fileAccess    *fileaccess.FileAccess
+	fileAccess *fileaccess.FileAccess
+	fileQuery  *filequery.FileQuery
 
 	CommandLineOperation func() error
 	ShouldRestart        bool
@@ -174,6 +176,10 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	if err != nil {
 		return instance, fmt.Errorf("create fileaccess module: %w", err)
 	}
+	instance.fileQuery, err = filequery.NewFileQuery(instance)
+	if err != nil {
+		return instance, fmt.Errorf("create filequery module: %w", err)
+	}
 	// Wire the file-access verdict chain:
 	//   1. ProfileHandler -- per-profile rules read/written via the
 	//      profile package, so persistence and sync ride on the
@@ -183,6 +189,7 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	//      etc.), fall back to the exe-keyed PromptHandler with its
 	//      JSON file under the data dir so unidentified processes still
 	//      get to ask the user.
+	//   3. RecordingHandler wraps the chain to forward verdicts to filequery.
 	fallbackPrompt := fileaccess.NewPromptHandler(
 		&fileaccess.NotificationsPrompter{},
 		nil,
@@ -192,12 +199,15 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	if err := fallbackPrompt.SetPersistPath(fallbackRulesPath); err != nil {
 		return instance, fmt.Errorf("load fallback rules from %s: %w", fallbackRulesPath, err)
 	}
-	instance.fileAccess.SetHandler(fileaccess.NewProfileHandler(
-		fileaccess.NewProcessProfileLookup(),
-		&fileaccess.NotificationsPrompter{},
-		fallbackPrompt,
-		30*time.Second,
-		instance.fileAccess.Manager(),
+	instance.fileAccess.SetHandler(fileaccess.NewRecordingHandler(
+		fileaccess.NewProfileHandler(
+			fileaccess.NewProcessProfileLookup(),
+			&fileaccess.NotificationsPrompter{},
+			fallbackPrompt,
+			30*time.Second,
+			instance.fileAccess.Manager(),
+		),
+		instance.fileQuery.Feed(),
 	))
 
 	// Add all modules to instance group.
@@ -219,6 +229,7 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 		instance.process,
 		instance.profile,
 		instance.fileAccess,
+		instance.fileQuery,
 
 		instance.status,
 		instance.broadcasts,
