@@ -41,6 +41,11 @@ Never mix ported logic and new logic in the same function. If a ported function
 needs one filemaster-specific line, add it at the boundary (before or after the
 ported block) with a comment, rather than interspersing it throughout.
 
+## Commit and push autonomy
+
+Commit at every coherent stopping point — no need to ask. Push immediately
+after every commit. Do not batch commits waiting for permission to push.
+
 ## Test before every commit
 
 Compiling clean is not testing. Before committing any behavioral change, run
