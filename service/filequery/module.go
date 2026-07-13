@@ -62,6 +62,7 @@ func NewFileQuery(inst instance) (*FileQuery, error) {
 		Description: "Query the file-access event history.",
 		Path:        "filequery/query",
 		Read:        api.PermitSelf,
+		Write:       api.PermitSelf,
 		HandlerFunc: queryHandler.ServeHTTP,
 	}); err != nil {
 		return nil, fmt.Errorf("register filequery/query endpoint: %w", err)
@@ -72,6 +73,7 @@ func NewFileQuery(inst instance) (*FileQuery, error) {
 		Description: "Run multiple file-access queries in one request.",
 		Path:        "filequery/query/batch",
 		Read:        api.PermitSelf,
+		Write:       api.PermitSelf,
 		HandlerFunc: batchHandler.ServeHTTP,
 	}); err != nil {
 		return nil, fmt.Errorf("register filequery/query/batch endpoint: %w", err)
