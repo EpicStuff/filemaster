@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -166,21 +165,7 @@ func registerAPIEndpoints() error {
 		return err
 	}
 
-	// Grant full access to any connection from loopback. The API is bound to
-	// 127.0.0.1 only, so every connection is already local; this replaces the
-	// process-based authenticator that upstream Portmaster registers via its
-	// firewall package (which we removed).
-	return api.SetAuthenticator(func(r *http.Request, _ *http.Server) (*api.AuthToken, error) {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			return nil, nil
-		}
-		ip := net.ParseIP(host)
-		if ip != nil && (ip.IsLoopback()) {
-			return &api.AuthToken{Read: api.PermitSelf, Write: api.PermitSelf}, nil
-		}
-		return nil, nil
-	})
+	return api.SetAuthenticator(localhostAuthenticator)
 }
 
 // shutdown shuts the Portmaster down.
