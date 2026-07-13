@@ -72,3 +72,4 @@ windows_kext/test/_delme/
 .serena/
 .token-savior-cache.json
 fake-fanotify
+portmaster-core

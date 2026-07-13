@@ -12,6 +12,7 @@ func TestFileOpString(t *testing.T) {
 	}{
 		{OpOpen, "open"},
 		{OpRead, "read"},
+		{OpWrite, "write"},
 		{OpExec, "exec"},
 		{FileOp(99), "unknown"},
 	}

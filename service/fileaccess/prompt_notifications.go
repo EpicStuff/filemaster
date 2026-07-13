@@ -108,6 +108,8 @@ func opVerb(op FileOp) string {
 	switch op {
 	case OpRead:
 		return "read"
+	case OpWrite:
+		return "write to"
 	case OpExec:
 		return "execute"
 	default:

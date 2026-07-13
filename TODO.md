@@ -278,7 +278,7 @@ than just deny — Landlock can only allow/deny, not redirect.
 
 ## Testing coverage gaps
 
-- [ ] **`socketSource` unit test.** `source_test.go` has a `fakeSource`
+- [x] **`socketSource` unit test.** `source_test.go` has a `fakeSource`
       test-double but the real `socketSource` (`socket_source.go`) has no
       coverage at all. Add a `TestSocketSource` that: creates a Unix socket
       listener, starts `socketSource.Run` in a goroutine, writes one
@@ -286,7 +286,7 @@ than just deny — Landlock can only allow/deny, not redirect.
       line, and asserts the correct string. Also test close-from-handler
       (server closes socket mid-run) returns without deadlock.
 
-- [ ] **`newPlatformSource` routing test.** `newPlatformSource` branches on
+- [x] **`newPlatformSource` routing test.** `newPlatformSource` branches on
       `FM_FAKE_SOCKET`. Add a test (in a `_test.go` using `t.Setenv`) that
       sets the var to a non-existent path and asserts the returned source is
       a `*socketSource` rather than a `*fanotifySource`. Guards against the
@@ -294,7 +294,7 @@ than just deny — Landlock can only allow/deny, not redirect.
       swapped. (Can run on all platforms; socket source construction fails
       on a missing path but the type assertion happens before `Run`.)
 
-- [ ] **Port constant sync.** The API port (`818`) is defined in
+- [x] **Port constant sync.** The API port (`818`) is defined in
       `service/core/base/module.go` (`DefaultAPIListenAddress`) and
       independently hardcoded in three Tauri Rust files
       (`portmaster/websocket.rs`, `portmaster/mod.rs`, `window.rs`) plus
@@ -308,7 +308,7 @@ than just deny — Landlock can only allow/deny, not redirect.
          they all agree with `DefaultAPIListenAddress`. Either way the fix
          should be in the same commit as any future port change.
 
-- [ ] **End-to-end WS prompt round-trip as `go test`.** Phase 3 verified
+- [x] **End-to-end WS prompt round-trip as `go test`.** Phase 3 verified
       this live but there is no automated test. Add an integration test
       (build-tag `integration` or just `//go:build !ci`) that:
       1. Starts a minimal in-process API server with `core/devMode=true`.

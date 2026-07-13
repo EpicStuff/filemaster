@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -44,6 +45,9 @@ func (s *socketSource) Run(ctx context.Context, h Handler) error {
 	for {
 		conn, err := s.ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
 			select {
 			case <-ctx.Done():
 				return nil
@@ -81,6 +85,8 @@ func opFromString(s string) FileOp {
 	switch s {
 	case "read":
 		return OpRead
+	case "write":
+		return OpWrite
 	case "exec":
 		return OpExec
 	default:

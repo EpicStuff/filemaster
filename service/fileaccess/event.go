@@ -6,7 +6,8 @@ import "context"
 // source decodes the perm-event mask into one of these; the Linux
 // kernel itself doesn't surface a "write" distinction at perm-event
 // time (the syscall hasn't completed yet, so we can't inspect open
-// flags on the new fd), so OpWrite is not currently emitted.
+// flags on the new fd). The fake socket source can still emit OpWrite
+// for end-to-end tests that model a write attempt explicitly.
 type FileOp uint8
 
 const (
@@ -18,6 +19,9 @@ const (
 	// option is on, because FAN_ACCESS_PERM fires per syscall and
 	// can be very chatty.
 	OpRead
+	// OpWrite is emitted by test/fake sources that model a user-level
+	// write attempt explicitly.
+	OpWrite
 	// OpExec is fired by FAN_OPEN_EXEC_PERM -- the kernel opening
 	// a file for execve(). Always enabled.
 	OpExec
@@ -29,6 +33,8 @@ func (op FileOp) String() string {
 		return "open"
 	case OpRead:
 		return "read"
+	case OpWrite:
+		return "write"
 	case OpExec:
 		return "exec"
 	default:

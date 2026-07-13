@@ -1,0 +1,353 @@
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { mkdir, readFile, rm, writeFile } from 'fs/promises';
+import net from 'net';
+import os from 'os';
+import path from 'path';
+import { expect, test, type Locator, type Page } from '@playwright/test';
+
+const repoRoot = path.resolve(__dirname, '../../..');
+const sourceMode = process.env.PLAYWRIGHT_FILEACCESS_SOURCE === 'real' ? 'real' : 'fake';
+
+type TestCore = {
+	apiPort: number;
+	sourceMode: 'fake' | 'real';
+	socketPath?: string;
+	dataDir: string;
+	watchDir: string;
+	process: ChildProcessWithoutNullStreams;
+	output: string[];
+};
+
+type AccessAttempt = {
+	path: string;
+	op: 'read' | 'write';
+	exe: string;
+	pid: number;
+	command: string;
+};
+
+test.describe.configure({ mode: 'serial' });
+
+test('prompts for watched file write and read decisions and records them in the app', async ({ page }) => {
+	test.setTimeout(180_000);
+
+	const core = await startFilemaster(sourceMode, test.info().workerIndex);
+	try {
+		await page.goto(`/?api-port=${core.apiPort}`);
+		await expect(page.locator('app-root')).toBeAttached();
+
+		const target = path.join(core.watchDir, 'watched.txt');
+
+		const writeAttempt = requestAccess({
+			path: target,
+			op: 'write',
+			exe: '/usr/bin/bash',
+			pid: 42001,
+			command: `echo test > ${target}`,
+		}, core);
+
+		await expectPromptInApp(page, core.apiPort, target, 'write');
+		await page.getByRole('button', { name: 'Allow once' }).click();
+		await expect(writeAttempt).resolves.toMatchObject({
+			verdict: 'allow',
+			stdout: '',
+			stderr: '',
+			exitCode: 0,
+		});
+
+		await expect(await readFile(target, 'utf8')).toBe('test\n');
+
+		const readAttempt = requestAccess({
+			path: target,
+			op: 'read',
+			exe: '/usr/bin/cat',
+			pid: 42002,
+			command: `cat ${target}`,
+		}, core);
+
+		await expectPromptInApp(page, core.apiPort, target, 'read');
+		await page.getByRole('button', { name: 'Deny once' }).click();
+		const readResult = await readAttempt;
+		expect(readResult.verdict).toBe('deny');
+		expect(readResult.stdout).toBe('');
+		expect(readResult.exitCode).not.toBe(0);
+
+		await page.goto(`/monitor?api-port=${core.apiPort}`);
+		await expect(page.getByText(target)).toBeVisible();
+		await expect(page.getByText('write')).toBeVisible();
+		await expect(page.getByText('read')).toBeVisible();
+	} finally {
+		await stopFilemaster(core);
+	}
+});
+
+async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Promise<TestCore> {
+	const apiPort = await getFreePort();
+	const root = await makeTempDir('filemaster-playwright-');
+	const dataDir = path.join(root, 'data');
+	const binDir = path.join(root, 'bin');
+	const watchDir = path.join(root, 'watched');
+	const socketPath = path.join(root, 'fake-fanotify.sock');
+
+	await mkdir(dataDir, { recursive: true });
+	await mkdir(binDir, { recursive: true });
+	await mkdir(watchDir, { recursive: true });
+	await writeFile(path.join(dataDir, 'config.json'), JSON.stringify({
+		core: {
+			devMode: true,
+		},
+		fileaccess: {
+			watchPaths: [watchDir],
+			interceptReads: true,
+		},
+	}, null, 2));
+
+	const output: string[] = [];
+	const env: NodeJS.ProcessEnv = {
+		...process.env,
+		FM_WATCH_PATHS: watchDir,
+		GOCACHE: path.join(root, 'gocache'),
+		GOMODCACHE: process.env.GOMODCACHE || path.join(os.homedir(), 'go/pkg/mod'),
+		PLAYWRIGHT_WORKER_INDEX: String(workerIndex),
+	};
+	if (mode === 'fake') {
+		env.FM_FAKE_SOCKET = socketPath;
+	}
+
+	const child = spawn(
+		'go',
+		[
+			'run',
+			'./cmds/portmaster-core',
+			'--devmode',
+			'--log',
+			'debug',
+			'--api-address',
+			`127.0.0.1:${apiPort}`,
+			'--data-dir',
+			dataDir,
+			'--bin-dir',
+			binDir,
+		],
+		{
+			cwd: repoRoot,
+			env,
+		}
+	);
+
+	child.stdout.on('data', chunk => output.push(String(chunk)));
+	child.stderr.on('data', chunk => output.push(String(chunk)));
+
+	await waitFor(async () => {
+		if (child.exitCode !== null) {
+			throw new Error(`portmaster-core exited early with ${child.exitCode}\n${output.join('')}`);
+		}
+		await connectAndClose(apiPort);
+	}, 120_000);
+
+	if (mode === 'fake') {
+		await waitFor(async () => {
+			await connectUnixAndClose(socketPath);
+		}, 30_000);
+	}
+
+	return {
+		apiPort,
+		sourceMode: mode,
+		socketPath: mode === 'fake' ? socketPath : undefined,
+		dataDir: root,
+		watchDir,
+		process: child,
+		output,
+	};
+}
+
+async function stopFilemaster(core: TestCore) {
+	if (core.process.exitCode === null) {
+		core.process.kill('SIGTERM');
+		await new Promise<void>(resolve => {
+			const done = () => resolve();
+			core.process.once('exit', done);
+			setTimeout(() => {
+				if (core.process.exitCode === null) {
+					core.process.kill('SIGKILL');
+				}
+				resolve();
+			}, 5_000);
+		});
+	}
+	await rm(core.dataDir, { recursive: true, force: true });
+}
+
+async function expectPromptInApp(page: Page, apiPort: number, target: string, op: string): Promise<Locator> {
+	await page.goto(`/prompt?api-port=${apiPort}`);
+	const prompt = page.locator('table.custom').filter({ hasText: target }).filter({ hasText: op });
+	await expect(page.getByText(target)).toBeVisible();
+	await expect(page.getByRole('row', { name: new RegExp(`Op:\\s+${op}\\b`) })).toBeVisible();
+	await expect(prompt).toBeVisible();
+	return prompt;
+}
+
+async function requestAccess(attempt: AccessAttempt, core: TestCore) {
+	if (core.sourceMode === 'real') {
+		return requestRealAccess(attempt);
+	}
+	if (!core.socketPath) {
+		throw new Error('fake file access source is missing its socket path');
+	}
+
+	const verdict = await sendSocketEvent(core.socketPath, {
+		pid: attempt.pid,
+		exe: attempt.exe,
+		path: attempt.path,
+		op: attempt.op,
+	});
+
+	if (verdict === 'deny') {
+		return {
+			verdict,
+			stdout: '',
+			stderr: `${attempt.command}: Permission denied\n`,
+			exitCode: 13,
+		};
+	}
+
+	if (attempt.op === 'write') {
+		await writeFile(attempt.path, 'test\n');
+		return {
+			verdict,
+			stdout: '',
+			stderr: '',
+			exitCode: 0,
+		};
+	}
+
+	return {
+		verdict,
+		stdout: await readFile(attempt.path, 'utf8'),
+		stderr: '',
+		exitCode: 0,
+	};
+}
+
+function requestRealAccess(attempt: AccessAttempt) {
+	return new Promise<{
+		verdict: 'allow' | 'deny';
+		stdout: string;
+		stderr: string;
+		exitCode: number | null;
+	}>((resolve, reject) => {
+		const child = spawn('sh', ['-c', attempt.command], {
+			stdio: ['ignore', 'pipe', 'pipe'],
+		});
+		let stdout = '';
+		let stderr = '';
+
+		child.stdout.on('data', chunk => {
+			stdout += String(chunk);
+		});
+		child.stderr.on('data', chunk => {
+			stderr += String(chunk);
+		});
+		child.on('error', reject);
+		child.on('exit', code => {
+			resolve({
+				verdict: code === 0 ? 'allow' : 'deny',
+				stdout,
+				stderr,
+				exitCode: code,
+			});
+		});
+	});
+}
+
+function sendSocketEvent(socketPath: string, event: Record<string, unknown>): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const socket = net.createConnection(socketPath);
+		let data = '';
+
+		socket.setTimeout(45_000);
+		socket.on('connect', () => {
+			socket.write(`${JSON.stringify(event)}\n`);
+		});
+		socket.on('data', chunk => {
+			data += String(chunk);
+			if (data.includes('\n')) {
+				socket.end();
+				resolve(data.trim());
+			}
+		});
+		socket.on('timeout', () => {
+			socket.destroy(new Error(`timed out waiting for verdict for ${JSON.stringify(event)}`));
+		});
+		socket.on('error', reject);
+	});
+}
+
+function connectAndClose(port: number): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const socket = net.createConnection({ host: '127.0.0.1', port });
+		socket.setTimeout(1_000);
+		socket.on('connect', () => {
+			socket.end();
+			resolve();
+		});
+		socket.on('timeout', () => {
+			socket.destroy(new Error(`timed out connecting to 127.0.0.1:${port}`));
+		});
+		socket.on('error', reject);
+	});
+}
+
+function connectUnixAndClose(socketPath: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const socket = net.createConnection(socketPath);
+		socket.setTimeout(1_000);
+		socket.on('connect', () => {
+			socket.end();
+			resolve();
+		});
+		socket.on('timeout', () => {
+			socket.destroy(new Error(`timed out connecting to ${socketPath}`));
+		});
+		socket.on('error', reject);
+	});
+}
+
+async function waitFor(fn: () => Promise<void>, timeoutMs: number): Promise<void> {
+	const started = Date.now();
+	let lastError: unknown;
+
+	while (Date.now() - started < timeoutMs) {
+		try {
+			await fn();
+			return;
+		} catch (err) {
+			lastError = err;
+			await new Promise(resolve => setTimeout(resolve, 250));
+		}
+	}
+
+	throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function getFreePort(): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const server = net.createServer();
+		server.listen(0, '127.0.0.1', () => {
+			const address = server.address();
+			if (!address || typeof address === 'string') {
+				server.close();
+				reject(new Error('failed to allocate tcp port'));
+				return;
+			}
+			const port = address.port;
+			server.close(() => resolve(port));
+		});
+		server.on('error', reject);
+	});
+}
+
+async function makeTempDir(prefix: string) {
+	return os.tmpdir() + '/' + await import('crypto').then(({ randomUUID }) => `${prefix}${randomUUID()}`);
+}
