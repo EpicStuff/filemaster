@@ -232,7 +232,7 @@ pub fn open_window(app: &AppHandle) -> Result<WebviewWindow> {
 ///
 /// In #[cfg(debug_assertions)] the TAURI_PM_URL environment variable will be used
 /// if set.
-/// Otherwise or in release builds, it will be navigated to http://127.0.0.1:817.
+/// Otherwise or in release builds, it will be navigated to http://127.0.0.1:818.
 pub fn may_navigate_to_ui(win: &mut WebviewWindow, force: bool) {
     if !win.app_handle().portmaster().is_reachable() && !force {
         error!("[tauri] portmaster API is not reachable, not navigating");
@@ -254,7 +254,7 @@ pub fn may_navigate_to_ui(win: &mut WebviewWindow, force: bool) {
             // Only for dev build
             // Allow connection to http://localhost:4200
             let capabilities = include_str!("../capabilities/default.json")
-                .replace("http://127.0.0.1:817", "http://127.0.0.1:4200");
+                .replace("http://127.0.0.1:818", "http://127.0.0.1:4200");
             let _ = win.add_capability(capabilities);
             debug!("[tauri] navigating to http://127.0.0.1:4200");
             _ = win.navigate("http://127.0.0.1:4200".parse().unwrap());
@@ -262,7 +262,7 @@ pub fn may_navigate_to_ui(win: &mut WebviewWindow, force: bool) {
 
         #[cfg(not(debug_assertions))]
         {
-            _ = win.navigate("http://127.0.0.1:817".parse().unwrap());
+            _ = win.navigate("http://127.0.0.1:818".parse().unwrap());
         }
     } else {
         error!(

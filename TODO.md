@@ -276,6 +276,50 @@ than just deny — Landlock can only allow/deny, not redirect.
 - [ ] Launcher shim that applies the ruleset before `execve` (Landlock
       must be set up by the parent).
 
+## Testing coverage gaps
+
+- [ ] **`socketSource` unit test.** `source_test.go` has a `fakeSource`
+      test-double but the real `socketSource` (`socket_source.go`) has no
+      coverage at all. Add a `TestSocketSource` that: creates a Unix socket
+      listener, starts `socketSource.Run` in a goroutine, writes one
+      `\n`-terminated JSON event per the wire format, reads back the verdict
+      line, and asserts the correct string. Also test close-from-handler
+      (server closes socket mid-run) returns without deadlock.
+
+- [ ] **`newPlatformSource` routing test.** `newPlatformSource` branches on
+      `FM_FAKE_SOCKET`. Add a test (in a `_test.go` using `t.Setenv`) that
+      sets the var to a non-existent path and asserts the returned source is
+      a `*socketSource` rather than a `*fanotifySource`. Guards against the
+      env-var check being accidentally removed or the branch order being
+      swapped. (Can run on all platforms; socket source construction fails
+      on a missing path but the type assertion happens before `Run`.)
+
+- [ ] **Port constant sync.** The API port (`818`) is defined in
+      `service/core/base/module.go` (`DefaultAPIListenAddress`) and
+      independently hardcoded in three Tauri Rust files
+      (`portmaster/websocket.rs`, `portmaster/mod.rs`, `window.rs`) plus
+      `capabilities/default.json` and `desktop/angular/src/environments/`.
+      A silent drift here breaks the UI connection with no compile error
+      (as happened: the port was bumped from 817→818 in the Go/Angular side
+      but not in the three Rust files). Options in order of preference:
+      a) generate the Rust/JSON constants from the Go constant at build
+         time (Earthfile step), or
+      b) add a `go test` that parses the Rust and JSON files and asserts
+         they all agree with `DefaultAPIListenAddress`. Either way the fix
+         should be in the same commit as any future port change.
+
+- [ ] **End-to-end WS prompt round-trip as `go test`.** Phase 3 verified
+      this live but there is no automated test. Add an integration test
+      (build-tag `integration` or just `//go:build !ci`) that:
+      1. Starts a minimal in-process API server with `core/devMode=true`.
+      2. Connects a WebSocket client and subscribes to `notifications:`.
+      3. Injects a `FileEvent` via `fakeSource` (already in `source_test.go`).
+      4. Asserts the `new` message arrives with the correct `fileaccess:` key.
+      5. Sends `update` with `SelectedActionID = "allow"`.
+      6. Asserts the verdict returned by `Prompt()` is `"allow"`.
+      This catches regressions in the notification wire format and the
+      `Response()` channel handoff without needing a real fanotify fd.
+
 ## Cross-cutting cleanup (do whenever)
 
 - [ ] Rename the binary and module path from `portmaster` to `filemaster`.

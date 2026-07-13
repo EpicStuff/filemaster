@@ -27,7 +27,7 @@ pub fn start_websocket_thread<R: Runtime>(app: AppHandle<R>) {
 
             debug!("Trying to connect to websocket endpoint");
 
-            let api = connect("ws://127.0.0.1:817/api/database/v1").await;
+            let api = connect("ws://127.0.0.1:818/api/database/v1").await;
 
             match api {
                 Ok(cli) => {
