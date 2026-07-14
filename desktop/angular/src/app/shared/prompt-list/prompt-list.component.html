@@ -34,8 +34,9 @@
           </span>
 
           <span class="actions">
-            <button (click)="allow(prompt)">Allow</button>
-            <button (click)="block(prompt)">Block</button>
+            <button (click)="allow(prompt)">Allow once</button>
+            <button (click)="allowAlways(prompt)">Always allow</button>
+            <button (click)="block(prompt)">Block once</button>
           </span>
         </div>
         <div class="more-available" *ngIf="!profile.showAll" (click)="profile.showAll = true">

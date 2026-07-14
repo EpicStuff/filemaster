@@ -38,6 +38,8 @@ export class FilequeryViewerComponent implements OnInit {
 	private search$ = new Subject<void>();
 	private reload$ = new BehaviorSubject<void>(undefined);
 
+	@Input() showAppColumn = true;
+
 	@Input()
 	set filterPreset(v: string | undefined) {
 		this._filterPreset = v || null;

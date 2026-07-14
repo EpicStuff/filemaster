@@ -53,7 +53,7 @@ test('prompts for watched file write and read decisions and records them in the 
 		}, core);
 
 		await expectPromptInApp(page, core.apiPort, target, 'write');
-		await page.getByRole('button', { name: 'Allow once' }).click();
+		await page.getByRole('button', { name: 'Always allow this path' }).click();
 		await expect(writeAttempt).resolves.toMatchObject({
 			verdict: 'allow',
 			stdout: '',
@@ -62,6 +62,17 @@ test('prompts for watched file write and read decisions and records them in the 
 		});
 
 		await expect(await readFile(target, 'utf8')).toBe('test\n');
+
+		// "Always allow this path" must persist a per-app File Access Rule:
+		// a second event for the same profile/path proceeds without another prompt.
+		await expect(requestAccess({
+			path: target,
+			op: 'write',
+			command: `echo test > ${target}`,
+			liveCmd: 'sleep',
+			liveArgs: ['60'],
+			appName: 'sleep',
+		}, core)).resolves.toMatchObject({ verdict: 'allow', exitCode: 0 });
 
 		const readAttempt = requestAccess({
 			path: target,
@@ -86,7 +97,7 @@ test('prompts for watched file write and read decisions and records them in the 
 		// end (no synthetic/"/" fallback).
 		await expect(
 			monitorRows.filter({ hasText: 'write' }).filter({ hasText: 'sleep' })
-		).toBeVisible();
+		).toHaveCount(2);
 		await expect(
 			monitorRows.filter({ hasText: 'read' }).filter({ hasText: 'tail' })
 		).toBeVisible();
@@ -120,7 +131,6 @@ async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Prom
 	const env: NodeJS.ProcessEnv = {
 		...process.env,
 		FM_WATCH_PATHS: watchDir,
-		GOCACHE: path.join(root, 'gocache'),
 		GOMODCACHE: process.env.GOMODCACHE || path.join(os.homedir(), 'go/pkg/mod'),
 		PLAYWRIGHT_WORKER_INDEX: String(workerIndex),
 	};

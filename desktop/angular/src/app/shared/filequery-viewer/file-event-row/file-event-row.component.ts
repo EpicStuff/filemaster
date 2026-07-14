@@ -8,6 +8,7 @@ import { FileAccessRecord } from '@safing/portmaster-api';
 })
 export class FileEventRowComponent {
 	@Input() event!: FileAccessRecord;
+	@Input() showAppColumn = true;
 
 	get opClass(): string {
 		switch (this.event?.op) {

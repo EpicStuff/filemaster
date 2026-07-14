@@ -57,7 +57,7 @@
 		<thead class="sticky top-0 bg-gray-200 text-left z-10">
 			<tr>
 				<th class="px-3 py-2 font-medium text-secondary text-xxs uppercase">Time</th>
-				<th class="px-3 py-2 font-medium text-secondary text-xxs uppercase">App</th>
+				<th *ngIf="showAppColumn" class="px-3 py-2 font-medium text-secondary text-xxs uppercase">App</th>
 				<th class="px-3 py-2 font-medium text-secondary text-xxs uppercase">Op</th>
 				<th class="px-3 py-2 font-medium text-secondary text-xxs uppercase">Verdict</th>
 				<th class="px-3 py-2 font-medium text-secondary text-xxs uppercase">Path</th>
@@ -68,6 +68,7 @@
 				*ngFor="let event of events"
 				app-file-event-row
 				[event]="event"
+				[showAppColumn]="showAppColumn"
 				class="border-t border-gray-800 hover:bg-gray-300 transition-colors cursor-pointer"
 				(click)="addFilter('app_name', event.app_name || event.exe)">
 			</tr>

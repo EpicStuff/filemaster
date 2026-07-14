@@ -182,7 +182,14 @@ export class PromptListComponent implements OnInit, OnDestroy {
 	}
 
 	allow(prompt: FileAccessPrompt) {
-		const action = prompt.AvailableActions.find(a => a.ID === 'allow' || a.ID === 'allow-always');
+		const action = prompt.AvailableActions.find(a => a.ID === 'allow');
+		if (action) {
+			this.execute(prompt, action);
+		}
+	}
+
+	allowAlways(prompt: FileAccessPrompt) {
+		const action = prompt.AvailableActions.find(a => a.ID === 'allow-always');
 		if (action) {
 			this.execute(prompt, action);
 		}
