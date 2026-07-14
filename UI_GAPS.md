@@ -1,21 +1,20 @@
-# UI gaps after the network-stack strip
+# UI gaps after the file-access conversion
 
-Static audit of every UI HTTP call vs. what the daemon still implements.
-The Angular tree was kept largely intact (only routes / nav items /
-declarations stripped); the underlying services still try to talk to
-endpoints whose backend code we deleted. This file is the punch list.
+Static audit of UI HTTP calls against the daemon that remains after the
+network-stack strip. The file-access monitor and app activity views now use
+`filequery`; the outstanding gaps are predominantly legacy dashboard widgets.
 
 ## HTTP calls to deleted endpoints
 
 | UI call | Caller | Status |
 | --- | --- | --- |
 | `GET /v1/intel/geoip/countries` | `country-name.pipe.ts` constructor | **Fixed**: HTTP call removed; map stays empty (pipe returns raw code). Was the only init-fired call that toasted. |
-| `POST /v1/spn/account/login` | `spn-login.ts` (button) | Dead button; toast only on click. SPN section unreachable from nav. |
-| `DELETE /v1/spn/account/logout` | `spn-account-details.ts` (button) | Dead button; dialog only reachable from settings drilldown that itself doesn't render. |
-| `GET /v1/spn/account/user/profile` | `SPNService.profile$` (subscribed by dashboard + several components) | Silent failure; `profile$` errors, downstream `featureBw` / `featureSPN` stay `false`. No toast (no error handler). |
-| `POST /v1/spn/reinit` | `portapi.service.ts:reinitSPN` (was menu item) | Menu item already removed. |
-| `POST /v1/netquery/query` | `netquery.service.ts:query` | Multiple consumers; all silent. Widgets render empty. |
-| `POST /v1/netquery/query/batch` | `netquery.service.ts:batch` | Dashboard "Recent Activity" → numbers stay 0. |
+| `POST /v1/spn/account/login` | Former SPN page | **Removed from the rendered application**: the SPN sidebar feature is no longer declared or shown. |
+| `DELETE /v1/spn/account/logout` | Former SPN settings drilldown | **Removed from the rendered application** with the SPN sidebar feature. |
+| `GET /v1/spn/account/user/profile` | Legacy dashboard/components | Legacy subscription remains; feature flags stay `false`. No visible SPN navigation remains. |
+| `POST /v1/spn/reinit` | Former menu item | Menu item removed. |
+| `POST /v1/netquery/query` | Legacy connection-oriented components | Monitor and app **File Events** no longer call this endpoint; remaining legacy consumers render empty. |
+| `POST /v1/netquery/query/batch` | Dashboard "Recent Activity" | Dashboard numbers remain zero. File Access Activity uses `/v1/filequery/query/batch` instead. |
 | `POST /v1/netquery/history/clear` | (was "Cleanup Network History" menu) | Menu item removed. |
 | `POST /v1/netquery/charts/bandwidth` | `netquery.service.ts:bandwidthChart` | Dashboard line chart stays empty. |
 | `POST /v1/netquery/charts/connection-active` | `netquery.service.ts:activeConnectionChart` | Dashboard active-connection chart stays empty. |
@@ -26,9 +25,9 @@ endpoints whose backend code we deleted. This file is the punch list.
 
 ## What the user actually sees on first page load
 
-After `c1cfa304` (the country-pipe fix), no error toasts fire on a
-plain dashboard load. Widgets that depended on the dropped backends
-show empty data:
+After `c1cfa304` (the country-pipe fix), no error toasts fire on a plain
+dashboard load. Legacy widgets that depended on the dropped backends show
+empty data:
 
 - "Recent Activity" tile: all zeros
 - "Recent Connection Countries" / "Recent Bandwidth Usage" / "Active vs
@@ -45,22 +44,25 @@ Functional surfaces:
   (verified live -- the original screenshot diff)
 - App overview list: shows the auto-created profiles from the profile
   DB
+- Monitor: **File Access Activity** uses the shared filequery viewer with
+  Portmaster-style search, filters, grouping, sorting, a file-access graph,
+  and the file event table.
+- App detail → **File Events**: reuses that same viewer, scoped to the selected
+  app, including its graph.
 - App settings → File Access Rules: renders via the generic rule-list
   editor (allow `+`, deny `-`)
-- Settings page: shows the registered options (DefaultAction,
-  watchPaths, interceptReads, etc.)
+- Settings page: File Access is organized as **File Access**, **Rules**, then
+  **Other**; **Intercept Read Syscalls** is in Other, after File Access Rules.
 - Support page: external (GitHub issues) -- still works
 
 ## What's intentionally kept but non-functional
 
-We left these as scaffolding so future file-access-activity work can
-slot in without re-adding the templates. They currently render but
-their data backends are gone:
+These legacy network-oriented surfaces still render but their data backends
+are gone:
 
-- `/monitor` route + "Network Activity" sidebar button → renders
-  netquery viewer, which 404s. No data, no toast.
-- Per-app "Connections" tab → same.
-- Per-app "Insights" tab → same.
+- Dashboard connection, bandwidth, country, and blocked-application widgets
+  still use netquery and therefore show empty data.
+- Per-app **Insights** remains network-era scaffolding.
 - `app-qs-internet` / `app-qs-history` header tiles → toggles map to
   removed config keys; clicks no-op.
 
@@ -79,6 +81,9 @@ their data backends are gone:
    appears in the profile's `fileaccess/rules` (visible in the App
    Settings tab). Next access of the same path skips the prompt and
    returns EPERM directly.
+8. Visit `/monitor` → File Access Activity shows the event in the shared
+   viewer and its graph. Open that app and select **File Events** → the same
+   activity is shown, scoped to that app.
 
-Everything else (the network widgets, the SPN page if you find it
-through deep linking, etc.) is dead-but-renders.
+The dashboard network widgets remain dead-but-render. SPN is no longer part of
+the rendered sidebar application.
