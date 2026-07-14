@@ -17,11 +17,11 @@ function resolveApiHost(): string {
 			const fromUrl = new URLSearchParams(window.location.search).get('api-port');
 			if (fromUrl && /^\d{1,5}$/.test(fromUrl)) {
 				window.localStorage.setItem(STORAGE_KEY, fromUrl);
-				return `127.0.0.1:${fromUrl}`;
+				return `${window.location.hostname}:${fromUrl}`;
 			}
 			const stored = window.localStorage.getItem(STORAGE_KEY);
 			if (stored && /^\d{1,5}$/.test(stored)) {
-				return `127.0.0.1:${stored}`;
+				return `${window.location.hostname}:${stored}`;
 			}
 			// Default: use current host so ng serve proxies through proxy.json
 			// (same-origin → no CORS, no --devmode needed on the daemon).

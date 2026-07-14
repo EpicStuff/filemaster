@@ -2,7 +2,7 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import { FileAccessRecord } from '@safing/portmaster-api';
 
 @Component({
-	selector: 'app-file-event-row',
+	selector: '[app-file-event-row]',
 	templateUrl: './file-event-row.component.html',
 	changeDetection: ChangeDetectionStrategy.OnPush,
 })

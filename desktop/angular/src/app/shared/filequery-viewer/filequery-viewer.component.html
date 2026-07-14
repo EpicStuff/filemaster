@@ -66,9 +66,10 @@
 		<tbody>
 			<tr
 				*ngFor="let event of events"
+				app-file-event-row
+				[event]="event"
 				class="border-t border-gray-800 hover:bg-gray-300 transition-colors cursor-pointer"
 				(click)="addFilter('app_name', event.app_name || event.exe)">
-				<app-file-event-row [event]="event"></app-file-event-row>
 			</tr>
 		</tbody>
 	</table>
