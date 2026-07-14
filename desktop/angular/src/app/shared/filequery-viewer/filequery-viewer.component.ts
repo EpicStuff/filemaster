@@ -5,6 +5,7 @@ import { Datasource, DynamicItemsPaginator } from '@safing/ui';
 import { BehaviorSubject, Observable, Subject } from 'rxjs';
 import { debounceTime, map, switchMap } from 'rxjs/operators';
 import { mergeConditions } from '../netquery/utils';
+import { ChartConfig } from '../netquery/line-chart/line-chart';
 
 const PAGE_SIZE = 25;
 
@@ -37,6 +38,29 @@ interface FileAccessGroup {
 	events: FileAccessRecord[];
 }
 
+interface FileActivityChartPoint {
+	timestamp: number;
+	allowed: number;
+	blocked: number;
+}
+
+const fileActivityChartConfig: ChartConfig<FileActivityChartPoint> = {
+	series: {
+		allowed: {
+			lineColor: 'text-green-200',
+			areaColor: 'text-green-100 text-opacity-25',
+		},
+		blocked: {
+			lineColor: 'text-red-200',
+			areaColor: 'text-red-100 text-opacity-25',
+		},
+	},
+	time: { from: -10 * 60 },
+	tooltipFormat: point => `Allowed: ${point.allowed}\nBlocked: ${point.blocked}`,
+	showDataPoints: true,
+	fillEmptyTicks: { interval: 60 },
+};
+
 /**
  * File-access counterpart of Portmaster's sfng-netquery-viewer.
  *
@@ -67,6 +91,7 @@ export class FilequeryViewerComponent implements OnInit {
 	private presetCondition: Condition | null = null;
 
 	readonly keyTranslation = keyTranslation;
+	readonly activityChartConfig = fileActivityChartConfig;
 	get orderBy(): OrderBy[] {
 		const fields = [...this.selectedGroupBy, ...this.selectedOrderBy]
 			.filter((field, index, values) => values.indexOf(field) === index);
@@ -88,6 +113,7 @@ export class FilequeryViewerComponent implements OnInit {
 	appSuggestions: FilterSuggestion[] = [];
 	loading = false;
 	totalResultCount = 0;
+	activityChart: FileActivityChartPoint[] = [];
 	paginator!: DynamicItemsPaginator<FileAccessRecord>;
 	groupedPageItems$!: Observable<FileAccessGroup[]>;
 
@@ -131,12 +157,30 @@ export class FilequeryViewerComponent implements OnInit {
 							query: this.buildCondition(),
 							select: [{ $count: { field: '*', as: 'totalCount' } }] as unknown as Select[],
 						},
+						chart: {
+							query: this.buildCondition(),
+							orderBy: [{ field: 'at', desc: true }],
+							pageSize: 100,
+						},
 					});
 				}),
 			)
 			.subscribe(results => {
 				const total = (results.total?.[0]?.['totalCount'] as number) || 0;
 				this.totalResultCount = total;
+				const points = new Map<number, FileActivityChartPoint>();
+				(results.chart || []).forEach(result => {
+					const event = result as unknown as FileAccessRecord;
+					const timestamp = Math.floor(new Date(event.at).getTime() / 60_000) * 60;
+					const point = points.get(timestamp) || { timestamp, allowed: 0, blocked: 0 };
+					if (event.verdict === 'allow') {
+						point.allowed += 1;
+					} else {
+						point.blocked += 1;
+					}
+					points.set(timestamp, point);
+				});
+				this.activityChart = Array.from(points.values()).sort((a, b) => a.timestamp - b.timestamp);
 				this.paginator.reset(total);
 				this.loading = false;
 				this.cdr.markForCheck();

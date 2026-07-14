@@ -18,14 +18,6 @@
 	</p>
 	</div>
 
-	<div class="w-full h-48 p-3 mb-6 bg-gray-200 rounded-sm" *ngIf="activityChart | async as chartData">
-		<div class="flex items-center justify-between mb-2">
-			<h2 class="text-sm font-medium text-primary">File Accesses</h2>
-			<span class="text-xxs text-secondary">Last 10 minutes</span>
-		</div>
-		<sfng-netquery-line-chart class="block w-full h-36" [data]="chartData" [config]="activityChartConfig"></sfng-netquery-line-chart>
-	</div>
-
 	<app-filequery-viewer class="flex-grow"></app-filequery-viewer>
 
 </div>

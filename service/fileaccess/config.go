@@ -56,7 +56,7 @@ func registerConfig() error {
 		DefaultValue: false,
 		Annotations: config.Annotations{
 			config.DisplayOrderAnnotation: cfgOptionInterceptReadsOrder,
-			config.CategoryAnnotation:     "Rules",
+			config.CategoryAnnotation:     "Other",
 		},
 	})
 	if err != nil {

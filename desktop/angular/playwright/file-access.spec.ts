@@ -116,6 +116,37 @@ test('prompts for watched file write and read decisions and records them in the 
 				fullPage: true,
 			});
 		}
+
+		await page.locator('app-network-scout').getByText('Tail', { exact: true }).click();
+		await expect(page).toHaveURL(/\/app\//);
+		await page.getByText('File Events', { exact: true }).click();
+		await expect(page.locator('app-filequery-viewer sfng-netquery-line-chart svg')).toBeVisible();
+
+		if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
+			await page.screenshot({
+				path: path.join(repoRoot, 'tmp', 'app-file-access-activity.png'),
+				fullPage: true,
+			});
+		}
+
+		await page.goto(`/settings?api-port=${core.apiPort}`);
+		await page.waitForTimeout(500);
+		const settingsIntroDialog = page.locator('sfng-dialog-container').filter({ hasText: 'Portmaster Protects Your Privacy' });
+		if (await settingsIntroDialog.isVisible()) {
+			await settingsIntroDialog.locator('svg').first().click();
+			await expect(settingsIntroDialog).toBeHidden();
+		}
+		const otherHeading = page.getByRole('heading', { name: 'Other' });
+		await expect(otherHeading).toBeVisible();
+		await expect(page.getByText('Intercept Read Syscalls', { exact: true })).toBeVisible();
+		await otherHeading.scrollIntoViewIfNeeded();
+
+		if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
+			await page.screenshot({
+				path: path.join(repoRoot, 'tmp', 'settings.png'),
+				fullPage: true,
+			});
+		}
 	} finally {
 		await stopFilemaster(core);
 	}
