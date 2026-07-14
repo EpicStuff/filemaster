@@ -50,6 +50,7 @@ import { FuzzySearchPipe } from './shared/fuzzySearch';
 import { LoadingComponent } from './shared/loading';
 import { SfngMenuModule } from './shared/menu';
 import { SfngMultiSwitchModule } from './shared/multi-switch';
+import { FilequeryViewerModule } from './shared/filequery-viewer';
 import { NetqueryModule } from './shared/netquery';
 import { NetworkScoutComponent } from './shared/network-scout';
 import { NotificationListComponent } from './shared/notification-list/notification-list.component';
@@ -195,6 +196,7 @@ const localeConfig = {
     CountryFlagModule,
     CountIndicatorModule,
     NetqueryModule,
+    FilequeryViewerModule,
     MapRendererComponent,
     SPNAccountModule,
     CommonPipesModule,

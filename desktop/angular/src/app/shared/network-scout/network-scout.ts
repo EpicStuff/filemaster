@@ -273,11 +273,11 @@ export class NetworkScoutComponent implements OnInit {
 
         // map the list of profile statistics to include the exit Pin information
         // as well.
-        this.allProfiles = res.map(s => {
+        this.allProfiles = res.filter(s => s.ID).map(s => {
           const existing = profileLookupMap.get(s.ID);
           return {
             ID: s.ID,
-            Name: s.Name,
+            Name: s.ID === '/' ? 'Other Access' : s.Name,
             size: s.size,
             empty: s.empty,
             countAllowed: s.countAllowed,

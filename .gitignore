@@ -2,6 +2,9 @@
 *.exe
 dist/
 
+# Local scratch screenshots and test artifacts
+tmp/
+
 # Dist dir
 dist
 packaging/_precompiled/

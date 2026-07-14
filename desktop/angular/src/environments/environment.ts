@@ -4,34 +4,33 @@
 
 // Resolve the daemon's API address for dev builds.
 //
-// Default is 127.0.0.1:818. To point the dashboard at a different
-// daemon port (e.g. when you started pm-core with --api-address
-// 127.0.0.1:9999), open the UI with ?api-port=9999 once; the port
-// is persisted in localStorage so subsequent loads (including the
-// /prompt route, which has no query string) keep using it. Clear
-// it by visiting ?api-port=818 or deleting the entry in devtools.
+// Default: use the current page's host so ng serve routes API calls through
+// proxy.json (same-origin, no CORS). To point at a different daemon port
+// (e.g. --api-address 127.0.0.1:9999), open the UI with ?api-port=9999 once;
+// the port is persisted in localStorage so subsequent loads keep using it.
+// To reset to the default, delete 'filemaster-api-port' in devtools storage.
 const STORAGE_KEY = 'filemaster-api-port';
-const DEFAULT_PORT = '818';
 
 function resolveApiHost(): string {
-	let port = DEFAULT_PORT;
 	if (typeof window !== 'undefined') {
 		try {
 			const fromUrl = new URLSearchParams(window.location.search).get('api-port');
 			if (fromUrl && /^\d{1,5}$/.test(fromUrl)) {
-				port = fromUrl;
 				window.localStorage.setItem(STORAGE_KEY, fromUrl);
-			} else {
-				const stored = window.localStorage.getItem(STORAGE_KEY);
-				if (stored && /^\d{1,5}$/.test(stored)) {
-					port = stored;
-				}
+				return `127.0.0.1:${fromUrl}`;
 			}
+			const stored = window.localStorage.getItem(STORAGE_KEY);
+			if (stored && /^\d{1,5}$/.test(stored)) {
+				return `127.0.0.1:${stored}`;
+			}
+			// Default: use current host so ng serve proxies through proxy.json
+			// (same-origin → no CORS, no --devmode needed on the daemon).
+			return window.location.host;
 		} catch {
 			// SSR / sandboxed iframe / private mode -- fall through.
 		}
 	}
-	return `127.0.0.1:${port}`;
+	return '127.0.0.1:818';
 }
 
 const apiHost = resolveApiHost();

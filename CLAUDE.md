@@ -66,9 +66,40 @@ curl -s http://127.0.0.1:818/api/v1/filequery/query -X POST \
   -H 'Content-Type: application/json' -d '{"pageSize":5}'
 ```
 
+For any UI change (Tauri frontend, sidebar, notifications, dialogs):
+
+```bash
+# Screenshots save to ./tmp/ (relative to repo root — gitignored):
+node desktop/angular/screenshot.mjs [url] [./tmp/name.png]
+
+# Sweep all main pages after any wide-impact change:
+node desktop/angular/screenshot.mjs http://localhost:4200/dashboard       ./tmp/dashboard.png
+node desktop/angular/screenshot.mjs http://localhost:4200/monitor         ./tmp/monitor.png
+node desktop/angular/screenshot.mjs http://localhost:4200/app/local/_unidentified ./tmp/sidebar.png
+node desktop/angular/screenshot.mjs http://localhost:4200/settings        ./tmp/settings.png
+```
+
+Use the Read tool to open each screenshot and **look at it** — verify layout,
+text, and the changed element. Check specifically:
+- Sidebar entries show real app names, not system placeholders like "/" or empty string
+- Monitor page shows only file-access content, not old "Network Activity" / "Loading connections…" UI
+- No "Loading…" spinners that never resolve (indicates silent API failure)
+
+**Why silent failures happen without --devmode:** The Angular dev build calls the
+daemon at `http://127.0.0.1:818` directly, but the page origin is `localhost:4200`.
+Without `--devmode` on the daemon, the CORS origin check blocks all requests with
+403. Angular's `catchError(() => of([]))` swallows the 403, so the UI silently
+shows empty state. **Always start the daemon with `--devmode` when developing with
+ng serve.** Note: this was fixed in `environment.ts` to default through the proxy
+(same-origin), so `--devmode` is no longer required for the default workflow — but
+any explicit `?api-port=PORT` override still makes direct cross-origin requests and
+will need `--devmode`.
+
 - Pure refactors and doc/comment-only edits: type-check is enough.
 - Any logic or config change: must exercise the changed code path and observe
   correct output before committing.
+- Any UI change: must screenshot every affected page and read each one; visual
+  inspection is required — "it compiled" and "the API returned 200" are not substitutes.
 - If a runtime test is genuinely impossible (no env, blocked perms), say so
   explicitly — never silently skip it.
 

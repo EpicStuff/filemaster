@@ -1,0 +1,7 @@
+<td class="px-3 py-1.5 whitespace-nowrap text-secondary text-xxs">{{ event.at | date:'HH:mm:ss' }}</td>
+<td class="px-3 py-1.5 truncate max-w-xs" [title]="event.app_name || event.exe">{{ event.app_name || event.exe }}</td>
+<td class="px-3 py-1.5 uppercase text-xxs font-mono" [ngClass]="opClass">{{ event.op }}</td>
+<td class="px-3 py-1.5 text-xxs" [ngClass]="verdictClass">{{ event.verdict }}</td>
+<td class="px-3 py-1.5 truncate max-w-lg text-secondary" [title]="event.path" style="direction: rtl">
+	<span style="direction: ltr; unicode-bidi: bidi-override">{{ event.path }}</span>
+</td>

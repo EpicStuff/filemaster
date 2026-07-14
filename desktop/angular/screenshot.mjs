@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 // Usage: node screenshot.mjs [url] [output.png]
-//   url defaults to http://localhost:4200/app/local/_unidentified
-//   output defaults to /tmp/filemaster-screenshot.png
+//   url defaults to http://localhost:4200/dashboard
+//   output defaults to ./tmp/screenshot.png  (relative to repo root / cwd)
 //
 // Requires: ng serve running on :4200, daemon on :818, playwright installed at
 //   /root/vaultwarden-clients/node_modules/playwright
 
 import { chromium } from '/root/vaultwarden-clients/node_modules/playwright/index.mjs';
 
-const url = process.argv[2] || 'http://localhost:4200/app/local/_unidentified';
-const out = process.argv[3] || '/tmp/filemaster-screenshot.png';
+const url = process.argv[2] || 'http://localhost:4200/dashboard';
+const out = process.argv[3] || './tmp/screenshot.png';
 
 const browser = await chromium.launch({
     executablePath: '/usr/sbin/chromium',
