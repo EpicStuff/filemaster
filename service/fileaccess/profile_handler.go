@@ -115,7 +115,7 @@ func NewProfileHandler(lookup ProfileLookup, prompter Prompter, fallback Handler
 }
 
 // Decide implements Handler.
-func (h *ProfileHandler) Decide(ctx context.Context, e FileEvent) Verdict {
+func (h *ProfileHandler) Decide(ctx context.Context, e *FileEvent) Verdict {
 	res, err := h.lookup.Lookup(ctx, e.PID)
 	if err != nil {
 		h.log.Warn("profile lookup failed; using fallback handler",
@@ -167,7 +167,7 @@ func (h *ProfileHandler) Decide(ctx context.Context, e FileEvent) Verdict {
 		return VerdictDeny
 	}
 
-	action, ok := h.prompter.Prompt(ctx, e, h.timeout)
+	action, ok := h.prompter.Prompt(ctx, *e, h.timeout)
 	if !ok {
 		// Default-deny on timeout/cancel for the same reason
 		// PromptHandler does: better to break an app than leak data.

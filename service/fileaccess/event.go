@@ -89,16 +89,21 @@ type FileEvent struct {
 // The context is the source's run context; handlers that block (e.g.
 // waiting for a user response) should select on ctx.Done() to unwind
 // during shutdown.
+// The event is passed by pointer so handlers in the chain can enrich it
+// in place (e.g. ProfileHandler stamps the resolved profile metadata) and
+// have those mutations visible to outer handlers such as the filequery
+// recorder. This mirrors how portmaster threads *Connection through its
+// firewall handler chain.
 type Handler interface {
-	Decide(ctx context.Context, event FileEvent) Verdict
+	Decide(ctx context.Context, event *FileEvent) Verdict
 }
 
 // HandlerFunc adapts a plain function to the Handler interface.
-type HandlerFunc func(context.Context, FileEvent) Verdict
+type HandlerFunc func(context.Context, *FileEvent) Verdict
 
 // Decide implements Handler.
-func (f HandlerFunc) Decide(ctx context.Context, e FileEvent) Verdict { return f(ctx, e) }
+func (f HandlerFunc) Decide(ctx context.Context, e *FileEvent) Verdict { return f(ctx, e) }
 
 // allowAll is the phase-1 default handler -- log and let everything
 // through. Phase 3 swaps this for the profile/endpoint/prompt path.
-var allowAll HandlerFunc = func(context.Context, FileEvent) Verdict { return VerdictAllow }
+var allowAll HandlerFunc = func(context.Context, *FileEvent) Verdict { return VerdictAllow }

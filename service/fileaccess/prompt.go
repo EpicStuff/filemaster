@@ -83,17 +83,17 @@ func NewPromptHandler(p Prompter, initial *PathRules, timeout time.Duration) *Pr
 }
 
 // Decide implements Handler.
-func (h *PromptHandler) Decide(ctx context.Context, e FileEvent) Verdict {
+func (h *PromptHandler) Decide(ctx context.Context, e *FileEvent) Verdict {
 	if v, ok := h.lookup(e.Exe, e.Path); ok {
 		return v
 	}
-	action, ok := h.prompter.Prompt(ctx, e, h.timeout)
+	action, ok := h.prompter.Prompt(ctx, *e, h.timeout)
 	if !ok {
 		// No response (timeout or shutdown). Default-deny on the
 		// principle that we'd rather break an app than leak data.
 		return VerdictDeny
 	}
-	return h.apply(e, action)
+	return h.apply(*e, action)
 }
 
 // RulesFor returns a snapshot of the rule list for the given exe.

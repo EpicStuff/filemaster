@@ -86,8 +86,11 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	}
 
 	// Snapshot what we need from the profile under a single read-lock.
+	// Use the bare profile ID (not the scoped "source/id") because the
+	// consumers — the filequery recorder and the prompt UI — build the
+	// scoped key themselves as ProfileSource + "/" + ProfileID.
 	local.RLock()
-	id := local.ScopedID()
+	id := local.ID
 	rawRules := local.GetFileAccessRules()
 	defAct := local.DefaultAction()
 	source := string(local.Source)

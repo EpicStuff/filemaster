@@ -24,10 +24,10 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("SetPersistPath on empty file: %v", err)
 	}
 
-	if v := h1.Decide(context.Background(), FileEvent{Exe: "/usr/bin/cat", Path: "/etc/shadow"}); v != VerdictDeny {
+	if v := h1.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/cat", Path: "/etc/shadow"}); v != VerdictDeny {
 		t.Fatalf("cat /etc/shadow: %s, want deny", v)
 	}
-	if v := h1.Decide(context.Background(), FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"}); v != VerdictAllow {
+	if v := h1.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"}); v != VerdictAllow {
 		t.Fatalf("vim notes.txt: %s, want allow", v)
 	}
 
@@ -39,10 +39,10 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 
 	// Both rules should now apply without any prompt.
-	if v := h2.Decide(context.Background(), FileEvent{Exe: "/usr/bin/cat", Path: "/etc/shadow"}); v != VerdictDeny {
+	if v := h2.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/cat", Path: "/etc/shadow"}); v != VerdictDeny {
 		t.Errorf("after reload: cat /etc/shadow: %s, want deny", v)
 	}
-	if v := h2.Decide(context.Background(), FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"}); v != VerdictAllow {
+	if v := h2.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"}); v != VerdictAllow {
 		t.Errorf("after reload: vim notes.txt: %s, want allow", v)
 	}
 	if p2.called != 0 {
@@ -52,7 +52,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	// Per-exe scope must survive too: cat asking about notes.txt is
 	// still a prompt (rule was for vim only).
 	p2.responses = map[string]string{"/home/alice/notes.txt": ActionDeny}
-	if v := h2.Decide(context.Background(), FileEvent{Exe: "/usr/bin/cat", Path: "/home/alice/notes.txt"}); v != VerdictDeny {
+	if v := h2.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/cat", Path: "/home/alice/notes.txt"}); v != VerdictDeny {
 		t.Errorf("cat notes.txt after reload: %s, want deny (per-exe scope held)", v)
 	}
 	if p2.called != 1 {

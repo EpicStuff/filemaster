@@ -24,8 +24,8 @@ func TestSocketSource(t *testing.T) {
 	events := make(chan FileEvent, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- source.Run(ctx, HandlerFunc(func(ctx context.Context, event FileEvent) Verdict {
-			events <- event
+		done <- source.Run(ctx, HandlerFunc(func(ctx context.Context, event *FileEvent) Verdict {
+			events <- *event
 			return VerdictDeny
 		}))
 	}()
@@ -50,8 +50,11 @@ func TestSocketSource(t *testing.T) {
 
 	select {
 	case event := <-events:
-		if event.PID != 123 || event.Exe != "/usr/bin/cat" || event.Path != "/tmp/secret.txt" || event.Op != OpRead {
-			t.Fatalf("event = %+v, want pid/exe/path/op from socket JSON", event)
+		// The socket source mirrors the real kernel source: PID, Path and
+		// Op come off the wire, but Exe is left empty (resolved from the
+		// PID downstream). Any "exe" key in the JSON is ignored.
+		if event.PID != 123 || event.Exe != "" || event.Path != "/tmp/secret.txt" || event.Op != OpRead {
+			t.Fatalf("event = %+v, want pid/path/op from socket JSON and empty exe", event)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("handler did not receive socket event")
@@ -84,7 +87,7 @@ func TestSocketSourceCloseFromHandler(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- source.Run(ctx, HandlerFunc(func(ctx context.Context, event FileEvent) Verdict {
+		done <- source.Run(ctx, HandlerFunc(func(ctx context.Context, event *FileEvent) Verdict {
 			if err := source.Close(); err != nil {
 				t.Errorf("close from handler: %v", err)
 			}

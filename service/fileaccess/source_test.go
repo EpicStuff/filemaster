@@ -40,7 +40,7 @@ func (s *fakeSource) Run(ctx context.Context, h Handler) error {
 			return nil
 		default:
 		}
-		v := h.Decide(ctx, e)
+		v := h.Decide(ctx, &e)
 		s.mu.Lock()
 		s.decided = append(s.decided, decision{Event: e, Verdict: v})
 		s.mu.Unlock()

@@ -31,9 +31,11 @@ func newSocketSource(path string, log logger) (*socketSource, error) {
 // socketEvent is the JSON line the fake-fanotify binary sends per event.
 type socketEvent struct {
 	PID  int32  `json:"pid"`
-	Exe  string `json:"exe"`
 	Path string `json:"path"`
 	Op   string `json:"op"`
+	// Note: no "exe" field. The real kernel source never provides one;
+	// the profile is resolved from PID via /proc. Any "exe" key in the
+	// JSON is ignored.
 }
 
 func (s *socketSource) Run(ctx context.Context, h Handler) error {
@@ -68,13 +70,16 @@ func (s *socketSource) handleConn(ctx context.Context, conn net.Conn, h Handler)
 			s.log.Warn("socket source: bad event JSON", "err", err)
 			continue
 		}
+		// Deliberately mirror the real fanotify source: only PID, Path
+		// and Op come off the wire. Exe is left empty so the profile is
+		// resolved from the PID via /proc, exactly as in production —
+		// tests must therefore supply a real, live PID.
 		event := FileEvent{
 			PID:  se.PID,
-			Exe:  se.Exe,
 			Path: se.Path,
 			Op:   opFromString(se.Op),
 		}
-		verdict := h.Decide(ctx, event)
+		verdict := h.Decide(ctx, &event)
 		if _, err := fmt.Fprintf(conn, "%s\n", verdict); err != nil {
 			return
 		}

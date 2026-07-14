@@ -18,9 +18,8 @@ func NewRecordingHandler(inner Handler, feed chan<- filequery.FileAccessRecord) 
 	return &recordingHandler{inner: inner, feed: feed}
 }
 
-func (h *recordingHandler) Decide(ctx context.Context, e FileEvent) Verdict {
+func (h *recordingHandler) Decide(ctx context.Context, e *FileEvent) Verdict {
 	v := h.inner.Decide(ctx, e)
-
 	profile := e.ProfileSource + "/" + e.ProfileID
 
 	rec := filequery.FileAccessRecord{

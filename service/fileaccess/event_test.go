@@ -18,7 +18,7 @@ func TestHandlerRouting(t *testing.T) {
 	}
 
 	// Deny anything touching /etc, allow everything else.
-	h := HandlerFunc(func(_ context.Context, e FileEvent) Verdict {
+	h := HandlerFunc(func(_ context.Context, e *FileEvent) Verdict {
 		if hasPrefix(e.Path, "/etc/") {
 			return VerdictDeny
 		}
@@ -65,7 +65,7 @@ func TestHandlerRouting(t *testing.T) {
 // TestAllowAll is a sanity check that the phase-1 default handler does
 // what it says on the tin.
 func TestAllowAll(t *testing.T) {
-	v := allowAll.Decide(context.Background(), FileEvent{PID: 1, Path: "/anything"})
+	v := allowAll.Decide(context.Background(), &FileEvent{PID: 1, Path: "/anything"})
 	if v != VerdictAllow {
 		t.Fatalf("allowAll returned %s, want allow", v)
 	}

@@ -138,7 +138,7 @@ func TestProfileHandlerRuleHit(t *testing.T) {
 	p := &scriptedPrompter{}
 
 	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
-	v := h.Decide(context.Background(), FileEvent{PID: 42, Path: "/etc/passwd"})
+	v := h.Decide(context.Background(), &FileEvent{PID: 42, Path: "/etc/passwd"})
 	if v != VerdictAllow {
 		t.Errorf("got %s, want allow", v)
 	}
@@ -160,7 +160,7 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
 
 	e := FileEvent{PID: 99, Path: "/home/alice/notes.txt"}
-	v := h.Decide(context.Background(), e)
+	v := h.Decide(context.Background(), &e)
 	if v != VerdictAllow {
 		t.Fatalf("first call: got %s, want allow", v)
 	}
@@ -172,7 +172,7 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 	// Tripwire on the second call: prompter must not be invoked.
 	tripwire := &scriptedPrompter{}
 	h.prompter = tripwire
-	v = h.Decide(context.Background(), e)
+	v = h.Decide(context.Background(), &e)
 	if v != VerdictAllow {
 		t.Errorf("second call: got %s, want allow (from persisted rule)", v)
 	}
@@ -193,7 +193,7 @@ func TestProfileHandlerPerProfileIsolation(t *testing.T) {
 	}}
 	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
 
-	if v := h.Decide(context.Background(), FileEvent{PID: 100, Path: "/home/alice/notes.txt"}); v != VerdictAllow {
+	if v := h.Decide(context.Background(), &FileEvent{PID: 100, Path: "/home/alice/notes.txt"}); v != VerdictAllow {
 		t.Fatalf("vim: got %s, want allow", v)
 	}
 	if p.called != 1 {
@@ -202,7 +202,7 @@ func TestProfileHandlerPerProfileIsolation(t *testing.T) {
 
 	// cat for the same path -- vim's rule does NOT carry across.
 	p.responses["/home/alice/notes.txt"] = ActionDeny
-	if v := h.Decide(context.Background(), FileEvent{PID: 101, Path: "/home/alice/notes.txt"}); v != VerdictDeny {
+	if v := h.Decide(context.Background(), &FileEvent{PID: 101, Path: "/home/alice/notes.txt"}); v != VerdictDeny {
 		t.Errorf("cat: got %s, want deny", v)
 	}
 	if p.called != 2 {
@@ -224,7 +224,7 @@ func TestProfileHandlerDefaultActionPermit(t *testing.T) {
 	p := &scriptedPrompter{}
 	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
 
-	v := h.Decide(context.Background(), FileEvent{PID: 1, Path: "/anything"})
+	v := h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/anything"})
 	if v != VerdictAllow {
 		t.Errorf("got %s, want allow (DefaultActionPermit)", v)
 	}
@@ -242,7 +242,7 @@ func TestProfileHandlerDefaultActionBlock(t *testing.T) {
 	p := &scriptedPrompter{}
 	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
 
-	v := h.Decide(context.Background(), FileEvent{PID: 1, Path: "/anything"})
+	v := h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/anything"})
 	if v != VerdictDeny {
 		t.Errorf("got %s, want deny (DefaultActionBlock)", v)
 	}
@@ -267,7 +267,7 @@ func TestProfileHandlerDefaultActionAskFiresPrompter(t *testing.T) {
 			}}
 			h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
 
-			v := h.Decide(context.Background(), FileEvent{PID: 1, Path: "/anything"})
+			v := h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/anything"})
 			if v != VerdictAllow {
 				t.Errorf("got %s, want allow", v)
 			}
@@ -283,7 +283,7 @@ func TestProfileHandlerDefaultActionAskFiresPrompter(t *testing.T) {
 // fallback can key by exe even though no profile resolved.
 func TestProfileHandlerFallbackPopulatesExe(t *testing.T) {
 	var seenExe string
-	fallback := HandlerFunc(func(_ context.Context, e FileEvent) Verdict {
+	fallback := HandlerFunc(func(_ context.Context, e *FileEvent) Verdict {
 		seenExe = e.Exe
 		return VerdictAllow
 	})
@@ -292,7 +292,7 @@ func TestProfileHandlerFallbackPopulatesExe(t *testing.T) {
 	}
 	h := NewProfileHandler(lookup, &scriptedPrompter{}, fallback, time.Second, nopLogger{})
 
-	_ = h.Decide(context.Background(), FileEvent{PID: 1, Path: "/x"})
+	_ = h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/x"})
 	if seenExe != "" {
 		t.Errorf("fallback saw exe %q; lookup error means no Path was resolved", seenExe)
 	}
@@ -303,8 +303,8 @@ func TestProfileHandlerFallbackPopulatesExe(t *testing.T) {
 // fallback, and propagate the resolved exe so the fallback can key by it.
 func TestProfileHandlerNoProfilePopulatesExeAndFallback(t *testing.T) {
 	var seen FileEvent
-	fallback := HandlerFunc(func(_ context.Context, e FileEvent) Verdict {
-		seen = e
+	fallback := HandlerFunc(func(_ context.Context, e *FileEvent) Verdict {
+		seen = *e
 		return VerdictDeny
 	})
 	// The fake lookup returns no profile for unknown PIDs but doesn't
@@ -313,7 +313,7 @@ func TestProfileHandlerNoProfilePopulatesExeAndFallback(t *testing.T) {
 	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{}}
 	h := NewProfileHandler(lookup, &scriptedPrompter{}, fallback, time.Second, nopLogger{})
 
-	v := h.Decide(context.Background(), FileEvent{PID: 999, Path: "/x"})
+	v := h.Decide(context.Background(), &FileEvent{PID: 999, Path: "/x"})
 	if v != VerdictDeny {
 		t.Errorf("got %s, want deny (from fallback)", v)
 	}

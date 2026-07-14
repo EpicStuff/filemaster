@@ -41,7 +41,7 @@ func TestPromptHandlerRuleHitPreseeded(t *testing.T) {
 
 	// Force seeding by triggering an "always" response.
 	p.responses = map[string]string{"/foo": ActionAllowAlways}
-	v := h.Decide(context.Background(), FileEvent{Exe: "/usr/bin/cat", Path: "/foo"})
+	v := h.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/cat", Path: "/foo"})
 	if v != VerdictAllow {
 		t.Fatalf("first /foo for /usr/bin/cat: got %s, want allow", v)
 	}
@@ -51,7 +51,7 @@ func TestPromptHandlerRuleHitPreseeded(t *testing.T) {
 
 	// Now /etc/passwd for /usr/bin/cat should hit the SEEDED rule from
 	// the initial set, not prompt.
-	v = h.Decide(context.Background(), FileEvent{Exe: "/usr/bin/cat", Path: "/etc/passwd"})
+	v = h.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/cat", Path: "/etc/passwd"})
 	if v != VerdictAllow {
 		t.Errorf("/etc/passwd for /usr/bin/cat: got %s, want allow (from seeded initial rule)", v)
 	}
@@ -66,7 +66,7 @@ func TestPromptHandlerAllowOnce(t *testing.T) {
 	}}
 	h := NewPromptHandler(p, nil, time.Second)
 
-	v := h.Decide(context.Background(), FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"})
+	v := h.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"})
 	if v != VerdictAllow {
 		t.Errorf("got %s, want allow", v)
 	}
@@ -82,7 +82,7 @@ func TestPromptHandlerAllowAlwaysPersists(t *testing.T) {
 	h := NewPromptHandler(p, nil, time.Second)
 
 	e := FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"}
-	v := h.Decide(context.Background(), e)
+	v := h.Decide(context.Background(), &e)
 	if v != VerdictAllow {
 		t.Fatalf("first call: got %s, want allow", v)
 	}
@@ -93,7 +93,7 @@ func TestPromptHandlerAllowAlwaysPersists(t *testing.T) {
 	// Second call by same exe must hit the rule and not invoke the prompter.
 	tripwire := &scriptedPrompter{}
 	h.prompter = tripwire
-	v = h.Decide(context.Background(), e)
+	v = h.Decide(context.Background(), &e)
 	if v != VerdictAllow {
 		t.Errorf("second call: got %s, want allow (from persisted rule)", v)
 	}
@@ -112,7 +112,7 @@ func TestPromptHandlerPerExeIsolation(t *testing.T) {
 	h := NewPromptHandler(p, nil, time.Second)
 
 	// vim establishes the allow-always rule.
-	_ = h.Decide(context.Background(), FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"})
+	_ = h.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"})
 	if calls := p.called; calls != 1 {
 		t.Fatalf("first prompt count: %d, want 1", calls)
 	}
@@ -120,7 +120,7 @@ func TestPromptHandlerPerExeIsolation(t *testing.T) {
 	// cat hits the same path -- should prompt again because cat has no
 	// rule of its own.
 	p.responses["/home/alice/notes.txt"] = ActionDeny
-	v := h.Decide(context.Background(), FileEvent{Exe: "/usr/bin/cat", Path: "/home/alice/notes.txt"})
+	v := h.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/cat", Path: "/home/alice/notes.txt"})
 	if v != VerdictDeny {
 		t.Errorf("cat verdict: got %s, want deny", v)
 	}
@@ -129,7 +129,7 @@ func TestPromptHandlerPerExeIsolation(t *testing.T) {
 	}
 
 	// vim hits its rule again -- still no second prompt for vim.
-	v = h.Decide(context.Background(), FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"})
+	v = h.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"})
 	if v != VerdictAllow {
 		t.Errorf("vim second call: got %s, want allow", v)
 	}
@@ -145,7 +145,7 @@ func TestPromptHandlerDenyAlwaysPersists(t *testing.T) {
 	h := NewPromptHandler(p, nil, time.Second)
 
 	e := FileEvent{Exe: "/usr/bin/cat", Path: "/etc/shadow"}
-	v := h.Decide(context.Background(), e)
+	v := h.Decide(context.Background(), &e)
 	if v != VerdictDeny {
 		t.Errorf("got %s, want deny", v)
 	}
@@ -158,7 +158,7 @@ func TestPromptHandlerNoResponseDefaultsDeny(t *testing.T) {
 	p := &scriptedPrompter{noReply: map[string]bool{"/home/alice/x": true}}
 	h := NewPromptHandler(p, nil, time.Second)
 
-	v := h.Decide(context.Background(), FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/x"})
+	v := h.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/x"})
 	if v != VerdictDeny {
 		t.Errorf("got %s, want deny on no-response", v)
 	}
@@ -171,7 +171,7 @@ func TestPromptHandlerUnknownActionDefaultsDeny(t *testing.T) {
 	p := &scriptedPrompter{responses: map[string]string{"/x": "weird-action"}}
 	h := NewPromptHandler(p, nil, time.Second)
 
-	v := h.Decide(context.Background(), FileEvent{Exe: "/bin/sh", Path: "/x"})
+	v := h.Decide(context.Background(), &FileEvent{Exe: "/bin/sh", Path: "/x"})
 	if v != VerdictDeny {
 		t.Errorf("got %s, want deny on unknown action", v)
 	}

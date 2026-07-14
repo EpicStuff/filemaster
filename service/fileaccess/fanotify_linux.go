@@ -432,7 +432,7 @@ func (s *fanotifySource) handleEvent(ctx context.Context, h Handler, meta *unix.
 
 	verdict := VerdictAllow
 	if isPerm {
-		verdict = h.Decide(ctx, event)
+		verdict = h.Decide(ctx, &event)
 	}
 
 	s.log.Info("fanotify event",

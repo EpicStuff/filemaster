@@ -37,7 +37,7 @@ type PathRules struct {
 
 // Decide implements Handler: look up the event's path in the rule list
 // and return the matching verdict (or the default).
-func (rs PathRules) Decide(_ context.Context, e FileEvent) Verdict {
+func (rs PathRules) Decide(_ context.Context, e *FileEvent) Verdict {
 	if v, ok := rs.Lookup(e.Path); ok {
 		return v
 	}
