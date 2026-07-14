@@ -1,5 +1,5 @@
-<td class="px-3 py-1.5 whitespace-nowrap text-secondary text-xxs">{{ event.at | date:'HH:mm:ss' }}</td>
-<td *ngIf="showAppColumn" class="px-3 py-1.5 truncate max-w-xs" [title]="event.app_name || event.exe">{{ event.app_name || event.exe }}</td>
-<td class="px-3 py-1.5 uppercase text-xxs font-mono" [ngClass]="opClass">{{ event.op }}</td>
-<td class="px-3 py-1.5 text-xxs" [ngClass]="verdictClass">{{ event.verdict }}</td>
-<td class="px-3 py-1.5 truncate max-w-lg text-secondary" [title]="event.path">{{ event.path }}</td>
+<span class="text-secondary text-xxs">{{ event.at | date:'HH:mm:ss' }}</span>
+<span *ngIf="showAppColumn" class="overflow-hidden text-ellipsis" [title]="event.app_name || event.exe">{{ event.app_name || event.exe }}</span>
+<span class="uppercase text-xxs font-mono" [ngClass]="opClass">{{ event.op }}</span>
+<span class="text-xxs" [ngClass]="verdictClass">{{ event.verdict }}</span>
+<span class="text-secondary overflow-hidden text-ellipsis" [title]="event.path">{{ event.path }}</span>

@@ -91,7 +91,7 @@ test('prompts for watched file write and read decisions and records them in the 
 		expect(readResult.exitCode).not.toBe(0);
 
 		await page.goto(`/monitor?api-port=${core.apiPort}`);
-		const monitorRows = page.locator('tbody tr').filter({ hasText: target });
+		const monitorRows = page.locator('sfng-file-event-row').filter({ hasText: target });
 		// Each row must carry the op AND the real resolved app name — the
 		// latter proving the PID→/proc→portmaster-profile path worked end to
 		// end (no synthetic/"/" fallback).

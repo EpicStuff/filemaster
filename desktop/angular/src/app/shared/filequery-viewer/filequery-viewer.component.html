@@ -1,20 +1,17 @@
-<div class="sticky top-0 z-50 bg-background pb-2" *ngIf="activeFilters.length">
-	<div class="flex flex-row flex-wrap items-center gap-2 p-2 bg-gray-300 rounded text-xxs">
-		<span class="text-secondary uppercase font-medium">Filters:</span>
+<div class="sticky top-0 z-50 flex flex-row items-center w-full mb-2 bg-background" *ngIf="activeFilters.length">
+	<div class="flex flex-row flex-wrap items-center gap-2 p-2 bg-gray-300 rounded-l-sm text-xxs">
 		<span
-			*ngFor="let f of activeFilters"
+			*ngFor="let filter of activeFilters"
 			class="flex items-center gap-1 px-2 py-0.5 bg-gray-400 rounded cursor-pointer hover:bg-gray-500"
-			(click)="removeFilter(f)">
-			<span class="text-secondary">{{ f.label }}:</span>
-			<span class="text-primary">{{ f.value }}</span>
+			(click)="removeFilter(filter)">
+			<span class="text-secondary">{{ filter.label }}:</span>
+			<span class="text-primary">{{ filter.value }}</span>
 			<span class="ml-1 text-tertiary hover:text-red-400">×</span>
 		</span>
-		<button
-			class="bg-transparent hover:bg-transparent ml-auto cursor-pointer text-tertiary hover:text-primary p-0"
-			(click)="clearFilters()">
-			Clear All
-		</button>
 	</div>
+	<button class="bg-transparent hover:bg-transparent ml-2 cursor-pointer text-tertiary text-xxs hover:text-primary p-2" (click)="clearFilters()">
+		Clear All
+	</button>
 </div>
 
 <div class="flex flex-row items-center w-full gap-2">
@@ -22,66 +19,65 @@
 		type="text"
 		[(ngModel)]="textSearch"
 		(ngModelChange)="performSearch()"
-		placeholder="Search by app, path, or exe…"
-		class="block w-full px-3 py-2 text-sm bg-gray-300 border border-gray-400 rounded focus:outline-none focus:border-primary" />
-	<button type="button" class="h-full px-4 py-2 rounded btn" (click)="reload()">Reload</button>
+		placeholder="Search by app, path, or executable…"
+		class="block w-full px-3 py-2 text-sm bg-gray-300 border border-gray-400 rounded-l-sm focus:outline-none focus:border-primary" />
+	<button type="button" class="h-full rounded-r-sm btn" (click)="reload()">Reload</button>
 </div>
 
-<div class="flex flex-row flex-wrap items-center gap-2 text-xxs">
-	<span class="text-secondary">Filter by:</span>
+<div class="flex flex-row flex-wrap items-center w-full gap-3">
+	<span class="text-secondary text-xxs">Filter by:</span>
 	<button
 		*ngFor="let op of ['open', 'read', 'write', 'exec']"
-		class="px-2 py-0.5 rounded border border-gray-500 hover:border-primary hover:text-primary transition-colors"
+		class="px-2 py-0.5 rounded border border-gray-500 hover:border-primary hover:text-primary transition-colors text-xxs"
 		(click)="addFilter('op', op)">
 		{{ op }}
 	</button>
-	<span class="text-gray-500">|</span>
 	<button
-		class="px-2 py-0.5 rounded border border-green-600 text-green-400 hover:bg-green-900 transition-colors"
+		class="px-2 py-0.5 rounded border border-green-600 text-green-400 hover:bg-green-900 transition-colors text-xxs"
 		(click)="addFilter('verdict', 'allow')">
 		allow
 	</button>
 	<button
-		class="px-2 py-0.5 rounded border border-red-600 text-red-400 hover:bg-red-900 transition-colors"
+		class="px-2 py-0.5 rounded border border-red-600 text-red-400 hover:bg-red-900 transition-colors text-xxs"
 		(click)="addFilter('verdict', 'deny')">
-		deny
+		block
 	</button>
 </div>
 
-<div class="relative flex-grow overflow-auto">
-	<div *ngIf="loading && !events.length" class="flex items-center justify-center py-10 text-secondary">
-		Loading…
-	</div>
-
-	<table *ngIf="events.length" class="w-full text-sm border-collapse">
-		<thead class="sticky top-0 bg-gray-200 text-left z-10">
-			<tr>
-				<th class="px-3 py-2 font-medium text-secondary text-xxs uppercase">Time</th>
-				<th *ngIf="showAppColumn" class="px-3 py-2 font-medium text-secondary text-xxs uppercase">App</th>
-				<th class="px-3 py-2 font-medium text-secondary text-xxs uppercase">Op</th>
-				<th class="px-3 py-2 font-medium text-secondary text-xxs uppercase">Verdict</th>
-				<th class="px-3 py-2 font-medium text-secondary text-xxs uppercase">Path</th>
-			</tr>
-		</thead>
-		<tbody>
-			<tr
-				*ngFor="let event of events"
-				app-file-event-row
-				[event]="event"
-				[showAppColumn]="showAppColumn"
-				class="border-t border-gray-800 hover:bg-gray-300 transition-colors cursor-pointer"
-				(click)="addFilter('app_name', event.app_name || event.exe)">
-			</tr>
-		</tbody>
-	</table>
-
-	<div *ngIf="!loading && !events.length" class="flex items-center justify-center py-10 text-secondary text-sm">
-		No file-access events recorded yet.
-	</div>
-
-	<div *ngIf="hasMore" class="flex justify-center py-4">
-		<button class="btn" (click)="loadMore()" [disabled]="loading">
-			{{ loading ? 'Loading…' : 'Load more' }}
-		</button>
-	</div>
+<div class="flex flex-row items-center justify-start gap-3">
+	<span class="text-xxs text-primary" *ngIf="!loading">{{ totalResultCount }} Results</span>
 </div>
+
+<ng-template #eventHeader let-event>
+	<sfng-file-event-row [event]="$any(event)" [showAppColumn]="showAppColumn"></sfng-file-event-row>
+</ng-template>
+
+<ng-template #loadingTemplate>
+	<div class="flex items-center justify-center py-10 text-secondary">Loading…</div>
+</ng-template>
+
+<sfng-pagination *ngIf="!loading; else loadingTemplate" [source]="paginator" class="flex flex-col">
+	<ng-template [sfngPageContent]>
+		<sfng-accordion-group
+			class="flex flex-col gap-2"
+			*ngIf="(paginator.pageLoading$ | async) === false; else loadingTemplate"
+			[headerTemplate]="eventHeader"
+			singleMode="false">
+			<div class="flex items-center justify-center py-10 text-secondary text-sm" *ngIf="totalResultCount === 0">
+				No file-access events recorded yet.
+			</div>
+
+			<sfng-accordion
+				*ngFor="let event of (paginator.pageItems$ | async); trackBy: trackEvent"
+				[data]="event"
+				#accordion>
+				<div *ngIf="accordion.active" class="grid grid-cols-2 gap-x-6 gap-y-2 p-3 bg-gray-300 bg-opacity-75 border-t border-gray-300 rounded-b-sm text-xxs">
+					<span class="text-secondary">Executable</span><span class="break-all">{{ event.exe }}</span>
+					<span class="text-secondary">Profile</span><span class="break-all">{{ event.profile }}</span>
+					<span class="text-secondary">PID</span><span>{{ event.pid }}</span>
+					<span class="text-secondary">Path</span><span class="break-all">{{ event.path }}</span>
+				</div>
+			</sfng-accordion>
+		</sfng-accordion-group>
+	</ng-template>
+</sfng-pagination>
