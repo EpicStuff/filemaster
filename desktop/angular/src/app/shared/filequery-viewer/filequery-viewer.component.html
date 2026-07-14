@@ -33,26 +33,71 @@
 </div>
 
 <div class="flex flex-row flex-wrap items-center w-full gap-3">
-	<sfng-select mode="multi" itemName="Operation" placeholder="Operation" allowSearch="false"
-		[(ngModel)]="selectedOperations" (ngModelChange)="onFiltersChange()">
-		<sfng-select-item *sfngSelectValue="'open'">Open</sfng-select-item>
-		<sfng-select-item *sfngSelectValue="'read'">Read</sfng-select-item>
-		<sfng-select-item *sfngSelectValue="'write'">Write</sfng-select-item>
-		<sfng-select-item *sfngSelectValue="'exec'">Exec</sfng-select-item>
-	</sfng-select>
-
-	<sfng-select mode="multi" itemName="Verdict" placeholder="Verdict" allowSearch="false"
+	<sfng-select mode="multi" itemName="Allowed" placeholder="Allowed" allowSearch="false"
 		[(ngModel)]="selectedVerdicts" (ngModelChange)="onFiltersChange()">
 		<sfng-select-item *sfngSelectValue="'allow'">Allowed</sfng-select-item>
 		<sfng-select-item *sfngSelectValue="'deny'">Blocked</sfng-select-item>
 	</sfng-select>
 
+	<sfng-select mode="multi" itemName="File" placeholder="File" dynamicValues="true"
+		allowSearch="true" searchItemThreshold="0" searchPlaceholder="Search File" minWidth="400" minHeight="300"
+		[(ngModel)]="selectedFiles" (ngModelChange)="onFiltersChange()" (opened)="loadSuggestions('path')">
+		<ng-container *ngFor="let suggestion of fileSuggestions">
+			<sfng-select-item *sfngSelectValue="suggestion.value; data:suggestion.count; label:suggestion.value">
+				<span class="flex-grow overflow-hidden text-ellipsis whitespace-nowrap" style="max-width: 20rem">{{ suggestion.value }}</span>
+				<span class="pr-3 text-xxs text-tertiary whitespace-nowrap">#{{ suggestion.count }} events</span>
+			</sfng-select-item>
+		</ng-container>
+	</sfng-select>
+
+	<sfng-select mode="multi" itemName="App" placeholder="App" dynamicValues="true"
+		allowSearch="true" searchItemThreshold="0" searchPlaceholder="Search App" minWidth="400" minHeight="300"
+		[(ngModel)]="selectedApps" (ngModelChange)="onFiltersChange()" (opened)="loadSuggestions('app_name')">
+		<ng-container *ngFor="let suggestion of appSuggestions">
+			<sfng-select-item *sfngSelectValue="suggestion.value; data:suggestion.count; label:suggestion.value">
+				<span class="flex-grow overflow-hidden text-ellipsis whitespace-nowrap" style="max-width: 20rem">{{ suggestion.value }}</span>
+				<span class="pr-3 text-xxs text-tertiary whitespace-nowrap">#{{ suggestion.count }} events</span>
+			</sfng-select-item>
+		</ng-container>
+	</sfng-select>
+
+	<ng-template #moreTemplate>
+		<button class="sfng-select" [class.active]="moreDropdown.isOpen">
+			<span>More</span>
+			<div class="arrow"><svg viewBox="0 0 24 24" class="arrow-icon"><g fill="none" class="inner"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M10 16l4-4-4-4" /></g></svg></div>
+		</button>
+	</ng-template>
+	<sfng-dropdown #moreDropdown [triggerTemplate]="moreTemplate">
+		<div class="sfng-select-dropdown">
+			<h3 class="px-3 py-0.5 mb-0 border-b border-gray-300 text-xxs text-secondary">Filter by Access</h3>
+			<ul>
+				<li class="px-3" *ngFor="let operation of ['read', 'write']" [class.bg-gray-300]="selectedOperations.includes(operation)">
+					<sfng-select-item (click)="toggleOperation(operation)" class="grid w-full grid-cols-3">
+						<span class="col-span-2">{{ operation | titlecase }}</span>
+						<svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 transition-all duration-200" viewBox="0 0 20 20" fill="currentColor" [class.opacity-0]="!selectedOperations.includes(operation)"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" /></svg>
+					</sfng-select-item>
+				</li>
+			</ul>
+		</div>
+	</sfng-dropdown>
+
 	<div class="flex-grow"></div>
 
-	<sfng-select mode="single" itemName="Sort" placeholder="Sort" allowSearch="false"
-		[(ngModel)]="sortOrder" (ngModelChange)="performSearch()">
-		<sfng-select-item *sfngSelectValue="'newest'">Newest first</sfng-select-item>
-		<sfng-select-item *sfngSelectValue="'oldest'">Oldest first</sfng-select-item>
+	<sfng-select mode="multi" itemName="Group By" placeholder="Group By" allowSearch="false"
+		[(ngModel)]="selectedGroupBy" (ngModelChange)="performSearch()">
+		<sfng-select-item *sfngSelectValue="'path'">File</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'app_name'">App</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'op'">Access</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'verdict'">Allowed</sfng-select-item>
+	</sfng-select>
+
+	<sfng-select mode="multi" itemName="Sort" placeholder="Sort" allowSearch="false"
+		[(ngModel)]="selectedOrderBy" (ngModelChange)="performSearch()">
+		<sfng-select-item *sfngSelectValue="'at'">Time</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'path'">File</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'app_name'">App</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'op'">Access</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'verdict'">Allowed</sfng-select-item>
 	</sfng-select>
 </div>
 
@@ -79,28 +124,56 @@
 	<div class="flex items-center justify-center py-10 text-secondary">Loading…</div>
 </ng-template>
 
+<ng-template #eventDetails let-event>
+	<div class="grid grid-cols-2 gap-x-6 gap-y-2 p-3 bg-gray-300 bg-opacity-75 border-t border-gray-300 rounded-b-sm text-xxs">
+		<span class="text-secondary">Executable</span><span class="break-all">{{ event.exe }}</span>
+		<span class="text-secondary">Profile</span><span class="break-all">{{ event.profile }}</span>
+		<span class="text-secondary">PID</span><span>{{ event.pid }}</span>
+		<span class="text-secondary">Path</span><span class="break-all">{{ event.path }}</span>
+	</div>
+</ng-template>
+
+<ng-template #groupHeader let-group let-active="active">
+	<div class="relative flex flex-row items-center w-full gap-3 px-3 bg-gray-200"
+		[ngClass]="{'rounded-sm': !active, 'rounded-t-sm': active, 'py-2': true}">
+		<svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 transition-all duration-150 transform"
+			[class.rotate-90]="active" viewBox="0 0 20 20" fill="currentColor">
+			<path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+		</svg>
+		<span class="text-secondary text-xxs">{{ group.events.length }} events</span>
+		<span *ngFor="let field of selectedGroupBy" class="flex items-center gap-1 overflow-hidden whitespace-nowrap">
+			<span class="text-xxs text-secondary" *ngIf="selectedGroupBy.length !== 1">{{ keyTranslation[field] || field }}</span>
+			<span class="overflow-hidden text-primary text-ellipsis">{{ group.values[field] }}</span>
+		</span>
+	</div>
+</ng-template>
+
 <sfng-pagination *ngIf="!loading; else loadingTemplate" [source]="paginator" class="flex flex-col">
 	<ng-template [sfngPageContent]>
-		<sfng-accordion-group
-			class="flex flex-col gap-2 pr-4"
-			*ngIf="(paginator.pageLoading$ | async) === false; else loadingTemplate"
-			[headerTemplate]="eventHeader"
-			singleMode="false">
+		<div *ngIf="(paginator.pageLoading$ | async) === false; else loadingTemplate">
 			<div class="flex items-center justify-center py-10 text-secondary text-sm" *ngIf="totalResultCount === 0">
 				No file-access events recorded yet.
 			</div>
 
-			<sfng-accordion
-				*ngFor="let event of (paginator.pageItems$ | async); trackBy: trackEvent"
-				[data]="event"
-				#accordion>
-				<div *ngIf="accordion.active" class="grid grid-cols-2 gap-x-6 gap-y-2 p-3 bg-gray-300 bg-opacity-75 border-t border-gray-300 rounded-b-sm text-xxs">
-					<span class="text-secondary">Executable</span><span class="break-all">{{ event.exe }}</span>
-					<span class="text-secondary">Profile</span><span class="break-all">{{ event.profile }}</span>
-					<span class="text-secondary">PID</span><span>{{ event.pid }}</span>
-					<span class="text-secondary">Path</span><span class="break-all">{{ event.path }}</span>
-				</div>
-			</sfng-accordion>
-		</sfng-accordion-group>
+			<sfng-accordion-group class="flex flex-col gap-2 pr-4" *ngIf="!isGrouped"
+				[headerTemplate]="eventHeader" singleMode="false">
+				<sfng-accordion *ngFor="let event of (paginator.pageItems$ | async); trackBy: trackEvent" [data]="event" #accordion>
+					<ng-container *ngIf="accordion.active" [ngTemplateOutlet]="eventDetails" [ngTemplateOutletContext]="{$implicit: event}"></ng-container>
+				</sfng-accordion>
+			</sfng-accordion-group>
+
+			<sfng-accordion-group class="flex flex-col gap-2 pr-4" *ngIf="isGrouped"
+				[headerTemplate]="groupHeader" singleMode="false">
+				<sfng-accordion *ngFor="let group of (groupedPageItems$ | async); trackBy: trackGroup" [data]="group" #groupAccordion>
+					<div *ngIf="groupAccordion.active" class="p-3 bg-gray-300 bg-opacity-75 border-t border-gray-300 rounded-b-sm">
+						<sfng-accordion-group class="flex flex-col gap-2" [headerTemplate]="eventHeader" singleMode="false">
+							<sfng-accordion *ngFor="let event of group.events; trackBy: trackEvent" [data]="event" #eventAccordion>
+								<ng-container *ngIf="eventAccordion.active" [ngTemplateOutlet]="eventDetails" [ngTemplateOutletContext]="{$implicit: event}"></ng-container>
+							</sfng-accordion>
+						</sfng-accordion-group>
+					</div>
+				</sfng-accordion>
+			</sfng-accordion-group>
+		</div>
 	</ng-template>
 </sfng-pagination>
