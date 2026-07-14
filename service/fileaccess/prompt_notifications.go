@@ -74,10 +74,8 @@ func (p *NotificationsPrompter) Prompt(ctx context.Context, e FileEvent, timeout
 		Message:   msg,
 		EventData: data,
 		AvailableActions: []*notifications.Action{
-			{ID: ActionAllow, Text: "Allow once"},
-			{ID: ActionDeny, Text: "Deny once"},
-			{ID: ActionAllowAlways, Text: "Always allow this path"},
-			{ID: ActionDenyAlways, Text: "Always deny this path"},
+			{ID: ActionAllowAlways, Text: "Allow"},
+			{ID: ActionDenyAlways, Text: "Block"},
 		},
 	})
 

@@ -182,13 +182,6 @@ export class PromptListComponent implements OnInit, OnDestroy {
 	}
 
 	allow(prompt: FileAccessPrompt) {
-		const action = prompt.AvailableActions.find(a => a.ID === 'allow');
-		if (action) {
-			this.execute(prompt, action);
-		}
-	}
-
-	allowAlways(prompt: FileAccessPrompt) {
 		const action = prompt.AvailableActions.find(a => a.ID === 'allow-always');
 		if (action) {
 			this.execute(prompt, action);
@@ -196,7 +189,7 @@ export class PromptListComponent implements OnInit, OnDestroy {
 	}
 
 	block(prompt: FileAccessPrompt) {
-		const action = prompt.AvailableActions.find(a => a.ID === 'deny' || a.ID === 'deny-always');
+		const action = prompt.AvailableActions.find(a => a.ID === 'deny-always');
 		if (action) {
 			this.execute(prompt, action);
 		}

@@ -53,7 +53,7 @@ test('prompts for watched file write and read decisions and records them in the 
 		}, core);
 
 		await expectPromptInApp(page, core.apiPort, target, 'write');
-		await page.getByRole('button', { name: 'Always allow this path' }).click();
+		await page.getByRole('button', { name: 'Allow' }).click();
 		await expect(writeAttempt).resolves.toMatchObject({
 			verdict: 'allow',
 			stdout: '',
@@ -84,7 +84,7 @@ test('prompts for watched file write and read decisions and records them in the 
 		}, core);
 
 		await expectPromptInApp(page, core.apiPort, target, 'read');
-		await page.getByRole('button', { name: 'Deny once' }).click();
+		await page.getByRole('button', { name: 'Block' }).click();
 		const readResult = await readAttempt;
 		expect(readResult.verdict).toBe('deny');
 		expect(readResult.stdout).toBe('');
