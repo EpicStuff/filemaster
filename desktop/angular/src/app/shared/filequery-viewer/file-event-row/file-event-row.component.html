@@ -2,12 +2,11 @@
 	<span class="flex-shrink-0 w-2 h-2 rounded-full" [ngClass]="event.verdict === 'allow' ? 'bg-green-400' : 'bg-red-400'"></span>
 	<span class="overflow-hidden text-ellipsis" [title]="event.path">{{ event.path }}</span>
 </div>
-<span class="hidden uppercase text-xxs font-mono sfng-md:block" [ngClass]="opClass">{{ event.op }}</span>
+<span class="hidden text-xxs font-mono sfng-md:block" [ngClass]="opClass">{{ event.op | titlecase }}</span>
 <span *ngIf="showAppColumn" class="overflow-hidden text-ellipsis" [title]="event.app_name || event.exe">{{ event.app_name || event.exe }}</span>
 <span *ngIf="!showAppColumn" class="overflow-hidden text-ellipsis" [title]="event.exe">{{ event.exe }}</span>
 <span class="text-xxs" [ngClass]="verdictClass">{{ event.verdict }}</span>
 <span class="hidden text-secondary sfng-md:block" [title]="event.at">{{ event.at | date:'HH:mm:ss' }}</span>
-<span class="hidden text-secondary text-xxs sfng-lg:block overflow-hidden text-ellipsis" [title]="event.profile">{{ event.profile }}</span>
 <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-tertiary" viewBox="0 0 20 20" fill="currentColor" aria-label="Expand for details">
 	<path d="M6 10a2 2 0 114 0 2 2 0 01-4 0zm6 0a2 2 0 114 0 2 2 0 01-4 0zM2 10a2 2 0 114 0 2 2 0 01-4 0z" />
 </svg>

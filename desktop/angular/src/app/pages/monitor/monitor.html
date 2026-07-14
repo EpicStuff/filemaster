@@ -6,7 +6,7 @@
 </div>
 <div class="relative flex flex-col flex-grow overflow-auto" cdkScrollable>
 
-  <div class="flex flex-col items-start justify-center py-6">
+	<div class="flex flex-col items-start justify-center py-6">
     <h1 class="flex flex-row items-center gap-2 text-xl font-semibold text-primary">
       File Access Activity
     </h1>
@@ -14,10 +14,18 @@
       Review file opens, reads, writes, and executions captured by Filemaster.
     </p>
     <p class="mt-2 text-sm text-secondary">
-      Use the search bar and filters to find file-access events.
-    </p>
-  </div>
+		Use the search bar and filters to find file-access events.
+	</p>
+	</div>
 
-  <app-filequery-viewer class="flex-grow"></app-filequery-viewer>
+	<div class="w-full h-48 p-3 mb-6 bg-gray-200 rounded-sm" *ngIf="activityChart | async as chartData">
+		<div class="flex items-center justify-between mb-2">
+			<h2 class="text-sm font-medium text-primary">File Accesses</h2>
+			<span class="text-xxs text-secondary">Last 10 minutes</span>
+		</div>
+		<sfng-netquery-line-chart class="block w-full h-36" [data]="chartData" [config]="activityChartConfig"></sfng-netquery-line-chart>
+	</div>
+
+	<app-filequery-viewer class="flex-grow"></app-filequery-viewer>
 
 </div>

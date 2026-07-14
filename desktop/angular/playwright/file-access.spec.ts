@@ -96,11 +96,13 @@ test('prompts for watched file write and read decisions and records them in the 
 		// latter proving the PID→/proc→portmaster-profile path worked end to
 		// end (no synthetic/"/" fallback).
 		await expect(
-			monitorRows.filter({ hasText: 'write' }).filter({ hasText: 'sleep' })
+			monitorRows.filter({ hasText: 'Write' }).filter({ hasText: 'sleep' })
 		).toHaveCount(2);
 		await expect(
-			monitorRows.filter({ hasText: 'read' }).filter({ hasText: 'tail' })
+			monitorRows.filter({ hasText: 'Read' }).filter({ hasText: 'tail' })
 		).toBeVisible();
+		await expect(page.getByText('File Accesses', { exact: true })).toBeVisible();
+		await expect(page.locator('sfng-netquery-line-chart svg')).toBeVisible();
 
 		const introDialog = page.locator('sfng-dialog-container').filter({ hasText: 'Portmaster Protects Your Privacy' });
 		if (await introDialog.isVisible()) {

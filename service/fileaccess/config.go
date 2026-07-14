@@ -19,7 +19,7 @@ const CfgOptionInterceptReadsKey = "fileaccess/interceptReads"
 
 const (
 	cfgOptionWatchPathsOrder     = 10
-	cfgOptionInterceptReadsOrder = 20
+	cfgOptionInterceptReadsOrder = 60
 )
 
 var (
@@ -56,7 +56,7 @@ func registerConfig() error {
 		DefaultValue: false,
 		Annotations: config.Annotations{
 			config.DisplayOrderAnnotation: cfgOptionInterceptReadsOrder,
-			config.CategoryAnnotation:     "File Access",
+			config.CategoryAnnotation:     "Rules",
 		},
 	})
 	if err != nil {

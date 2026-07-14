@@ -44,7 +44,6 @@ import { EditProfileDialog } from './shared/edit-profile-dialog';
 import { ExitScreenComponent } from './shared/exit-screen/exit-screen';
 import { ExpertiseModule } from './shared/expertise/expertise.module';
 import { ExternalLinkDirective } from './shared/external-link.directive';
-import { FeatureScoutComponent } from './shared/feature-scout';
 import { SfngFocusModule } from './shared/focus';
 import { FuzzySearchPipe } from './shared/fuzzySearch';
 import { LoadingComponent } from './shared/loading';
@@ -149,7 +148,6 @@ const localeConfig = {
     SupportPageComponent,
     SupportFormComponent,
     SecurityLockComponent,
-    FeatureScoutComponent,
     NetworkScoutComponent,
     EditProfileDialog,
     ProcessDetailsDialogComponent,

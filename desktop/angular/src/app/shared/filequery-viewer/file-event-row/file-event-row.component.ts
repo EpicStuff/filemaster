@@ -21,10 +21,10 @@ import { FileAccessRecord } from '@safing/portmaster-api';
 			grid-template-columns: 1fr 4rem 1fr 1fr 5rem 2rem;
 		}
 		:host-context(.min-width-1024px) :host {
-			grid-template-columns: 1fr 4rem 1fr 1fr 5rem 0.5fr 2rem;
+			grid-template-columns: 1fr 4rem 1fr 1fr 5rem 2rem;
 		}
 		:host-context(.min-width-1280px) :host {
-			grid-template-columns: 1fr 4rem 1fr 1fr 8rem 1fr 2rem;
+			grid-template-columns: 1fr 4rem 1fr 1fr 8rem 2rem;
 		}
 		:host > * { @apply overflow-hidden whitespace-nowrap text-ellipsis; }
 	`],
