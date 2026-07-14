@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, HostBinding, Input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import { FileAccessRecord } from '@safing/portmaster-api';
 
 /**
@@ -12,13 +12,19 @@ import { FileAccessRecord } from '@safing/portmaster-api';
 	changeDetection: ChangeDetectionStrategy.OnPush,
 	styles: [`
 		:host {
-			@apply w-full flex-grow gap-4 grid justify-start items-center overflow-hidden px-3;
-			grid-template-columns: 5rem 1fr 4rem 4rem minmax(12rem, 2fr);
+			@apply w-full flex-grow gap-4 grid justify-start items-center overflow-hidden;
+			grid-template-columns: 1fr 1fr 1fr 2rem;
 			grid-auto-rows: 1.5rem;
 			--app-icon-size: 20px;
 		}
-		:host.without-app {
-			grid-template-columns: 5rem 4rem 4rem minmax(12rem, 2fr);
+		:host-context(.min-width-768px) :host {
+			grid-template-columns: 1fr 4rem 1fr 1fr 5rem 2rem;
+		}
+		:host-context(.min-width-1024px) :host {
+			grid-template-columns: 1fr 4rem 1fr 1fr 5rem 0.5fr 2rem;
+		}
+		:host-context(.min-width-1280px) :host {
+			grid-template-columns: 1fr 4rem 1fr 1fr 8rem 1fr 2rem;
 		}
 		:host > * { @apply overflow-hidden whitespace-nowrap text-ellipsis; }
 	`],
@@ -26,11 +32,6 @@ import { FileAccessRecord } from '@safing/portmaster-api';
 export class FileEventRowComponent {
 	@Input() event!: FileAccessRecord;
 	@Input() showAppColumn = true;
-
-	@HostBinding('class.without-app')
-	get withoutAppColumn(): boolean {
-		return !this.showAppColumn;
-	}
 
 	get opClass(): string {
 		switch (this.event?.op) {

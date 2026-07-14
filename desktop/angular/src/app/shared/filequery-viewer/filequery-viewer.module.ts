@@ -1,7 +1,7 @@
 import { CommonModule } from '@angular/common';
 import { NgModule } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { SfngAccordionModule, SfngPaginationModule } from '@safing/ui';
+import { SfngAccordionModule, SfngPaginationModule, SfngSelectModule } from '@safing/ui';
 import { FileEventRowComponent } from './file-event-row/file-event-row.component';
 import { FilequeryViewerComponent } from './filequery-viewer.component';
 
@@ -11,6 +11,7 @@ import { FilequeryViewerComponent } from './filequery-viewer.component';
 		FormsModule,
 		SfngAccordionModule,
 		SfngPaginationModule,
+		SfngSelectModule,
 	],
 	declarations: [
 		FilequeryViewerComponent,

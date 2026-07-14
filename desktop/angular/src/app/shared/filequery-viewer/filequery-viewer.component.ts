@@ -55,13 +55,24 @@ export class FilequeryViewerComponent implements OnInit {
 	private presetCondition: Condition | null = null;
 
 	readonly keyTranslation = keyTranslation;
-	readonly orderBy: OrderBy[] = [{ field: 'at', desc: true }];
+	get orderBy(): OrderBy[] {
+		return [{ field: 'at', desc: this.sortOrder === 'newest' }];
+	}
 
 	textSearch = '';
-	activeFilters: ActiveFilter[] = [];
+	selectedOperations: string[] = [];
+	selectedVerdicts: string[] = [];
+	sortOrder: 'newest' | 'oldest' = 'newest';
 	loading = false;
 	totalResultCount = 0;
 	paginator!: DynamicItemsPaginator<FileAccessRecord>;
+
+	get activeFilters(): ActiveFilter[] {
+		return [
+			...this.selectedOperations.map(value => ({ key: 'op', value, label: keyTranslation.op })),
+			...this.selectedVerdicts.map(value => ({ key: 'verdict', value, label: keyTranslation.verdict })),
+		];
+	}
 
 	ngOnInit(): void {
 		const source: Datasource<FileAccessRecord> = {
@@ -109,24 +120,23 @@ export class FilequeryViewerComponent implements OnInit {
 		this.reload$.next();
 	}
 
-	addFilter(key: string, value: string): void {
-		const existing = this.activeFilters.findIndex(f => f.key === key && f.value === value);
-		if (existing !== -1) return;
-		this.activeFilters = [
-			...this.activeFilters,
-			{ key, value, label: keyTranslation[key] || key },
-		];
+	onFiltersChange(): void {
 		this.performSearch();
 	}
 
 	removeFilter(filter: ActiveFilter): void {
-		this.activeFilters = this.activeFilters.filter(f => f !== filter);
+		if (filter.key === 'op') {
+			this.selectedOperations = this.selectedOperations.filter(value => value !== filter.value);
+		} else if (filter.key === 'verdict') {
+			this.selectedVerdicts = this.selectedVerdicts.filter(value => value !== filter.value);
+		}
 		this.performSearch();
 	}
 
 	clearFilters(): void {
 		this.textSearch = '';
-		this.activeFilters = [];
+		this.selectedOperations = [];
+		this.selectedVerdicts = [];
 		this.performSearch();
 	}
 
@@ -144,9 +154,17 @@ export class FilequeryViewerComponent implements OnInit {
 			});
 		}
 
-		this.activeFilters.forEach(f => {
-			cond[f.key] = f.value;
-		});
+		if (this.selectedOperations.length) {
+			cond.op = this.selectedOperations.length === 1
+				? this.selectedOperations[0]
+				: { $in: this.selectedOperations };
+		}
+
+		if (this.selectedVerdicts.length) {
+			cond.verdict = this.selectedVerdicts.length === 1
+				? this.selectedVerdicts[0]
+				: { $in: this.selectedVerdicts };
+		}
 
 		return this.presetCondition ? mergeConditions(cond, this.presetCondition) : cond;
 	}

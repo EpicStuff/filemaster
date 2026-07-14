@@ -101,6 +101,19 @@ test('prompts for watched file write and read decisions and records them in the 
 		await expect(
 			monitorRows.filter({ hasText: 'read' }).filter({ hasText: 'tail' })
 		).toBeVisible();
+
+		const introDialog = page.locator('sfng-dialog-container').filter({ hasText: 'Portmaster Protects Your Privacy' });
+		if (await introDialog.isVisible()) {
+			await introDialog.locator('svg').first().click();
+			await expect(introDialog).toBeHidden();
+		}
+
+		if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
+			await page.screenshot({
+				path: path.join(repoRoot, 'tmp', 'file-access-activity.png'),
+				fullPage: true,
+			});
+		}
 	} finally {
 		await stopFilemaster(core);
 	}

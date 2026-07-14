@@ -1,3 +1,4 @@
+<!-- Keep the activity controls structurally aligned with sfng-netquery-viewer. -->
 <div class="sticky top-0 z-50 flex flex-row items-center w-full mb-2 bg-background" *ngIf="activeFilters.length">
 	<div class="flex flex-row flex-wrap items-center gap-2 p-2 bg-gray-300 rounded-l-sm text-xxs">
 		<span
@@ -15,41 +16,63 @@
 </div>
 
 <div class="flex flex-row items-center w-full gap-2">
-	<input
-		type="text"
-		[(ngModel)]="textSearch"
-		(ngModelChange)="performSearch()"
-		placeholder="Search by app, path, or executable…"
-		class="block w-full px-3 py-2 text-sm bg-gray-300 border border-gray-400 rounded-l-sm focus:outline-none focus:border-primary" />
+	<div class="relative flex flex-row items-center w-full bg-gray-300 rounded-sm">
+		<div class="absolute top-0 left-0 flex items-center p-2 -mt-0.5">
+			<svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-secondary" viewBox="0 0 20 20" fill="currentColor">
+				<path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd" />
+			</svg>
+		</div>
+		<input
+			type="text"
+			[(ngModel)]="textSearch"
+			(ngModelChange)="performSearch()"
+			placeholder="Search for file access, press ENTER to apply"
+			class="w-full !pl-7 rounded-tr-sm" />
+	</div>
 	<button type="button" class="h-full rounded-r-sm btn" (click)="reload()">Reload</button>
 </div>
 
 <div class="flex flex-row flex-wrap items-center w-full gap-3">
-	<span class="text-secondary text-xxs">Filter by:</span>
-	<button
-		*ngFor="let op of ['open', 'read', 'write', 'exec']"
-		class="px-2 py-0.5 rounded border border-gray-500 hover:border-primary hover:text-primary transition-colors text-xxs"
-		(click)="addFilter('op', op)">
-		{{ op }}
-	</button>
-	<button
-		class="px-2 py-0.5 rounded border border-green-600 text-green-400 hover:bg-green-900 transition-colors text-xxs"
-		(click)="addFilter('verdict', 'allow')">
-		allow
-	</button>
-	<button
-		class="px-2 py-0.5 rounded border border-red-600 text-red-400 hover:bg-red-900 transition-colors text-xxs"
-		(click)="addFilter('verdict', 'deny')">
-		block
-	</button>
+	<sfng-select mode="multi" itemName="Operation" placeholder="Operation" allowSearch="false"
+		[(ngModel)]="selectedOperations" (ngModelChange)="onFiltersChange()">
+		<sfng-select-item *sfngSelectValue="'open'">Open</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'read'">Read</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'write'">Write</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'exec'">Exec</sfng-select-item>
+	</sfng-select>
+
+	<sfng-select mode="multi" itemName="Verdict" placeholder="Verdict" allowSearch="false"
+		[(ngModel)]="selectedVerdicts" (ngModelChange)="onFiltersChange()">
+		<sfng-select-item *sfngSelectValue="'allow'">Allowed</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'deny'">Blocked</sfng-select-item>
+	</sfng-select>
+
+	<div class="flex-grow"></div>
+
+	<sfng-select mode="single" itemName="Sort" placeholder="Sort" allowSearch="false"
+		[(ngModel)]="sortOrder" (ngModelChange)="performSearch()">
+		<sfng-select-item *sfngSelectValue="'newest'">Newest first</sfng-select-item>
+		<sfng-select-item *sfngSelectValue="'oldest'">Oldest first</sfng-select-item>
+	</sfng-select>
 </div>
 
 <div class="flex flex-row items-center justify-start gap-3">
-	<span class="text-xxs text-primary" *ngIf="!loading">{{ totalResultCount }} Results</span>
+	<span class="text-xxs text-primary" *ngIf="!loading">{{ totalResultCount }} Results
+		<span class="text-secondary">file-access events</span>
+	</span>
+	<span class="flex-grow"></span>
+	<span class="text-xxs text-secondary" *ngIf="!loading">Last Reload: just now</span>
 </div>
 
-<ng-template #eventHeader let-event>
-	<sfng-file-event-row [event]="$any(event)" [showAppColumn]="showAppColumn"></sfng-file-event-row>
+<ng-template #eventHeader let-event let-active="active">
+	<div class="relative flex flex-row items-center w-full gap-3 px-3 bg-gray-200"
+		[ngClass]="{'rounded-sm': !active, 'rounded-t-sm': active, 'py-1': true}">
+		<svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 transition-all duration-150 transform"
+			[class.rotate-90]="active" viewBox="0 0 20 20" fill="currentColor">
+			<path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+		</svg>
+		<sfng-file-event-row [event]="$any(event)" [showAppColumn]="showAppColumn"></sfng-file-event-row>
+	</div>
 </ng-template>
 
 <ng-template #loadingTemplate>
@@ -59,7 +82,7 @@
 <sfng-pagination *ngIf="!loading; else loadingTemplate" [source]="paginator" class="flex flex-col">
 	<ng-template [sfngPageContent]>
 		<sfng-accordion-group
-			class="flex flex-col gap-2"
+			class="flex flex-col gap-2 pr-4"
 			*ngIf="(paginator.pageLoading$ | async) === false; else loadingTemplate"
 			[headerTemplate]="eventHeader"
 			singleMode="false">
