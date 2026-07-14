@@ -49,59 +49,97 @@ push.
 
 ## Test before every commit
 
-Compiling clean is not testing. Before committing any behavioral change, run
-the affected surface and observe it:
+Compiling clean is not testing. Every behavioral change must be exercised and
+observed before committing. Do not skip this.
+
+### Backend / daemon changes
+
+The fake socket source is faithful to the real kernel source: the event
+carries only `pid`, `path`, and `op` — **no `exe`**. The profile is resolved
+from `/proc/<pid>/exe`, exactly as in production. This means you must send a
+**real, live PID**: spawn an actual process, send its PID, then kill it. A
+made-up PID (e.g. 9001) will not resolve to any profile — the same failure
+mode you'd get in production for a dead process.
 
 ```bash
-# Start the daemon with fake fanotify (no CAP_SYS_ADMIN needed):
+# Build and start fresh with the fake socket source:
 go build -o /tmp/portmaster-core ./cmds/portmaster-core/
-FM_FAKE_SOCKET=/tmp/fm-fake.sock /tmp/portmaster-core --data-dir /tmp/fm-test --devmode --log info &
+pkill -f portmaster-core 2>/dev/null; sleep 1
+FM_FAKE_SOCKET=/tmp/fm-fake.sock /tmp/portmaster-core \
+  --data-dir /tmp/fm-test --devmode --log info &
+sleep 2   # wait for socket to appear
 
-# Inject a fake event:
-echo '{"pid":1234,"exe":"/usr/bin/cat","path":"/etc/passwd","op":"open"}' \
+# Spawn real, long-lived processes and inject THEIR pids (empty exe, like
+# the kernel). Keep them alive until the daemon has read /proc, then kill.
+sleep 300 & SLEEP_PID=$!
+tail -f /dev/null & TAIL_PID=$!
+sleep 0.3
+echo "{\"pid\":$SLEEP_PID,\"path\":\"/tmp/secret.txt\",\"op\":\"write\"}" \
   | ./fake-fanotify -socket /tmp/fm-fake.sock
+echo "{\"pid\":$TAIL_PID,\"path\":\"/etc/passwd\",\"op\":\"read\"}" \
+  | ./fake-fanotify -socket /tmp/fm-fake.sock
+# (each blocks ~30s on the prompt timeout since no UI answers it)
+kill $SLEEP_PID $TAIL_PID 2>/dev/null
 
-# Hit an API endpoint:
-curl -s http://127.0.0.1:818/api/v1/filequery/query -X POST \
-  -H 'Content-Type: application/json' -d '{"pageSize":5}'
+# Verify events were recorded:
+curl -s http://127.0.0.1:818/api/v1/filequery/query \
+  -X POST -H 'Content-Type: application/json' -d '{"pageSize":5}'
+# Expected: each result has a real profile like "local/PTVMx..." (source
+# prefixed exactly ONCE — not "local/local/...") and app_name "Sleep"/"Tail".
+# A profile of "/" means the PID did not resolve (dead process or fake PID).
 ```
 
-For any UI change (Tauri frontend, sidebar, notifications, dialogs):
+### UI changes (Angular)
+
+Screenshots must be saved to `./tmp/` (repo root, gitignored). Always use the
+Read tool to open each screenshot and look at it — do not assume it looks right.
 
 ```bash
-# Screenshots save to ./tmp/ (relative to repo root — gitignored):
-node desktop/angular/screenshot.mjs [url] [./tmp/name.png]
-
-# Sweep all main pages after any wide-impact change:
-node desktop/angular/screenshot.mjs http://localhost:4200/dashboard       ./tmp/dashboard.png
-node desktop/angular/screenshot.mjs http://localhost:4200/monitor         ./tmp/monitor.png
-node desktop/angular/screenshot.mjs http://localhost:4200/app/local/_unidentified ./tmp/sidebar.png
-node desktop/angular/screenshot.mjs http://localhost:4200/settings        ./tmp/settings.png
+# After injecting events (above), sweep all main pages:
+node desktop/angular/screenshot.mjs http://localhost:4200/dashboard  ./tmp/dashboard.png
+node desktop/angular/screenshot.mjs http://localhost:4200/monitor    ./tmp/monitor.png
+node desktop/angular/screenshot.mjs http://localhost:4200/settings   ./tmp/settings.png
 ```
 
-Use the Read tool to open each screenshot and **look at it** — verify layout,
-text, and the changed element. Check specifically:
-- Sidebar entries show real app names, not system placeholders like "/" or empty string
-- Monitor page shows only file-access content, not old "Network Activity" / "Loading connections…" UI
-- No "Loading…" spinners that never resolve (indicates silent API failure)
+**What to verify in each screenshot:**
 
-**Why silent failures happen without --devmode:** The Angular dev build calls the
-daemon at `http://127.0.0.1:818` directly, but the page origin is `localhost:4200`.
-Without `--devmode` on the daemon, the CORS origin check blocks all requests with
-403. Angular's `catchError(() => of([]))` swallows the 403, so the UI silently
-shows empty state. **Always start the daemon with `--devmode` when developing with
-ng serve.** Note: this was fixed in `environment.ts` to default through the proxy
-(same-origin), so `--devmode` is no longer required for the default workflow — but
-any explicit `?api-port=PORT` override still makes direct cross-origin requests and
-will need `--devmode`.
+- **Sidebar** (visible in every page): must show the real resolved app names
+  (e.g. "Sleep", "Tail" for the injections above) — NOT "Other Access" only.
+  If events exist but all land in "Other Access"/"/", profile resolution from
+  the PID is broken (or you injected a fake/dead PID).
+- **Monitor page**: shows "File Access Activity" with the filequery-viewer
+  (search bar, filter chips, event table). No "Network Activity", no
+  "Loading connections…", no "Loading Chart".
+- **No stuck spinners**: any persistent "Loading…" means silent API failure —
+  check network tab in devtools or daemon logs for 403s.
+- **Important**: Also make sure to check the bug you are fixing or the feature
+  you are implementing is actually working/fixed.
 
-- Pure refactors and doc/comment-only edits: type-check is enough.
-- Any logic or config change: must exercise the changed code path and observe
-  correct output before committing.
-- Any UI change: must screenshot every affected page and read each one; visual
-  inspection is required — "it compiled" and "the API returned 200" are not substitutes.
-- If a runtime test is genuinely impossible (no env, blocked perms), say so
-  explicitly — never silently skip it.
+### Always run the Playwright tests
+
+```bash
+cd desktop/angular
+npx playwright test                  # both app-shell and file-access suites
+npx ng test --watch=false            # Karma unit tests (uses ChromeHeadlessNoSandbox)
+```
+
+Both must pass before committing. The file-access E2E test exercises the full
+write-prompt-allow → read-prompt-deny → monitor page flow end-to-end. If it
+passes, the core prompt/verdict/audit pipeline is working.
+
+### Silent API failure (CORS without --devmode)
+
+The Angular dev build sends requests directly to `127.0.0.1:818` while the page
+origin is `localhost:4200`. Without `--devmode` on the daemon the CORS check
+blocks with 403; Angular's `catchError(() => of([]))` swallows the error and
+shows empty state silently. Always start the daemon with `--devmode` when using
+ng serve. (The `environment.ts` default now goes through the proxy so this only
+bites explicit `?api-port=PORT` overrides.)
+
+- Pure refactors / doc-only: type-check is enough.
+- Logic or config change: exercise the changed path and confirm correct output.
+- UI change: screenshot every affected page, read each one with the Read tool.
+- If a runtime test is genuinely impossible, say so explicitly — never skip silently.
 
 ## Other conventions
 

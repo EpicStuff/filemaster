@@ -70,10 +70,11 @@ export class Filequery {
       verdicts: {
         select: [
           'profile',
+          'app_name',
           'verdict',
           { $count: { field: '*', as: 'totalCount' } },
         ] as unknown as Select[],
-        groupBy: ['profile', 'verdict'],
+        groupBy: ['profile', 'app_name', 'verdict'],
         query: query,
       },
     }).pipe(
@@ -91,6 +92,10 @@ export class Filequery {
 
         (result.verdicts || []).forEach((row: QueryResult) => {
           const stats = getOrCreate(row['profile'] as string);
+          const appName = row['app_name'] as string;
+          if (appName && stats.Name === stats.ID) {
+            stats.Name = appName;
+          }
           const count = (row['totalCount'] as number) || 0;
           stats.size += count;
           if ((row['verdict'] as unknown as string) === 'allow') {

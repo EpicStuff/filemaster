@@ -21,9 +21,14 @@ type TestCore = {
 type AccessAttempt = {
 	path: string;
 	op: 'read' | 'write';
-	exe: string;
-	pid: number;
 	command: string;
+	// Fake-source mode spawns this real, long-lived process and sends its
+	// PID over the socket, so the daemon resolves a real portmaster profile
+	// from /proc/<pid>/exe exactly as it would for a kernel fanotify event.
+	liveCmd: string;
+	liveArgs: string[];
+	// Expected resolved profile (binary) name, asserted in the monitor.
+	appName: string;
 };
 
 test.describe.configure({ mode: 'serial' });
@@ -41,9 +46,10 @@ test('prompts for watched file write and read decisions and records them in the 
 		const writeAttempt = requestAccess({
 			path: target,
 			op: 'write',
-			exe: '/usr/bin/bash',
-			pid: 42001,
 			command: `echo test > ${target}`,
+			liveCmd: 'sleep',
+			liveArgs: ['60'],
+			appName: 'sleep',
 		}, core);
 
 		await expectPromptInApp(page, core.apiPort, target, 'write');
@@ -60,9 +66,10 @@ test('prompts for watched file write and read decisions and records them in the 
 		const readAttempt = requestAccess({
 			path: target,
 			op: 'read',
-			exe: '/usr/bin/cat',
-			pid: 42002,
 			command: `cat ${target}`,
+			liveCmd: 'tail',
+			liveArgs: ['-f', '/dev/null'],
+			appName: 'tail',
 		}, core);
 
 		await expectPromptInApp(page, core.apiPort, target, 'read');
@@ -74,8 +81,15 @@ test('prompts for watched file write and read decisions and records them in the 
 
 		await page.goto(`/monitor?api-port=${core.apiPort}`);
 		const monitorRows = page.locator('tbody tr').filter({ hasText: target });
-		await expect(monitorRows.filter({ hasText: 'write' })).toBeVisible();
-		await expect(monitorRows.filter({ hasText: 'read' })).toBeVisible();
+		// Each row must carry the op AND the real resolved app name — the
+		// latter proving the PID→/proc→portmaster-profile path worked end to
+		// end (no synthetic/"/" fallback).
+		await expect(
+			monitorRows.filter({ hasText: 'write' }).filter({ hasText: 'sleep' })
+		).toBeVisible();
+		await expect(
+			monitorRows.filter({ hasText: 'read' }).filter({ hasText: 'tail' })
+		).toBeVisible();
 	} finally {
 		await stopFilemaster(core);
 	}
@@ -196,12 +210,25 @@ async function requestAccess(attempt: AccessAttempt, core: TestCore) {
 		throw new Error('fake file access source is missing its socket path');
 	}
 
-	const verdict = await sendSocketEvent(core.socketPath, {
-		pid: attempt.pid,
-		exe: attempt.exe,
-		path: attempt.path,
-		op: attempt.op,
+	// Spawn a real, long-lived process so the daemon can resolve its profile
+	// from /proc/<pid>/exe — the fake source carries only the PID, exactly
+	// like the kernel does. The process is killed once the verdict is in.
+	const live = spawn(attempt.liveCmd, attempt.liveArgs, { stdio: 'ignore' });
+	await new Promise<void>((resolve, reject) => {
+		live.once('spawn', () => resolve());
+		live.once('error', reject);
 	});
+
+	let verdict: string;
+	try {
+		verdict = await sendSocketEvent(core.socketPath, {
+			pid: live.pid,
+			path: attempt.path,
+			op: attempt.op,
+		});
+	} finally {
+		live.kill('SIGKILL');
+	}
 
 	if (verdict === 'deny') {
 		return {

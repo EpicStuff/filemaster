@@ -1,7 +1,7 @@
 import { CommonModule } from "@angular/common";
 import { Component, OnInit, TrackByFunction, inject } from "@angular/core";
 import { AppProfile, AppProfileService, PortapiService } from "@safing/portmaster-api";
-import { combineLatest, forkJoin, map, of, switchMap } from "rxjs";
+import { catchError, combineLatest, forkJoin, map, of, switchMap } from "rxjs";
 import { FileAccessPrompt, NotificationType, NotificationsService } from "../services";
 import { SfngAppIconModule } from "../shared/app-icon";
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -63,7 +63,7 @@ export class PromptEntryPointComponent implements OnInit {
 						// buckets just emit a null profile.
 						if (!key.startsWith('exe/')) {
 							return forkJoin({
-								profile: this.profileService.getAppProfile(key),
+								profile: this.profileService.getAppProfile(key).pipe(catchError(() => of(null))),
 								prompts: of(Array.from(prompts)),
 							});
 						}
