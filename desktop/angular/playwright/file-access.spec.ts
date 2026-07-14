@@ -119,7 +119,9 @@ test('prompts for watched file write and read decisions and records them in the 
 
 		await page.locator('app-network-scout').getByText('Tail', { exact: true }).click();
 		await expect(page).toHaveURL(/\/app\//);
+		await expect(page.getByRole('heading', { name: 'Tail' })).toBeVisible();
 		await page.getByText('File Events', { exact: true }).click();
+		await expect(page.locator('app-filequery-viewer sfng-file-event-row').filter({ hasText: target })).toBeVisible();
 		await expect(page.locator('app-filequery-viewer sfng-netquery-line-chart svg')).toBeVisible();
 
 		if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
