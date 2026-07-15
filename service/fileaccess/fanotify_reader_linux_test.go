@@ -459,8 +459,15 @@ func TestMetadataVersionMismatchTerminatesSourceBeforeLaterPolicy(t *testing.T) 
 	if readCalls != 1 || policyCalls != 0 {
 		t.Fatalf("read calls=%d policy calls=%d, want source stop after first read without policy", readCalls, policyCalls)
 	}
-	if len(responses) != 1 || responses[0].Fd != 401 || responses[0].Response != unix.FAN_DENY {
-		t.Fatalf("fatal mismatch responses = %+v, want only mismatched fd 401 denied", responses)
+	if len(responses) != 2 {
+		t.Fatalf("fatal mismatch responses = %+v, want both first-batch descriptors denied", responses)
+	}
+	responded := map[int32]uint32{}
+	for _, response := range responses {
+		responded[response.Fd] = response.Response
+	}
+	if responded[401] != unix.FAN_DENY || responded[402] != unix.FAN_DENY {
+		t.Fatalf("fatal mismatch responses = %+v, want fds 401 and 402 denied", responses)
 	}
 	diagnostics := source.ReaderDiagnostics()
 	if !diagnostics.Fatal || !diagnostics.Degraded || !strings.Contains(diagnostics.FatalError, "metadata version mismatch") {
@@ -468,6 +475,86 @@ func TestMetadataVersionMismatchTerminatesSourceBeforeLaterPolicy(t *testing.T) 
 	}
 	if diagnostics.OutstandingDescriptors != 0 || !source.responses.draining.Load() {
 		t.Fatalf("metadata mismatch accounting/draining = %+v draining=%v", diagnostics, source.responses.draining.Load())
+	}
+}
+
+func TestMetadataVersionMismatchFatalScanResolvesWholeBatch(t *testing.T) {
+	source := newReaderTestSource(4)
+	firstBatch := fanotifyEventBytes(
+		unix.FanotifyEventMetadata{
+			Vers: unix.FANOTIFY_METADATA_VERSION,
+			Fd:   411,
+			Mask: unix.FAN_OPEN_PERM,
+		},
+		unix.FanotifyEventMetadata{
+			Vers: unix.FANOTIFY_METADATA_VERSION + 1,
+			Fd:   412,
+			Mask: unix.FAN_OPEN_PERM,
+		},
+		unix.FanotifyEventMetadata{
+			Vers: unix.FANOTIFY_METADATA_VERSION,
+			Fd:   413,
+			Mask: unix.FAN_OPEN_PERM,
+		},
+	)
+	secondBatch := fanotifyEventBytes(unix.FanotifyEventMetadata{
+		Vers: unix.FANOTIFY_METADATA_VERSION,
+		Fd:   414,
+		Mask: unix.FAN_OPEN_PERM,
+	})
+	readCalls := 0
+	source.poll = func([]unix.PollFd, int) (int, error) { return 1, nil }
+	source.read = func(_ int, bytes []byte) (int, error) {
+		readCalls++
+		batch := secondBatch
+		if readCalls == 1 {
+			batch = firstBatch
+		}
+		copy(bytes, batch)
+		return len(batch), nil
+	}
+
+	var responses []unix.FanotifyResponse
+	source.responses.write = func(_ int, bytes []byte) (int, error) {
+		responses = append(responses, *(*unix.FanotifyResponse)(unsafe.Pointer(&bytes[0])))
+		return len(bytes), nil
+	}
+	policyCalls := 0
+	err := source.Run(context.Background(), PendingHandlerFunc(func(context.Context, PendingEvent) error {
+		policyCalls++
+		return nil
+	}))
+
+	if err == nil || !strings.Contains(err.Error(), "metadata version mismatch") {
+		t.Fatalf("source error = %v, want metadata version mismatch", err)
+	}
+	if readCalls != 1 {
+		t.Fatalf("read calls = %d, want exactly one", readCalls)
+	}
+	if policyCalls != 0 {
+		t.Fatalf("policy calls = %d, want zero", policyCalls)
+	}
+	if len(responses) != 3 {
+		t.Fatalf("fatal scan responses = %+v, want three denials", responses)
+	}
+	responded := map[int32]uint32{}
+	for _, response := range responses {
+		responded[response.Fd] = response.Response
+	}
+	for _, fd := range []int32{411, 412, 413} {
+		if responded[fd] != unix.FAN_DENY {
+			t.Fatalf("fatal scan responses = %+v, want fd %d denied", responses, fd)
+		}
+	}
+	diagnostics := source.ReaderDiagnostics()
+	if diagnostics.OutstandingDescriptors != 0 || diagnostics.PeakOutstandingDescriptors != 3 {
+		t.Fatalf("fatal scan descriptor diagnostics = %+v", diagnostics)
+	}
+	source.accountedMu.Lock()
+	accounted := len(source.accounted)
+	source.accountedMu.Unlock()
+	if accounted != 0 {
+		t.Fatalf("accounted descriptors = %d, want zero", accounted)
 	}
 }
 

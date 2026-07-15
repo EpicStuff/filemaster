@@ -503,21 +503,28 @@ func (s *fanotifySource) handleEvents(ctx context.Context, handler PendingHandle
 		}
 
 		eventLen := int(meta.Event_len)
+		var structuralErr error
 		switch {
 		case eventLen < metaLen:
-			batchErr = fmt.Errorf("invalid fanotify event length %d: shorter than metadata length %d", eventLen, metaLen)
+			structuralErr = fmt.Errorf("invalid fanotify event length %d: shorter than metadata length %d", eventLen, metaLen)
 		case eventLen > len(buf):
-			batchErr = fmt.Errorf("invalid fanotify event length %d in %d-byte read remainder", eventLen, len(buf))
+			structuralErr = fmt.Errorf("invalid fanotify event length %d in %d-byte read remainder", eventLen, len(buf))
 		case int(meta.Metadata_len) != metaLen:
-			batchErr = fmt.Errorf("invalid fanotify metadata length %d: want %d", meta.Metadata_len, metaLen)
-		case meta.Vers != unix.FANOTIFY_METADATA_VERSION:
-			batchErr = fmt.Errorf("fanotify metadata version mismatch: got %d, want %d", meta.Vers, unix.FANOTIFY_METADATA_VERSION)
+			structuralErr = fmt.Errorf("invalid fanotify metadata length %d: want %d", meta.Metadata_len, metaLen)
 		}
-		if batchErr != nil {
+		if structuralErr != nil {
+			batchErr = errors.Join(batchErr, structuralErr)
 			if meta.Fd >= 0 {
 				invalidEvent = &meta
 			}
 			break
+		}
+
+		if meta.Vers != unix.FANOTIFY_METADATA_VERSION && batchErr == nil {
+			batchErr = fmt.Errorf("fanotify metadata version mismatch: got %d, want %d", meta.Vers, unix.FANOTIFY_METADATA_VERSION)
+			// The record boundary is still trustworthy, so enter the fatal state
+			// now but continue scanning this already returned kernel buffer.
+			s.enterReaderFatal(batchErr)
 		}
 
 		if meta.Fd >= 0 {
@@ -525,20 +532,23 @@ func (s *fanotifySource) handleEvents(ctx context.Context, handler PendingHandle
 		}
 		buf = buf[eventLen:]
 	}
-	if batchErr == nil && len(buf) != 0 {
-		batchErr = fmt.Errorf("trailing %d-byte partial fanotify metadata record", len(buf))
+	if len(buf) != 0 {
+		batchErr = errors.Join(batchErr, fmt.Errorf("trailing %d-byte partial fanotify metadata record", len(buf)))
 	}
 
 	if batchErr != nil {
-		s.enterReaderFatal(batchErr)
+		if !s.readerFatal.Load() {
+			s.enterReaderFatal(batchErr)
+		}
 		var resolutionErr error
 		if invalidEvent != nil {
-			resolutionErr = s.resolveAccountedEventForFatal(invalidEvent)
+			resolutionErr = errors.Join(resolutionErr, s.resolveAccountedEventForFatal(invalidEvent))
 		}
-		// The fatal state makes every earlier valid event take the controlled
-		// deny path. Resolve all of them before returning the batch error.
+		// No event from a fatal batch may reach path resolution, scope
+		// classification, or policy. Resolve every structurally scanned
+		// descriptor directly through the controlled deny/close path.
 		for i := range events {
-			s.handleEvent(ctx, handler, &events[i])
+			resolutionErr = errors.Join(resolutionErr, s.resolveAccountedEventForFatal(&events[i]))
 		}
 		return errors.Join(batchErr, resolutionErr)
 	}
