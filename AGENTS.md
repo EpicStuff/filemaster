@@ -1,5 +1,16 @@
 Go read ./CLAUDE.md
 
+## Language-server readiness
+
+Before code navigation, identify the languages in the files being changed and
+ensure Serena has suitable language-server support. For a nested project,
+activate its most-specific `.serena/project.yml` (for example,
+`desktop/angular` for the Angular UI), not just the repository root. Install
+any missing language server or runtime that is needed or materially useful,
+following the shared package-installation guide, configure it in Serena, and
+verify it with a semantic request before proceeding. Do not leave an available,
+relevant server unconfigured merely because a text-search fallback works.
+
 After completing a user-requested implementation, commit the scoped changes and
 push the current branch unless the user explicitly asks not to push.
 
