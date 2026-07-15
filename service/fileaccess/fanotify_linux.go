@@ -233,17 +233,20 @@ func (s *fanotifySource) resolveAccountedEventForFatal(meta *unix.FanotifyEventM
 		PID: meta.Pid,
 		Op:  opFromMask(uint64(meta.Mask)),
 	}
-	pending := newPendingEvent(&event, func(verdict Verdict) responseResult {
-		return s.responses.respond(meta.Fd, verdict)
-	})
+	pending := s.newFanotifyPendingEvent(&event, meta.Fd)
 	responseErr := pending.Respond(VerdictDeny)
 	if responseErr != nil {
 		s.log.Error("fatal fanotify batch event denial failed", "fd", meta.Fd, "err", responseErr)
-		if !pending.responseAccepted() {
-			s.retainFailedEvent(meta.Fd, pending)
-		}
 	}
 	return responseErr
+}
+
+func (s *fanotifySource) newFanotifyPendingEvent(event *FileEvent, eventFD int32) *pendingEventOwner {
+	return newPendingEventWithFailureSink(event, func(verdict Verdict) responseResult {
+		return s.responses.respond(eventFD, verdict)
+	}, func(owner PendingEvent) {
+		s.retainFailedEvent(eventFD, owner)
+	})
 }
 
 func (s *fanotifySource) setReaderDegraded(err error) {
@@ -598,10 +601,7 @@ func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler
 		Path: path,
 		Op:   opFromMask(uint64(meta.Mask)),
 	}
-	pending := newPendingEvent(&event, func(verdict Verdict) responseResult {
-		return s.responses.respond(meta.Fd, verdict)
-	})
-	var owner PendingEvent = pending
+	pending := s.newFanotifyPendingEvent(&event, meta.Fd)
 	var responseErr error
 	switch {
 	case s.responses.draining.Load():
@@ -612,7 +612,7 @@ func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler
 	case !s.pathInActiveScope(path):
 		responseErr = pending.Respond(VerdictAllow)
 	default:
-		owner, responseErr = deliverPendingEvent(ctx, handler, pending)
+		_, responseErr = deliverPendingEvent(ctx, handler, pending)
 	}
 
 	verdict, decided := pending.logicalVerdict()
@@ -629,9 +629,6 @@ func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler
 	)
 	if responseErr != nil {
 		s.log.Error("fanotify event resolution failed", "fd", meta.Fd, "err", responseErr)
-		if !pending.responseAccepted() && owner != nil {
-			s.retainFailedEvent(meta.Fd, owner)
-		}
 	}
 }
 

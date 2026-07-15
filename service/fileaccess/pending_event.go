@@ -44,13 +44,14 @@ type responseResult struct {
 type pendingEventState struct {
 	mu sync.Mutex
 
-	event        *FileEvent
-	respond      func(Verdict) responseResult
-	currentOwner uint64
-	nextOwner    uint64
-	verdict      Verdict
-	verdictSet   bool
-	accepted     bool
+	event                *FileEvent
+	respond              func(Verdict) responseResult
+	onUnacceptedResponse func(PendingEvent)
+	currentOwner         uint64
+	nextOwner            uint64
+	verdict              Verdict
+	verdictSet           bool
+	accepted             bool
 }
 
 type pendingEventOwner struct {
@@ -59,11 +60,16 @@ type pendingEventOwner struct {
 }
 
 func newPendingEvent(event *FileEvent, respond func(Verdict) responseResult) *pendingEventOwner {
+	return newPendingEventWithFailureSink(event, respond, nil)
+}
+
+func newPendingEventWithFailureSink(event *FileEvent, respond func(Verdict) responseResult, onUnacceptedResponse func(PendingEvent)) *pendingEventOwner {
 	state := &pendingEventState{
-		event:        event,
-		respond:      respond,
-		currentOwner: 1,
-		nextOwner:    1,
+		event:                event,
+		respond:              respond,
+		onUnacceptedResponse: onUnacceptedResponse,
+		currentOwner:         1,
+		nextOwner:            1,
 	}
 	return &pendingEventOwner{state: state, owner: 1}
 }
@@ -109,10 +115,10 @@ func (event *pendingEventOwner) Respond(verdict Verdict) error {
 	event.state.verdictSet = true
 	event.state.mu.Unlock()
 
-	return event.state.finishResponse(verdict)
+	return event.state.finishResponse(event, verdict)
 }
 
-func (state *pendingEventState) finishResponse(verdict Verdict) error {
+func (state *pendingEventState) finishResponse(owner PendingEvent, verdict Verdict) error {
 	result := state.respond(verdict)
 	if !result.accepted && result.err == nil {
 		result.err = ErrPendingEventResponseNotAccepted
@@ -122,6 +128,11 @@ func (state *pendingEventState) finishResponse(verdict Verdict) error {
 		state.accepted = true
 		state.currentOwner = 0
 		state.mu.Unlock()
+		return result.err
+	}
+
+	if state.onUnacceptedResponse != nil {
+		state.onUnacceptedResponse(owner)
 	}
 	return result.err
 }
@@ -145,7 +156,7 @@ func (state *pendingEventState) resolveCurrent(verdict Verdict) (PendingEvent, e
 	state.verdictSet = true
 	state.mu.Unlock()
 
-	return owner, state.finishResponse(verdict)
+	return owner, state.finishResponse(owner, verdict)
 }
 
 func (event *pendingEventOwner) logicalVerdict() (Verdict, bool) {
