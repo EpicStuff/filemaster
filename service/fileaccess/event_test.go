@@ -31,7 +31,7 @@ func TestHandlerRouting(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- src.Run(ctx, h) }()
+	go func() { done <- src.Run(ctx, decisionPendingHandler{handler: h}) }()
 
 	// Wait for the source to chew through all events before closing.
 	deadline := time.Now().Add(time.Second)

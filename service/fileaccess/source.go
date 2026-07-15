@@ -8,7 +8,7 @@ import "context"
 // resources held outside Run -- typically a kernel fd -- and is safe to
 // call concurrently with Run.
 type Source interface {
-	Run(ctx context.Context, h Handler) error
+	Run(ctx context.Context, handler PendingHandler) error
 	Close() error
 
 	// SetWatchPaths reconciles the current mark set with paths: marks

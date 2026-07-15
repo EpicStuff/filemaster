@@ -40,7 +40,7 @@ type socketEvent struct {
 	// JSON is ignored.
 }
 
-func (s *socketSource) Run(ctx context.Context, h Handler) error {
+func (s *socketSource) Run(ctx context.Context, handler PendingHandler) error {
 	go func() {
 		<-ctx.Done()
 		_ = s.ln.Close()
@@ -59,11 +59,11 @@ func (s *socketSource) Run(ctx context.Context, h Handler) error {
 				return fmt.Errorf("socket source accept: %w", err)
 			}
 		}
-		go s.handleConn(ctx, conn, h)
+		go s.handleConn(ctx, conn, handler)
 	}
 }
 
-func (s *socketSource) handleConn(ctx context.Context, conn net.Conn, h Handler) {
+func (s *socketSource) handleConn(ctx context.Context, conn net.Conn, handler PendingHandler) {
 	defer conn.Close()
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
@@ -81,8 +81,14 @@ func (s *socketSource) handleConn(ctx context.Context, conn net.Conn, h Handler)
 			Path: se.Path,
 			Op:   opFromString(se.Op),
 		}
-		verdict := h.Decide(ctx, &event)
-		if _, err := fmt.Fprintf(conn, "%s\n", verdict); err != nil {
+		pending := newPendingEvent(&event, func(verdict Verdict) responseResult {
+			if _, err := fmt.Fprintf(conn, "%s\n", verdict); err != nil {
+				return responseResult{err: err}
+			}
+			return responseResult{accepted: true}
+		})
+		if _, err := deliverPendingEvent(ctx, handler, pending); err != nil {
+			s.log.Error("socket source event resolution failed", "err", err)
 			return
 		}
 	}

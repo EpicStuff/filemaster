@@ -116,7 +116,7 @@ func (fa *FileAccess) Start() error {
 	fa.source = src
 
 	fa.mgr.Go("file-access source", func(w *mgr.WorkerCtx) error {
-		return fa.source.Run(w.Ctx(), fa.handler)
+		return fa.source.Run(w.Ctx(), decisionPendingHandler{handler: fa.handler})
 	})
 	if reconciler, ok := src.(reconciliationSource); ok {
 		fa.mgr.Go("file-access mount reconciliation", func(w *mgr.WorkerCtx) error {

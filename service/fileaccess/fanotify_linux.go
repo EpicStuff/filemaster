@@ -33,6 +33,10 @@ type fanotifySource struct {
 
 	mountInfo func() ([]mountInfo, error)
 	mark      func(flags uint, mask uint64, path string) error
+
+	responses    *fanotifyResponseWriter
+	failedMu     sync.Mutex
+	failedEvents map[int32]PendingEvent
 }
 
 // resolveMarkMask builds the perm-event mask. OPEN_PERM and
@@ -83,12 +87,14 @@ func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
 	}
 
 	s := &fanotifySource{
-		log:       log,
-		fd:        fd,
-		scopes:    make(map[string]*policyScope),
-		marks:     make(map[int]mountedMark),
-		markMask:  resolveMarkMask(),
-		mountInfo: readMountInfo,
+		log:          log,
+		fd:           fd,
+		scopes:       make(map[string]*policyScope),
+		marks:        make(map[int]mountedMark),
+		markMask:     resolveMarkMask(),
+		mountInfo:    readMountInfo,
+		responses:    newFanotifyResponseWriter(fd, log),
+		failedEvents: make(map[int32]PendingEvent),
 		mark: func(flags uint, mask uint64, path string) error {
 			return unix.FanotifyMark(fd, flags, mask, unix.AT_FDCWD, path)
 		},
@@ -125,8 +131,8 @@ func (s *fanotifySource) SetWatchPaths(paths []string) error {
 }
 
 // Run reads events from the fanotify fd until ctx is cancelled or the fd
-// is closed, calling handler.Decide for each perm event.
-func (s *fanotifySource) Run(ctx context.Context, h Handler) error {
+// is closed, transferring each permission event to handler.
+func (s *fanotifySource) Run(ctx context.Context, handler PendingHandler) error {
 	buf := make([]byte, 4096)
 	pollFds := []unix.PollFd{{Fd: int32(s.fd), Events: unix.POLLIN}}
 
@@ -164,7 +170,7 @@ func (s *fanotifySource) Run(ctx context.Context, h Handler) error {
 			continue
 		}
 
-		s.handleEvents(ctx, h, buf[:read])
+		s.handleEvents(ctx, handler, buf[:read])
 	}
 }
 
@@ -182,7 +188,7 @@ func (s *fanotifySource) Close() error {
 	return unix.Close(s.fd)
 }
 
-func (s *fanotifySource) handleEvents(ctx context.Context, h Handler, buf []byte) {
+func (s *fanotifySource) handleEvents(ctx context.Context, handler PendingHandler, buf []byte) {
 	metaLen := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
 	for len(buf) >= metaLen {
 		// Copy the struct out of the buffer so we can safely reslice.
@@ -191,12 +197,12 @@ func (s *fanotifySource) handleEvents(ctx context.Context, h Handler, buf []byte
 		if evLen < metaLen || evLen > len(buf) {
 			return
 		}
-		s.handleEvent(ctx, h, &meta)
+		s.handleEvent(ctx, handler, &meta)
 		buf = buf[evLen:]
 	}
 }
 
-func (s *fanotifySource) handleEvent(ctx context.Context, h Handler, meta *unix.FanotifyEventMetadata) {
+func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler, meta *unix.FanotifyEventMetadata) {
 	if meta.Vers != unix.FANOTIFY_METADATA_VERSION {
 		s.log.Warn("fanotify metadata version mismatch",
 			"got", meta.Vers,
@@ -208,12 +214,17 @@ func (s *fanotifySource) handleEvent(ctx context.Context, h Handler, meta *unix.
 	if meta.Fd < 0 {
 		return
 	}
-	defer func() { _ = unix.Close(int(meta.Fd)) }()
 
 	// FAN_ALL_PERM_EVENTS in x/sys/unix is OPEN|ACCESS (0x30000) -- it
 	// predates OPEN_EXEC_PERM (0x40000), so check our own mask.
 	const allPerm = uint64(unix.FAN_OPEN_PERM | unix.FAN_ACCESS_PERM | unix.FAN_OPEN_EXEC_PERM)
 	isPerm := uint64(meta.Mask)&allPerm != 0
+	if !isPerm {
+		if err := unix.Close(int(meta.Fd)); err != nil {
+			s.log.Warn("close non-permission fanotify event fd", "fd", meta.Fd, "err", err)
+		}
+		return
+	}
 
 	// Exe resolution is the lookup chain's job (process module already
 	// does richer resolution -- cmdline, env, tags). Leaving Exe empty
@@ -226,41 +237,50 @@ func (s *fanotifySource) handleEvent(ctx context.Context, h Handler, meta *unix.
 		Path: path,
 		Op:   opFromMask(uint64(meta.Mask)),
 	}
-
-	verdict := VerdictAllow
-	if isPerm {
-		if !resolved {
-			verdict = VerdictDeny
-			s.log.Warn("fanotify event path unresolved", "fd", meta.Fd)
-		} else if s.pathInActiveScope(path) {
-			verdict = h.Decide(ctx, &event)
-		}
+	pending := newPendingEvent(&event, func(verdict Verdict) responseResult {
+		return s.responses.respond(meta.Fd, verdict)
+	})
+	var owner PendingEvent = pending
+	var responseErr error
+	switch {
+	case s.responses.draining.Load():
+		responseErr = pending.Respond(VerdictDeny)
+	case !resolved:
+		s.log.Warn("fanotify event path unresolved", "fd", meta.Fd)
+		responseErr = pending.Respond(VerdictDeny)
+	case !s.pathInActiveScope(path):
+		responseErr = pending.Respond(VerdictAllow)
+	default:
+		owner, responseErr = deliverPendingEvent(ctx, handler, pending)
 	}
 
+	verdict, decided := pending.logicalVerdict()
+	verdictValue := any("pending")
+	if decided {
+		verdictValue = verdict
+	}
 	s.log.Info("fanotify event",
 		"pid", event.PID,
 		"path", event.Path,
 		"op", event.Op,
-		"perm", isPerm,
-		"verdict", verdict,
+		"perm", true,
+		"verdict", verdictValue,
 	)
-
-	if isPerm {
-		s.respond(meta.Fd, verdict)
+	if responseErr != nil {
+		s.log.Error("fanotify event resolution failed", "fd", meta.Fd, "err", responseErr)
+		if !pending.responseAccepted() && owner != nil {
+			s.retainFailedEvent(meta.Fd, owner)
+		}
 	}
 }
 
-func (s *fanotifySource) respond(eventFd int32, v Verdict) {
-	resp := unix.FanotifyResponse{Fd: eventFd}
-	if v == VerdictAllow {
-		resp.Response = unix.FAN_ALLOW
-	} else {
-		resp.Response = unix.FAN_DENY
+func (s *fanotifySource) retainFailedEvent(eventFD int32, owner PendingEvent) {
+	s.failedMu.Lock()
+	defer s.failedMu.Unlock()
+	if s.failedEvents == nil {
+		s.failedEvents = make(map[int32]PendingEvent)
 	}
-	respBytes := unsafe.Slice((*byte)(unsafe.Pointer(&resp)), unsafe.Sizeof(resp))
-	if _, err := unix.Write(s.fd, respBytes); err != nil {
-		s.log.Error("fanotify response write failed", "err", err, "verdict", v)
-	}
+	s.failedEvents[eventFD] = owner
 }
 
 func resolveEventPath(link string) (string, bool) {

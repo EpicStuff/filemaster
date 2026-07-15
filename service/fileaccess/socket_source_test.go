@@ -26,10 +26,10 @@ func TestSocketSource(t *testing.T) {
 	events := make(chan FileEvent, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- source.Run(ctx, HandlerFunc(func(ctx context.Context, event *FileEvent) Verdict {
+		done <- source.Run(ctx, decisionPendingHandler{handler: HandlerFunc(func(ctx context.Context, event *FileEvent) Verdict {
 			events <- *event
 			return VerdictDeny
-		}))
+		})})
 	}()
 
 	conn, err := net.Dial("unix", socketPath)
@@ -89,12 +89,12 @@ func TestSocketSourceCloseFromHandler(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- source.Run(ctx, HandlerFunc(func(ctx context.Context, event *FileEvent) Verdict {
+		done <- source.Run(ctx, decisionPendingHandler{handler: HandlerFunc(func(ctx context.Context, event *FileEvent) Verdict {
 			if err := source.Close(); err != nil {
 				t.Errorf("close from handler: %v", err)
 			}
 			return VerdictAllow
-		}))
+		})})
 	}()
 
 	conn, err := net.Dial("unix", socketPath)

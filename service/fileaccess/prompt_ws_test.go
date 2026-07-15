@@ -115,7 +115,7 @@ qsubReady:
 
 	done := make(chan error, 1)
 	go func() {
-		done <- source.Run(ctx, NewPromptHandler(&NotificationsPrompter{}, nil, 3*time.Second))
+		done <- source.Run(ctx, decisionPendingHandler{handler: NewPromptHandler(&NotificationsPrompter{}, nil, 3*time.Second)})
 	}()
 
 	var promptKey string

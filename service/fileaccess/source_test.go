@@ -31,8 +31,8 @@ func newFakeSource(events []FileEvent) *fakeSource {
 	}
 }
 
-func (s *fakeSource) Run(ctx context.Context, h Handler) error {
-	for _, e := range s.events {
+func (s *fakeSource) Run(ctx context.Context, handler PendingHandler) error {
+	for _, sourceEvent := range s.events {
 		select {
 		case <-ctx.Done():
 			return nil
@@ -40,10 +40,16 @@ func (s *fakeSource) Run(ctx context.Context, h Handler) error {
 			return nil
 		default:
 		}
-		v := h.Decide(ctx, &e)
-		s.mu.Lock()
-		s.decided = append(s.decided, decision{Event: e, Verdict: v})
-		s.mu.Unlock()
+		event := sourceEvent
+		pending := newPendingEvent(&event, func(verdict Verdict) responseResult {
+			s.mu.Lock()
+			s.decided = append(s.decided, decision{Event: event, Verdict: verdict})
+			s.mu.Unlock()
+			return responseResult{accepted: true}
+		})
+		if _, err := deliverPendingEvent(ctx, handler, pending); err != nil {
+			return err
+		}
 	}
 	// Park until shutdown so the worker stays alive like a real source.
 	select {
