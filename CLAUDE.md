@@ -63,7 +63,7 @@ mode you'd get in production for a dead process.
 
 ```bash
 # Build and start fresh with the fake socket source:
-go build -o /tmp/portmaster-core ./cmds/portmaster-core/
+go build -tags filemaster_test -o /tmp/portmaster-core ./cmds/portmaster-core/
 pkill -f portmaster-core 2>/dev/null; sleep 1
 FM_FAKE_SOCKET=/tmp/fm-fake.sock /tmp/portmaster-core \
   --data-dir /tmp/fm-test --devmode --log info &

@@ -13,23 +13,16 @@ fi
 #
 if command -V semanage >/dev/null 2>&1; then
     echo "[ ] Removing SELinux permissions"
-    semanage fcontext --delete $(realpath /usr/lib)'/portmaster/portmaster-core' || :
-    restorecon -R /usr/lib/portmaster/portmaster-core 2>/dev/null >&2 || :
+    semanage fcontext --delete /opt/filemaster/portmaster-core || :
+    restorecon -R /opt/filemaster/portmaster-core 2>/dev/null >&2 || :
 fi
 
 echo "[ ] Stopping and disabling service"
-systemctl stop portmaster.service
-systemctl disable portmaster.service
+systemctl stop filemaster.service
+systemctl disable filemaster.service
 
 echo "[ ] Removing files"
 # Remove binaries folder
-sudo rm -fr /usr/lib/portmaster
+rm -fr /opt/filemaster
 # Remove data folder
-sudo rm -fr /var/lib/portmaster
-
-# remove V1 migration flag (if exists)
-MIGRATED_FILE_FLAG="/opt/safing/portmaster/migrated.txt"
-if [ -e "$MIGRATED_FILE_FLAG" ]; then
-    echo "[ ] Removing V1 migration flag"
-    rm "$MIGRATED_FILE_FLAG"
-fi
+rm -fr /var/lib/filemaster

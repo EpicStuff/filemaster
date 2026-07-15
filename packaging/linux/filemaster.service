@@ -1,5 +1,5 @@
 [Unit]
-Description=Portmaster by Safing
+Description=Filemaster
 Documentation=https://safing.io
 Documentation=https://docs.safing.io
 Before=nss-lookup.target network.target shutdown.target
@@ -18,12 +18,12 @@ MemoryDenyWriteExecute=yes
 MemoryLow=2G
 NoNewPrivileges=yes
 PrivateTmp=yes
-PIDFile=/var/lib/portmaster/core-lock.pid
+PIDFile=/var/lib/filemaster/core-lock.pid
 Environment=LOGLEVEL=info
 Environment=PORTMASTER_ARGS=
-EnvironmentFile=-/etc/default/portmaster
+EnvironmentFile=-/etc/default/filemaster
 ProtectSystem=true
-ReadWritePaths=/usr/lib/portmaster
+ReadWritePaths=/opt/filemaster
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 RestrictNamespaces=yes
 ProtectHome=read-only
@@ -31,13 +31,11 @@ ProtectKernelTunables=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 PrivateDevices=yes
-AmbientCapabilities=cap_chown cap_kill cap_net_admin cap_net_bind_service cap_net_broadcast cap_net_raw cap_sys_module cap_sys_ptrace cap_dac_override cap_fowner cap_fsetid cap_sys_resource cap_bpf cap_perfmon
-CapabilityBoundingSet=cap_chown cap_kill cap_net_admin cap_net_bind_service cap_net_broadcast cap_net_raw cap_sys_module cap_sys_ptrace cap_dac_override cap_fowner cap_fsetid cap_sys_resource cap_bpf cap_perfmon
-StateDirectory=portmaster
+AmbientCapabilities=cap_chown cap_kill cap_net_admin cap_net_bind_service cap_net_broadcast cap_net_raw cap_sys_admin cap_sys_module cap_sys_ptrace cap_dac_override cap_fowner cap_fsetid cap_sys_resource cap_bpf cap_perfmon
+CapabilityBoundingSet=cap_chown cap_kill cap_net_admin cap_net_bind_service cap_net_broadcast cap_net_raw cap_sys_admin cap_sys_module cap_sys_ptrace cap_dac_override cap_fowner cap_fsetid cap_sys_resource cap_bpf cap_perfmon
 # TODO(ppacher): add --disable-software-updates once it's merged and the release process changed.
-WorkingDirectory=/var/lib/portmaster
-ExecStart=/usr/lib/portmaster/portmaster-core --log-dir=/var/lib/portmaster/log -- $PORTMASTER_ARGS
-ExecStopPost=-/usr/lib/portmaster/portmaster-core --recover-iptables
+WorkingDirectory=/var/lib/filemaster
+ExecStart=/opt/filemaster/portmaster-core --bin-dir /opt/filemaster --data-dir /var/lib/filemaster -- $PORTMASTER_ARGS
 
 [Install]
 WantedBy=multi-user.target

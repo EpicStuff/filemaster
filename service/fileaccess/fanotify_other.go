@@ -4,13 +4,9 @@ package fileaccess
 
 import (
 	"context"
-	"os"
 )
 
 func newPlatformSource(log logger) (Source, error) {
-	if path := os.Getenv("FM_FAKE_SOCKET"); path != "" {
-		return newSocketSource(path, log)
-	}
 	return &nopSource{log: log}, nil
 }
 

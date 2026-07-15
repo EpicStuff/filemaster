@@ -69,16 +69,6 @@ func opFromMask(mask uint64) FileOp {
 	}
 }
 
-// newPlatformSource returns the Source implementation for this OS.
-// The registered daemon config is authoritative, including when its
-// value is empty.
-func newPlatformSource(log logger) (Source, error) {
-	if path := os.Getenv("FM_FAKE_SOCKET"); path != "" {
-		return newSocketSource(path, log)
-	}
-	return newFanotifySource(resolveWatchPaths(), log)
-}
-
 // resolveWatchPaths returns the configured watch paths. An empty
 // registered config value deliberately means no paths are watched.
 func resolveWatchPaths() []string {

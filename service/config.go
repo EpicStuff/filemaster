@@ -44,10 +44,10 @@ func (sc *ServiceConfig) Init() error {
 	case "linux":
 		// Fall back to defaults.
 		if sc.BinDir == "" {
-			sc.BinDir = "/usr/lib/portmaster"
+			sc.BinDir = "/opt/filemaster"
 		}
 		if sc.DataDir == "" {
-			sc.DataDir = "/var/lib/portmaster"
+			sc.DataDir = "/var/lib/filemaster"
 		}
 
 	default:
@@ -162,7 +162,7 @@ func MakeUpdateConfigs(svcCfg *ServiceConfig) (binaryUpdateConfig, intelUpdateCo
 		if binPath, err := getCurrentBinaryPath(); err == nil {
 			binaryUpdateConfig.PostUpgradeCommands = []updates.UpdateCommandConfig{
 				// Restore SELinux context for the new core binary after upgrade
-				// (`restorecon /usr/lib/portmaster/portmaster-core`)
+				// (`restorecon /opt/filemaster/portmaster-core`)
 				{
 					Command:              "restorecon",
 					Args:                 []string{binPath},

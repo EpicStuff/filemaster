@@ -110,5 +110,5 @@ rm -f "${DESTINATION_ZIP}"
 echo "Build completed successfully: ${DESTINATION_ZIP}"
 echo
 echo "To replace the currently installed UI bundle, use:"
-echo "  sudo cp -f /usr/lib/portmaster/portmaster.zip /usr/lib/portmaster/portmaster.zip.bak"
-echo "  sudo cp -f \"${DESTINATION_ZIP}\" /usr/lib/portmaster/portmaster.zip"
+echo "  sudo cp -f /opt/filemaster/portmaster.zip /opt/filemaster/portmaster.zip.bak"
+echo "  sudo cp -f \"${DESTINATION_ZIP}\" /opt/filemaster/portmaster.zip"

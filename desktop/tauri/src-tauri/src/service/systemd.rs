@@ -85,7 +85,7 @@ impl SystemdServiceManager {
 
 impl ServiceManager for SystemdServiceManager {
     fn status(&self) -> super::Result<StatusResult> {
-        let name = "portmaster.service";
+        let name = "filemaster.service";
         let result = systemctl("is-active", name, false);
 
         match result {
@@ -150,7 +150,7 @@ impl ServiceManager for SystemdServiceManager {
     }
 
     fn start(&self) -> Result<StatusResult> {
-        let name = "portmaster.service";
+        let name = "filemaster.service";
 
         // This time we need to run as root through pkexec or similar binaries like kdesudo/gksudo.
         systemctl("start", name, true)?;

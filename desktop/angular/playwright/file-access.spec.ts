@@ -190,6 +190,7 @@ async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Prom
 		'go',
 		[
 			'run',
+			...(mode === 'fake' ? ['-tags', 'filemaster_test'] : []),
 			'./cmds/portmaster-core',
 			'--devmode',
 			'--log',

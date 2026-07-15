@@ -1,3 +1,5 @@
+//go:build linux && filemaster_test
+
 package fileaccess
 
 import (
