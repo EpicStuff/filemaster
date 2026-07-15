@@ -1,149 +1,97 @@
 # Fanotify Core Plan
 
-Status: approved design. The earlier recursive implementation exists, but the
-mount mark and parallel pipeline redesign described here is not yet implemented.
+Status: approved redesign plan. The recovered root monitoring and profile driven daemon policy is already implemented. This document covers only the remaining mount mark, concurrency, overload, prompt coordination, cache, and shutdown redesign while preserving that behavior.
 
-## Goal
+## Implemented baseline to preserve
 
-Replace recursive directory marking with mount marking.
-
-Watch configured filesystem scopes, including `/`, without recursive startup
-marking or serially delaying ordinary desktop activity. Filemaster must make
-permission decisions in parallel, preserve enforcement for prompted accesses,
-and keep audit, logging, persistence, and UI work off the decision critical
-path.
-
-## Confirmed decisions
+The following behavior already exists and is not new implementation work:
 
 * `fileaccess/watchPaths` defaults to `[/home]`.
 * Users may explicitly configure `/` for whole system monitoring.
-* The first implementation uses mount marks only. Recursive directory marks are
-  deferred.
-* A configured path is a policy scope. Filemaster marks the mount containing
-  that path and every separate nested mount beneath the scope.
-* Paths on the same mount share one kernel mark. Events elsewhere on that mount
-  are immediately allowed when they fall outside every configured policy scope.
-* There are no global traversal exclusions for `/run`, `/dev`, `/proc`, `/sys`,
-  or similar paths. When `/` is configured, accesses there follow normal
-  profile, prompt, verdict, and recording behavior.
-* Filemaster core and UI processes use normal profile policy. They are not
-  unconditionally allowed. Existing Portmaster core and UI profile identities
-  remain in use.
-* Filemaster core policy is maintained as an immutable in memory snapshot so
-  deciding its own events does not require profile storage or general process
-  lookup. This is a different execution path, not a policy exemption.
-* Identical requests from the same profile are grouped into one visible prompt.
-* A full global decision queue or exhausted pending event budget causes an
-  immediate deny for the new in scope request.
-* Audit and activity recording occur only after the permission response.
-* A separate privileged enforcement broker is deferred. The plan records the
-  limitation that a forced termination of the fanotify owner is fail open.
-* Root monitoring is an advanced risk configuration. Users can make the host
-  unresponsive or unusable by enabling automatic startup with `/` and applying
-  restrictive rules, defaults, or unattended prompts. The UI and documentation
-  must state this clearly.
+* The watch path validator accepts `/`.
+* There are no global traversal exclusions for `/run`, `/dev`, `/proc`, `/sys`, or similar paths. With `/` configured, accesses there use normal profile, prompt, verdict, and audit behavior.
+* Filemaster core uses the normal Filemaster special profile rules, rule precedence, default action, prompting, verdict, and recording semantics.
+* Filemaster core policy is hydrated before fanotify starts and kept in a synchronized in memory snapshot. Deciding a Filemaster event does not perform normal process lookup or read profile storage.
+* The Filemaster daemon profile is seeded with default allow and editable rules derived from its executable and runtime paths.
+* User changes to seeded special profiles are preserved during reloads and upgrades.
+* The Filemaster daemon profile is available through the existing profile system.
+* The systemd special profile and helper matching are seeded with editable allow rules without changing the profile default action.
+* Existing system resolver special profile behavior remains intact.
+* Recursive traversal retains successfully installed marks when another subtree cannot be marked and emits compact partial coverage warnings.
+* The real profile stack previously ran with `/` for ten seconds without a global allow or Filemaster self deadlock.
 
-## Existing implementation evidence to preserve
+The systemd profile implementation exists, but host safety has not yet been exercised on a system where PID 1 is systemd. That remains required verification rather than implementation work.
 
-The earlier recursive implementation established several useful facts and
-behaviors that must not be lost during migration:
+## Redesign goals
 
-* The watch path validator was fixed so `/` is accepted.
-* Recursive root traversal retains successfully installed marks when some
-  protected subtrees cannot be marked and emits compact partial coverage
-  warnings.
-* The real profile stack ran with `/` for ten seconds without a global allow or
-  a Filemaster self deadlock.
-* The systemd profile was not exercised in that environment because PID 1 in the
-  container was `fish`. Systemd host safety therefore remains unverified.
+* Replace recursive directory marking with mount marking.
+* Avoid recursive startup traversal and repeated directory walks on configuration changes.
+* Process independent permission events concurrently without creating one goroutine per event.
+* Keep permission enforcement correct when prompts remain pending.
+* Bound every queue and every held event file descriptor.
+* Group exact duplicate requests from the same profile into one visible prompt.
+* Send permission responses before audit, activity, detailed logging, and persistence work.
+* Preserve every implemented baseline behavior listed above.
 
-The recursive mark behavior itself is replaced by mount marks. The partial
-coverage principle and compact warnings still apply when any required mount mark
-cannot be installed.
+## Mount mark strategy
 
-## Kernel and resource constraints
-
-* A fanotify permission event blocks only its requesting `open()` or `exec()`
-  until Filemaster replies `FAN_ALLOW` or `FAN_DENY`.
-* Many processes and threads can have events pending concurrently. A browser
-  can therefore create many pending events even though each individual thread
-  is blocked on one request.
-* The fanotify kernel queue is bounded by the host configuration used when the
-  group is created. Filemaster must not request an unlimited queue by default.
-* `FAN_Q_OVERFLOW` has no usable event FD and must be detected from the event
-  mask. It is a serious enforcement warning, not an event to ignore.
-* Reading a normal event installs an event FD in Filemaster. That FD remains
-  open until Filemaster responds and closes it. Pending events must therefore
-  be limited independently of the kernel queue.
-* Closing the fanotify group allows all permission events that are still queued
-  or awaiting a response. Controlled shutdown can deny first, but `SIGKILL`, a
-  crash, or killing the process that owns the group remains fail open.
-* A mount mark covers one mount. It does not automatically cover a separate
-  mount nested beneath it.
-
-## Mount strategy
+The first redesign supports mount marks only. Recursive directory marks are removed rather than retained as a second selectable strategy.
 
 ### Policy scopes and kernel marks
 
-For every configured protected path:
+A configured path is a policy scope, while a mount mark is only the kernel interception scope.
 
-1. Normalize the path and retain it as a policy scope.
-2. Resolve the mount containing that path.
-3. Discover separate mounts nested beneath that path.
-4. Deduplicate all required marks by mount identity.
-5. Apply one `FAN_MARK_MOUNT` mark per required mount.
+For each configured path:
 
-Calling `fanotify_mark()` with `FAN_MARK_MOUNT` on `/path/to/dir` marks the
-mount containing that directory. The directory does not need to be a mount
-point.
+1. Normalize and retain the path in an immutable policy scope snapshot.
+2. Resolve the mount containing the path.
+3. Discover separate mounts nested beneath the configured scope.
+4. Deduplicate required marks by mount identity.
+5. Apply one `FAN_MARK_MOUNT` mark for every required mount.
 
-A mount mark may observe much more than the configured protected path. The hot
-path therefore classifies the resolved event path against an immutable policy
-scope snapshot. Events outside all protected scopes are allowed immediately
-without process or profile resolution.
+Calling `fanotify_mark()` with `FAN_MARK_MOUNT` on `/path/to/dir` marks the mount containing that directory. The directory itself does not need to be a mount point.
 
-Configuring `/` means all descendant paths are in scope, including paths on
-separate nested mounts. Filemaster must therefore mark every current mount in
-its mount namespace, not only the root mount.
+A mount mark may observe paths outside the configured policy scope. Resolve the event path and compare it against the immutable scope snapshot before process or profile lookup. Immediately allow events outside every configured scope.
 
-### Partial coverage
-
-Failure to install one required mount mark must not discard marks that were
-successfully installed for other required mounts.
-
-Filemaster must:
-
-* retain all successfully installed marks;
-* report one compact warning that identifies failed mount scopes;
-* expose partial coverage through diagnostics and metrics;
-* retry failed marks during topology reconciliation;
-* never claim complete coverage while required marks are missing.
+Configuring `/` places all descendant paths in scope, including paths on separate nested mounts. Filemaster must therefore mark every applicable current mount in its mount namespace rather than only the root mount.
 
 ### Mount topology changes
 
-Filemaster must reconcile mount topology while running so a newly attached
-mount beneath a protected scope is added and a detached mount is removed.
-Implementation may use a mount topology watcher or bounded periodic
-reconciliation, but the resulting behavior and any coverage delay must be
-visible in diagnostics.
+Reconcile the active mount set while Filemaster is running so that:
+
+* a new mount beneath a protected scope receives a mark;
+* a detached mount is removed from tracked state;
+* a failed mark is retried;
+* coverage delay and reconciliation errors are visible in diagnostics.
+
+A bounded periodic reconciliation is acceptable for the first implementation. A topology event watcher may replace it later.
+
+### Partial coverage
+
+Failure to install one required mount mark must not remove marks that were installed successfully.
+
+Filemaster must:
+
+* retain successful marks;
+* report one compact warning identifying failed mount scopes;
+* expose missing marks and partial coverage through diagnostics;
+* retry failed marks during reconciliation;
+* never report complete coverage while a required mark is missing.
 
 ### Configuration changes
 
-Do not walk directory trees on configuration changes. Reconcile immutable old
-and new policy scope and mount identity sets:
+Do not walk directory trees after a configuration change. Reconcile the old and new immutable scope and mount sets:
 
-* add marks required only by the new configuration;
-* remove marks no longer required;
+* add newly required marks;
+* remove obsolete marks;
 * retain unchanged marks;
-* atomically replace the policy scope snapshot after mark reconciliation.
+* replace the policy scope snapshot atomically after reconciliation.
 
-A mark mask change, such as toggling read access interception, may require
-replacing existing marks with the new mask.
+Changing the event mask, such as enabling read interception, may require replacing existing marks.
 
 ## Event ownership
 
-Represent every permission event as an owned event lease rather than passing a
-bare `FileEvent` through a synchronous handler.
+Replace the synchronous bare event handler contract with an owned pending event abstraction.
 
 ```go
 type PendingEvent interface {
@@ -152,131 +100,99 @@ type PendingEvent interface {
 }
 ```
 
-The implementation may use a concrete internal type, but it must guarantee:
+The concrete implementation must guarantee:
 
-* exactly one current owner;
-* at most one response;
-* the event FD closes after the response attempt;
-* ownership can move from a decision worker to the prompt coordinator;
-* panic, cancellation, overload, and shutdown paths still resolve ownership;
-* concurrent response writes to the fanotify group are serialized safely.
+* one current owner;
+* no more than one response attempt;
+* event file descriptor closure after the response attempt;
+* explicit ownership transfer from the reader to a worker and then, when needed, to the prompt coordinator;
+* resolution on panic, cancellation, overload, timeout, and shutdown paths;
+* serialized writes to the fanotify group file descriptor.
 
 ## Parallel event pipeline
 
 ```text
 fanotify kernel queue
-        ↓
+	↓
 single reader
-        ↓
+	↓
 metadata validation, overflow detection, path resolution, scope classification
-        ↓
+	↓
 outside scope: allow immediately
 inside scope with exhausted global budget: deny immediately
-        ↓
-bounded decision worker queue
-        ↓
+	↓
+bounded decision queue
+	↓
+decision worker pool
+	↓
 rule or profile default: respond immediately
-ask: transfer ownership to prompt coordinator
-        ↓
-response written and event FD closed
-        ↓
-asynchronous audit, activity, persistence, logging, and metrics
+Ask: transfer ownership to prompt coordinator
+	↓
+response written and event file descriptor closed
+	↓
+asynchronous observation and persistence
 ```
 
 ### Reader responsibilities
 
-The reader may perform only work required to safely route the event:
+The reader performs only work required to route an event safely:
 
 * validate metadata and event length;
-* detect `FAN_Q_OVERFLOW`;
-* construct the event lease;
-* resolve the path from the event FD;
-* classify the path against the immutable policy scope snapshot;
+* detect `FAN_Q_OVERFLOW` from the event mask before checking the event file descriptor;
+* construct the owned event;
+* resolve the event path;
+* classify the path against the policy scope snapshot;
 * enforce the global outstanding event budget;
-* enqueue in scope events or send an immediate overload verdict.
+* enqueue an in scope event or send an immediate overload verdict.
 
-The reader performs no general process lookup, profile lookup, prompt work,
-rule parsing, persistence, activity recording, or verbose per event logging.
+The reader does not perform general process lookup, profile lookup, rule parsing, prompting, persistence, activity recording, or verbose event logging.
 
 ### Path resolution recursion
 
-Verify with a live fanotify test that resolving the event path does not create a
-nested permission event.
+Preserve the existing live result that Filemaster self policy works without a global self allow. Add a focused integration test confirming that resolving `/proc/self/fd/<event fd>` does not create a nested permission event.
 
-If path resolution does recurse, add only the smallest unconfigurable metadata
-resolution guard needed to obtain the path. That guard must not:
-
-* change the Filemaster profile verdict policy;
-* suppress the final self event audit record;
-* exempt unrelated Filemaster accesses;
-* perform broader path based traversal exclusions.
+If path resolution does recurse on a supported system, add only the smallest unconfigurable metadata resolution guard needed to obtain the path. It must not change Filemaster profile policy, suppress the final audit record, exempt unrelated Filemaster accesses, or create broad path exclusions.
 
 ### Decision workers
 
 * Start with four workers and expose the count as a backend setting.
-* Use one bounded queue. Never create one goroutine per event.
-* When the decision queue is full, immediately deny the new in scope event.
-  Do not leave it waiting and do not discard it without a response.
-* Rule hits and profile default permit or block decisions respond immediately.
-* Workers transfer Ask events to the prompt coordinator and return to the
-  worker pool.
-* Filemaster core events use a dedicated in memory evaluation path that applies
-  the same profile rules, precedence, default action, prompting, verdict, and
-  recording semantics as any other profile.
-* A Filemaster core decision must not invoke general process lookup, profile
-  storage, configuration files, or any other filesystem input and output.
+* Use one bounded queue.
+* Never create one goroutine per event.
+* Immediately deny a new in scope event when the decision queue is full.
+* Reply immediately for rule hits and profile default allow or block decisions.
+* Transfer Ask events to the prompt coordinator and return the worker to the pool.
+* Route Filemaster core events through its existing in memory profile snapshot while applying the same policy semantics as any other profile.
 
-The existing benchmark found four workers best for path classification and
-eight best for a nearly empty allow path. This is only an initial default. The
-final choice requires benchmarks using real process, profile, rule, prompt, and
-observation handling.
+Four workers is an initial value only. Rebenchmark using real process resolution, profile snapshots, rules, prompts, response writes, and observation work.
 
 ## Outstanding event limits
 
-Maintain both a per profile pending budget and a global outstanding event
-budget.
+Maintain both a global outstanding event budget and a per profile pending Ask budget.
 
-The global count includes every in scope event FD currently held by Filemaster:
+The global count includes every in scope event file descriptor held by Filemaster while it is:
 
 * waiting in the decision queue;
 * being processed by a worker;
-* owned by the prompt coordinator;
+* held by the prompt coordinator;
 * waiting for its response write to finish.
 
-The usable global limit must never exceed the process soft `RLIMIT_NOFILE`
-minus reserved headroom for Filemaster databases, sockets, logs, configuration,
-and ordinary operation.
+The usable global limit must not exceed the process soft `RLIMIT_NOFILE` after reserving file descriptors for databases, sockets, logs, configuration, and normal daemon operation.
 
-When the global budget is exhausted, new in scope events are immediately
-denied. When a profile reaches its pending budget, new Ask events for that
-profile are immediately denied until its pending count falls below the limit.
-Rule hits and profile default decisions do not join the prompt budget because
-they are answered immediately.
+When the global budget is exhausted, immediately deny new in scope events. When a profile reaches its pending Ask budget, immediately deny additional Ask events for that profile until its count falls below the limit.
 
-Expose current and peak global pending counts, per profile pending counts,
-queue saturation denies, profile overload denies, and event FD response
-errors.
+Immediate rule and profile default decisions do not consume the per profile Ask budget because they do not remain pending.
 
-## Process and profile decision snapshots
+## Process and profile caches
 
 ### Process resolution
 
-Reuse Portmaster's existing process store and process identity based on PID plus
-process creation time. Do not add a second general PID cache.
+Reuse Portmaster's existing process store and PID plus process creation identity. Do not add a second general PID cache.
 
-This prevents PID reuse from returning the previous process profile. Process
-resolution should continue through the existing Portmaster process and profile
-flow so automatic creation and special core or UI profiles remain consistent.
+After an allowed `FAN_OPEN_EXEC_PERM`, invalidate or refresh the corresponding process mapping because `exec` can replace the executable while preserving the PID and process creation identity.
 
-An allowed `FAN_OPEN_EXEC_PERM` can replace the executable while retaining the
-same PID and creation time. After responding to an exec event, invalidate or
-refresh the corresponding process mapping so later events resolve the new
-executable and profile.
+### Immutable profile snapshots
 
-### Profile snapshots
-
-Each loaded profile must expose an immutable file access decision snapshot
-containing at least:
+Extend the existing Filemaster self snapshot approach into immutable file access decision snapshots for loaded profiles. Each snapshot contains at least:
 
 ```go
 type DecisionSnapshot struct {
@@ -288,20 +204,11 @@ type DecisionSnapshot struct {
 }
 ```
 
-Profile configuration changes parse rules once, create a new immutable
-snapshot, and atomically replace the old snapshot. Decision workers only read
-that snapshot.
+A profile mutation parses rules once, creates a new snapshot, and atomically replaces the old snapshot. Decision workers only read snapshots.
 
-The Filemaster core profile uses the same snapshot format and policy semantics.
-It is loaded before fanotify marks are installed and refreshed through every
-profile mutation path, including UI edits, imports, resets, and programmatic
-updates.
+Remove the current cache behavior that treats rules as unchanged when only their count is unchanged. Editing a rule without changing the number of rules must replace the parsed snapshot.
 
-Remove the current rule cache behavior that considers a profile unchanged when
-only the number of raw rules is unchanged. Editing a rule without changing the
-count must replace the snapshot. Do not retain a profile owned raw rule slice
-after releasing its lock. Copy the rules while locked or obtain an already
-immutable snapshot.
+Do not retain a profile owned raw rule slice after releasing the profile lock. Copy it while locked or consume an already immutable representation.
 
 The decision path must not synchronously:
 
@@ -312,51 +219,13 @@ The decision path must not synchronously:
 * update UI activity;
 * persist an Always rule before answering the current event.
 
-## Seeded profiles
-
-### Filemaster daemon profile
-
-Seed the Filemaster daemon special profile once during profile or database
-creation.
-
-* Keep its seeded default action as allow.
-* Seed editable explicit allow rules derived from the current executable,
-  executable directory, data directory, and configured runtime paths.
-* Do not overwrite later user edits during reloads or upgrades.
-* Expose the daemon special profile through the existing application profile
-  editor.
-* The seeded allow default is intended to keep a correctly configured default
-  installation from deadlocking itself.
-* Users who change the daemon profile accept the documented risk, including the
-  possibility of blocking Filemaster from resources needed to enforce policy.
-
-### Essential Linux service profiles
-
-Seed essential Linux service profiles once while preserving later user edits.
-
-* Begin with systemd PID 1 and systemd helper executables.
-* Add explicit editable allow path rules only.
-* Do not set or change their profile default action.
-* Include required service specific `/run` paths, systemd state and
-  configuration, executable and library paths, and required `/proc`, `/sys`,
-  and `/dev` paths.
-* Retain the existing system resolver special profile behavior.
-* Expand the essential service list only when a specific boot or runtime
-  dependency is observed.
-
-These profiles reduce the chance of accidental host breakage, but they are not
-global exclusions. Other applications accessing the same paths still follow
-their own profile policy.
-
 ## Prompt coordinator
 
-Prompt presentation is asynchronous, but enforcing prompts retain their event
-leases until the user answers, the request times out, overload policy denies
-it, or controlled shutdown resolves it.
+Prompt presentation is asynchronous, but an enforcing prompt retains its owned events until the user answers, the request times out, overload policy denies it, or controlled shutdown resolves it.
 
-### Exact request grouping
+### Exact duplicate grouping
 
-The first implementation groups exact duplicate requests using:
+The first implementation groups requests by:
 
 ```text
 profile source and profile ID
@@ -364,160 +233,99 @@ operation
 normalized exact path
 ```
 
-One visible prompt owns a group of one or more pending event leases. A response
-resolves every lease currently in that group with the same verdict.
+One visible prompt owns one or more pending events. Its response resolves all events currently in that exact group.
 
-Every grouped event still counts against the per profile and global event
-budgets. Once either budget is exhausted, additional matching events are denied
-rather than added to the existing group.
+Every grouped event still counts against the global and per profile budgets. When either budget is exhausted, deny additional matching events instead of adding them to the group.
 
-Requests without a resolved profile use an unidentified bucket that includes a
-stable process identity so unrelated unidentified programs are not grouped
-together.
+Requests without a resolved profile use an unidentified bucket that includes stable process identity so unrelated unidentified programs are not grouped together.
+
+Broader parent directory grouping remains a later design task.
 
 ### Prompt results
 
-* Allow and Deny resolve the current group only.
-* Allow Always and Deny Always update the in memory profile snapshot first,
-  then resolve the current group and any other exact pending groups matched by
-  the new rule.
-* Rule persistence occurs asynchronously after the response.
-* Persistence failure raises a visible warning. The in memory decision remains
-  valid for the current run but may be lost after restart.
+* Allow and Deny resolve the current exact group only.
+* Allow Always and Deny Always update the in memory profile snapshot first.
+* After the snapshot update, resolve the current group and other exact pending groups matched by the new rule.
+* Persist the new rule asynchronously after responding.
+* Surface persistence failure visibly. The current in memory decision remains valid until restart.
 * Prompt timeout defaults to deny.
-* Controlled shutdown defaults all pending prompt groups to deny.
-
-Broader parent directory grouping remains a later design phase because it
-requires choosing a safe rule boundary. Exact duplicate grouping does not wait
-for that work.
+* Controlled shutdown denies every unresolved prompt group.
 
 ## Shutdown and forced termination
 
 ### Controlled shutdown
 
-1. Remove all fanotify marks so no new events are generated.
-2. Stop admitting new work to the decision queue.
-3. Deny queued events that have not started policy evaluation.
+1. Remove fanotify marks so no new events are generated.
+2. Stop admitting work to the decision queue.
+3. Deny queued events that have not begun policy evaluation.
 4. Deny every pending prompt group.
-5. Wait for active decisions and response writes to finish within a bounded
-   shutdown deadline.
-6. Close the fanotify group only after outstanding event ownership reaches
-   zero or the shutdown deadline expires.
+5. Wait for active decisions and response writes within a bounded shutdown deadline.
+6. Close the fanotify group only after outstanding event ownership reaches zero or the deadline expires.
 
 ### Forced termination limitation
 
-The Linux fanotify API allows queued and pending permission events when the
-fanotify group closes. A process cannot run cleanup after `SIGKILL`.
-Consequently, one userspace process owning the fanotify group cannot guarantee
-fail closed behavior after its own forced termination.
+Closing the fanotify group allows queued and pending permission events. A process cannot perform cleanup after `SIGKILL`. One userspace process owning the group therefore cannot guarantee fail closed behavior after its own forced termination.
 
-A later hardening phase may split enforcement into a small root owned broker
-that owns the fanotify group and denies requests whenever the main Filemaster
-service is unavailable. Killing the broker itself would still fail open. A
-strong guarantee against a privileged attacker requires an in kernel policy
-mechanism such as an LSM implementation.
+A later hardening phase may introduce a small root owned broker that owns the fanotify group and denies requests while the main service is unavailable. Killing that broker still fails open. Protection against a privileged attacker requires an in kernel policy mechanism such as an LSM.
 
-The initial implementation should still harden the Filemaster service so an
-unprivileged process cannot signal or modify it, and should restart it promptly
-if it exits unexpectedly.
+The initial redesign should still harden the Filemaster service against signals and modification from unprivileged processes and restart it promptly after unexpected exit.
 
-## Audit and activity recording
+## Observation and persistence
 
-Separate permission decisions from observation.
+Send the fanotify response first. After a successful response write, enqueue audit records, file activity, detailed logs, metrics, and deferred rule persistence.
 
-After a successful response write, enqueue the `filequery` record, activity
-update, detailed log event, and metrics update. The observation queue is
-bounded and may drop records under overload, but it must never delay an allow
-or deny response.
-
-Track and expose observation drops separately from enforcement queue overflow
-or overload denial.
+The observation queue is bounded and may drop records during overload, but it must never delay an allow or deny response. Report observation drops separately from enforcement overload or kernel queue overflow.
 
 ## Configuration and UI
 
-Backend options cover at least:
+Add backend settings and matching UI controls for:
 
-* protected path scopes, defaulting to `[/home]`;
-* worker count;
+* decision worker count;
 * decision queue capacity;
-* per profile pending event budget;
-* global outstanding event budget and FD reserve;
+* global outstanding event budget and file descriptor reserve;
+* per profile pending Ask budget;
 * prompt timeout;
 * overload verdict, initially deny;
-* read access interception, disabled by default and unsuitable for root wide
-  use without dedicated benchmarks;
-* mount topology reconciliation status;
-* metrics and diagnostics visibility.
+* mount reconciliation interval and status;
+* metrics and diagnostics.
 
-There is no recursive or mount strategy selector in the first implementation
-because only mount marks are supported.
+Keep the existing protected path setting, `[/home]` default, explicit `/` support, read interception setting, and root risk documentation.
 
-Selecting `/` must show a clear advanced risk warning that whole system
-monitoring can block critical services and can make the host unresponsive or
-unusable when restrictive policy, prompts, or automatic startup are combined.
-The warning must not silently add global path exclusions.
-
-Every backend option requires a matching Angular UI control, description, and
-safe default. UI implementation remains deferred until the backend contract is
-stable.
+There is no mark strategy selector because the redesign supports mount marks only.
 
 ## Required metrics and warnings
 
-At minimum expose:
+Expose at least:
 
 * kernel queue overflow count;
-* decision queue depth, peak depth, and saturation deny count;
-* active and configured decision workers;
+* decision queue depth and peak depth;
+* decision queue saturation deny count;
+* configured and active workers;
 * decision and response latency;
-* current and peak outstanding event FDs;
-* per profile pending event count and overload deny count;
-* current prompt group count and grouped event count;
+* current and peak outstanding event file descriptors;
+* per profile pending count and overload deny count;
+* prompt group count and grouped event count;
 * response write errors;
 * observation queue depth and dropped record count;
-* watched policy scopes and resolved mount identities;
-* missing required mount marks and partial coverage state;
-* mount topology reconciliation errors or delayed coverage warnings.
+* configured policy scopes and resolved mount identities;
+* missing required marks and partial coverage state;
+* mount reconciliation errors and delayed coverage warnings.
 
-A kernel queue overflow, response write error, or partial coverage state is a
-serious enforcement warning and must be surfaced prominently.
+Kernel queue overflow, response write failure, and partial coverage are serious enforcement warnings and must be prominent.
 
 ## Tests and rollout
 
-1. Test the `[/home]` default, explicit `/`, path normalization, and the root
-   validator.
-2. Unit test mount identity resolution, nested mount discovery, deduplication,
-   add and remove reconciliation, topology changes, and partial mark failures
-   that retain successful marks.
-3. Test path scope classification when a mount mark observes unrelated paths.
-4. Verify that `/` applies normal profile and audit behavior to `/run`, `/dev`,
-   `/proc`, `/sys`, and other mounted trees without global exclusions.
-5. Test parallel completion, bounded queues, global and per profile budgets,
-   exactly once responses, event FD closure, and response before observation.
-6. Test Filemaster core events against the normal in memory core profile,
-   including allow, block, Ask, profile refresh, and recorded self events.
-7. Verify every Filemaster profile mutation path refreshes the mirror before a
-   later event can use stale policy.
-8. Run a live fanotify test proving path resolution does not recurse. If a
-   metadata resolution guard is required, verify that it is minimal and does
-   not suppress audit or alter profile policy.
-9. Test daemon profile seeding, its allow default, generated editable rules,
-   upgrades, and preservation of user edits.
-10. Test systemd and helper profile seeding without changing their default
-    actions. Exercise this on a real systemd host where PID 1 is systemd.
-11. Test process identity reuse, exec refresh, immutable profile snapshot
-    replacement, rule edits with unchanged counts, and default action fast
-    paths.
-12. Test exact prompt grouping, grouped FD accounting, timeout, overload denial,
-    asynchronous Always persistence, and controlled shutdown.
-13. Exercise the fake fanotify source through the same ownership and coordinator
-    interfaces used by the real source.
-14. Run the existing backend, Playwright, and Karma suites.
-15. Re run the root mount benchmark with real cached profile and rule handling,
-    cold process resolution, exact prompt grouping, and observation enabled.
-16. Run a confined fanotify integration test, followed by a real host systemd
-    safety test.
-17. Enable mount watching through configuration first and inspect metrics and
-    desktop behavior before enabling broader defaults.
-18. Keep root scope Ask mode behind configuration until overload limits,
-    grouping, shutdown handling, diagnostics, and systemd host safety have
-    passed end to end tests.
+1. Preserve and run tests for the implemented `[/home]` default, explicit `/`, root validation, daemon profile seeding, systemd profile seeding, user edit preservation, no global traversal exclusions, and Filemaster self profile synchronization.
+2. Exercise the systemd profile on a real systemd host where PID 1 is systemd.
+3. Test mount identity resolution, nested mount discovery, deduplication, reconciliation, topology changes, and partial mark failures that retain successful marks.
+4. Test path scope classification when a mount mark observes unrelated paths.
+5. Test kernel overflow detection before event file descriptor validation.
+6. Test parallel completion, bounded queues, global and per profile budgets, exactly once responses, event file descriptor closure, and response before observation.
+7. Test Filemaster core allow, block, Ask, profile refresh, and recorded self events through the new pipeline.
+8. Test process identity reuse, exec refresh, immutable snapshot replacement, and rule edits that preserve the same rule count.
+9. Test exact prompt grouping, grouped event accounting, timeout, overload denial, asynchronous Always persistence, and controlled shutdown.
+10. Exercise the fake source through the same ownership and coordinator interfaces as the real source.
+11. Run the existing backend, Playwright, and Karma suites.
+12. Run a confined fanotify integration test and a real host systemd safety test.
+13. Re run the root benchmark with real profile handling, cold process resolution, exact prompt grouping, response writes, and observation enabled.
+14. Keep root scope Ask mode behind configuration until queue limits, grouping, shutdown, diagnostics, and real host systemd safety have passed end to end testing.
