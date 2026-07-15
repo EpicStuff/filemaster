@@ -61,8 +61,9 @@ func matchPathPattern(pattern, path string) bool {
 	// Recursive "this dir and below" pattern. Matches the prefix itself
 	// (so "/foo/**" catches "/foo") and any descendant.
 	if strings.HasSuffix(pattern, "/**") {
-		prefix := strings.TrimSuffix(pattern, "/**")
-		return path == prefix || strings.HasPrefix(path, prefix+"/")
+		prefix, err := normalizePath(strings.TrimSuffix(pattern, "/**"))
+		path, pathErr := normalizePath(path)
+		return err == nil && pathErr == nil && pathContains(prefix, path)
 	}
 	// Fall through to single-segment glob.
 	ok, err := filepath.Match(pattern, path)
