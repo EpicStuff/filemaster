@@ -238,3 +238,76 @@ func TestFatalResponseFailureStartsControlledDraining(t *testing.T) {
 		t.Fatalf("drain response = %+v, want second fd denied", secondResponse)
 	}
 }
+
+func TestRecoveryDenyFailureRetainsCurrentCoordinatorOwner(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "owned")
+	if err := os.WriteFile(path, []byte("owned"), 0o600); err != nil {
+		t.Fatalf("write owned file: %v", err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open owned file: %v", err)
+	}
+	defer file.Close()
+
+	writer := newFanotifyResponseWriter(47, nopLogger{})
+	var writes atomic.Int32
+	writer.write = func(int, []byte) (int, error) {
+		writes.Add(1)
+		return 0, unix.EIO
+	}
+	var closes atomic.Int32
+	writer.close = func(int) error {
+		closes.Add(1)
+		return nil
+	}
+	source := &fanotifySource{
+		log:          nopLogger{},
+		responses:    writer,
+		failedEvents: make(map[int32]PendingEvent),
+	}
+	source.activeScopes.Store(&scopeSnapshot{Scopes: []scopeMatch{{Configured: dir, Canonical: dir}}})
+
+	handlerErr := errors.New("worker failed after coordinator transfer")
+	var coordinatorOwner PendingEvent
+	handler := PendingHandlerFunc(func(_ context.Context, workerOwner PendingEvent) error {
+		var err error
+		coordinatorOwner, err = workerOwner.Transfer()
+		if err != nil {
+			return err
+		}
+		return handlerErr
+	})
+
+	eventFD := int32(file.Fd())
+	source.handleEvent(context.Background(), handler, &unix.FanotifyEventMetadata{
+		Vers: unix.FANOTIFY_METADATA_VERSION,
+		Fd:   eventFD,
+		Mask: unix.FAN_OPEN_PERM,
+	})
+
+	source.failedMu.Lock()
+	retainedOwner := source.failedEvents[eventFD]
+	source.failedMu.Unlock()
+	if retainedOwner == nil {
+		t.Fatal("source did not retain failed recovery response owner")
+	}
+	retained := retainedOwner.(*pendingEventOwner)
+	coordinator := coordinatorOwner.(*pendingEventOwner)
+	if retained.owner != coordinator.owner {
+		t.Fatalf("retained owner token = %d, want current coordinator token %d", retained.owner, coordinator.owner)
+	}
+	if retained.Event() == nil || coordinatorOwner.Event() == nil {
+		t.Fatal("current coordinator ownership was not retained after recovery response failure")
+	}
+	if verdict, resolved := retained.logicalVerdict(); !resolved || verdict != VerdictDeny {
+		t.Fatalf("logical verdict = %s resolved=%v, want deny/true", verdict, resolved)
+	}
+	if err := coordinatorOwner.Respond(VerdictAllow); !errors.Is(err, ErrPendingEventAlreadyResolved) {
+		t.Fatalf("coordinator second verdict error = %v, want ErrPendingEventAlreadyResolved", err)
+	}
+	if writes.Load() != 1 || closes.Load() != 0 {
+		t.Fatalf("writes=%d closes=%d, want 1/0", writes.Load(), closes.Load())
+	}
+}

@@ -109,17 +109,43 @@ func (event *pendingEventOwner) Respond(verdict Verdict) error {
 	event.state.verdictSet = true
 	event.state.mu.Unlock()
 
-	result := event.state.respond(verdict)
+	return event.state.finishResponse(verdict)
+}
+
+func (state *pendingEventState) finishResponse(verdict Verdict) error {
+	result := state.respond(verdict)
 	if !result.accepted && result.err == nil {
 		result.err = ErrPendingEventResponseNotAccepted
 	}
 	if result.accepted {
-		event.state.mu.Lock()
-		event.state.accepted = true
-		event.state.currentOwner = 0
-		event.state.mu.Unlock()
+		state.mu.Lock()
+		state.accepted = true
+		state.currentOwner = 0
+		state.mu.Unlock()
 	}
 	return result.err
+}
+
+func (state *pendingEventState) resolveCurrent(verdict Verdict) (PendingEvent, error) {
+	if verdict != VerdictAllow && verdict != VerdictDeny {
+		return nil, ErrPendingEventInvalidVerdict
+	}
+
+	state.mu.Lock()
+	if state.currentOwner == 0 || state.accepted {
+		state.mu.Unlock()
+		return nil, nil
+	}
+	owner := &pendingEventOwner{state: state, owner: state.currentOwner}
+	if state.verdictSet {
+		state.mu.Unlock()
+		return owner, nil
+	}
+	state.verdict = verdict
+	state.verdictSet = true
+	state.mu.Unlock()
+
+	return owner, state.finishResponse(verdict)
 }
 
 func (event *pendingEventOwner) logicalVerdict() (Verdict, bool) {
@@ -151,13 +177,27 @@ func deliverPendingEvent(ctx context.Context, handler PendingHandler, event Pend
 			err = fmt.Errorf("pending event handler panic: %v", recovered)
 		}
 		concrete, ok := owner.(*pendingEventOwner)
-		if !ok || !concrete.needsResolution() {
+		if !ok {
 			return
 		}
-		responseErr := owner.Respond(VerdictDeny)
-		if err == nil {
-			err = ErrPendingEventAbandoned
+		if err != nil {
+			current, responseErr := concrete.state.resolveCurrent(VerdictDeny)
+			if current != nil {
+				owner = current
+			}
+			if responseErr != nil {
+				err = errors.Join(err, responseErr)
+			}
+			return
 		}
+		if !concrete.needsResolution() {
+			return
+		}
+		current, responseErr := concrete.state.resolveCurrent(VerdictDeny)
+		if current != nil {
+			owner = current
+		}
+		err = ErrPendingEventAbandoned
 		if responseErr != nil {
 			err = errors.Join(err, responseErr)
 		}

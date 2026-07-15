@@ -93,30 +93,115 @@ func TestPendingEventOwnershipTransfer(t *testing.T) {
 	}
 }
 
-func TestPendingHandlerCanTransferOwnership(t *testing.T) {
-	var promptOwner PendingEvent
+func TestPendingEventCleanTransferRemainsActive(t *testing.T) {
+	var coordinatorOwner PendingEvent
 	var verdicts []Verdict
 	pending := newPendingEvent(&FileEvent{Path: "/tmp/prompt"}, func(verdict Verdict) responseResult {
 		verdicts = append(verdicts, verdict)
 		return responseResult{accepted: true}
 	})
 
-	_, err := deliverPendingEvent(context.Background(), PendingHandlerFunc(func(_ context.Context, workerOwner PendingEvent) error {
+	returnedOwner, err := deliverPendingEvent(context.Background(), PendingHandlerFunc(func(_ context.Context, workerOwner PendingEvent) error {
 		var err error
-		promptOwner, err = workerOwner.Transfer()
+		coordinatorOwner, err = workerOwner.Transfer()
 		return err
 	}), pending)
 	if err != nil {
 		t.Fatalf("deliverPendingEvent: %v", err)
 	}
+	if returnedOwner.Event() != nil {
+		t.Fatal("returned worker owner remained active after transfer")
+	}
+	if coordinatorOwner.Event() == nil {
+		t.Fatal("coordinator owner is inactive after clean transfer")
+	}
+	if verdict, resolved := pending.logicalVerdict(); resolved {
+		t.Fatalf("logical verdict after clean transfer = %s, want unresolved", verdict)
+	}
 	if len(verdicts) != 0 {
 		t.Fatalf("verdicts after transfer = %v, want none", verdicts)
 	}
-	if err := promptOwner.Respond(VerdictAllow); err != nil {
-		t.Fatalf("prompt owner Respond: %v", err)
+	if err := coordinatorOwner.Respond(VerdictAllow); err != nil {
+		t.Fatalf("coordinator owner Respond: %v", err)
 	}
 	if len(verdicts) != 1 || verdicts[0] != VerdictAllow {
 		t.Fatalf("verdicts = %v, want [allow]", verdicts)
+	}
+}
+
+func TestPendingEventTransferThenPanicDeniesCurrentOwner(t *testing.T) {
+	var verdicts []Verdict
+	pending := newPendingEvent(&FileEvent{Path: "/tmp/transfer-panic"}, func(verdict Verdict) responseResult {
+		verdicts = append(verdicts, verdict)
+		return responseResult{accepted: true}
+	})
+
+	_, err := deliverPendingEvent(context.Background(), PendingHandlerFunc(func(_ context.Context, workerOwner PendingEvent) error {
+		if _, err := workerOwner.Transfer(); err != nil {
+			return err
+		}
+		panic("panic after transfer")
+	}), pending)
+	if err == nil {
+		t.Fatal("deliverPendingEvent error = nil, want panic error")
+	}
+	if len(verdicts) != 1 || verdicts[0] != VerdictDeny {
+		t.Fatalf("verdicts = %v, want [deny]", verdicts)
+	}
+}
+
+func TestPendingEventTransferThenErrorDeniesCurrentOwner(t *testing.T) {
+	handlerErr := errors.New("handler failed after transfer")
+	var verdicts []Verdict
+	pending := newPendingEvent(&FileEvent{Path: "/tmp/transfer-error"}, func(verdict Verdict) responseResult {
+		verdicts = append(verdicts, verdict)
+		return responseResult{accepted: true}
+	})
+
+	_, err := deliverPendingEvent(context.Background(), PendingHandlerFunc(func(_ context.Context, workerOwner PendingEvent) error {
+		if _, err := workerOwner.Transfer(); err != nil {
+			return err
+		}
+		return handlerErr
+	}), pending)
+	if !errors.Is(err, handlerErr) {
+		t.Fatalf("deliverPendingEvent error = %v, want %v", err, handlerErr)
+	}
+	if len(verdicts) != 1 || verdicts[0] != VerdictDeny {
+		t.Fatalf("verdicts = %v, want [deny]", verdicts)
+	}
+}
+
+func TestPendingEventStoredCoordinatorOwnerObservesTransferPanicDeny(t *testing.T) {
+	var coordinatorOwner PendingEvent
+	var verdicts []Verdict
+	pending := newPendingEvent(&FileEvent{Path: "/tmp/coordinator-panic"}, func(verdict Verdict) responseResult {
+		verdicts = append(verdicts, verdict)
+		return responseResult{accepted: true}
+	})
+
+	_, err := deliverPendingEvent(context.Background(), PendingHandlerFunc(func(_ context.Context, workerOwner PendingEvent) error {
+		var err error
+		coordinatorOwner, err = workerOwner.Transfer()
+		if err != nil {
+			return err
+		}
+		panic("panic after coordinator transfer")
+	}), pending)
+	if err == nil {
+		t.Fatal("deliverPendingEvent error = nil, want panic error")
+	}
+	if len(verdicts) != 1 || verdicts[0] != VerdictDeny {
+		t.Fatalf("verdicts = %v, want [deny]", verdicts)
+	}
+	if verdict, resolved := pending.logicalVerdict(); !resolved || verdict != VerdictDeny {
+		t.Fatalf("logical verdict = %s resolved=%v, want deny/true", verdict, resolved)
+	}
+	if err := coordinatorOwner.Respond(VerdictAllow); !errors.Is(err, ErrPendingEventAlreadyResolved) {
+		t.Fatalf("coordinator second verdict error = %v, want ErrPendingEventAlreadyResolved", err)
+	}
+	if len(verdicts) != 1 {
+		t.Fatalf("verdict count after coordinator retry = %d, want 1", len(verdicts))
 	}
 }
 
