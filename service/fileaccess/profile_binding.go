@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/safing/portmaster/service/process"
 	"github.com/safing/portmaster/service/profile"
@@ -15,6 +16,16 @@ import (
 // portmaster's auto-creation flow stays in-play whenever the var is
 // the default.
 var getProcessWithProfile = process.GetProcessWithProfile
+
+var refreshProcessMapping = func(ctx context.Context, pid int) error {
+	p, err := process.GetOrFindProcess(ctx, pid)
+	if err != nil {
+		return err
+	}
+	p.Delete()
+	_, err = process.GetProcessWithProfile(ctx, pid)
+	return err
+}
 
 // NewProcessProfileLookup returns a ProfileLookup that maps a PID to
 // the matched portmaster Profile via process.GetProcessWithProfile.
@@ -46,18 +57,16 @@ func NewProcessProfileLookup() ProfileLookup {
 }
 
 type processProfileLookup struct {
-	// parseCache holds the most-recent ParseRules result per profile
-	// ID. AddFileAccessRule only ever prepends, so we cheaply detect
-	// staleness by comparing the raw-rule-list length: if it grew,
-	// re-parse. Cache lives here (not on profileRuleStore) so it
-	// survives across the per-event store instances.
+	// parseCache owns immutable snapshots. It is deliberately separate from
+	// profileRuleStore so snapshots survive per-event store adapters.
 	parseCache sync.Map // map[string]*ruleCacheEntry
 }
 
 type ruleCacheEntry struct {
-	mu     sync.Mutex
-	rawN   int // raw-rule count last time we parsed
-	parsed PathRules
+	mu       sync.Mutex
+	rawRules []string
+	revision uint64
+	snapshot atomic.Pointer[DecisionSnapshot]
 }
 
 func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupResult, error) {
@@ -69,8 +78,6 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 		return LookupResult{Path: ""}, ErrNoProfile
 	}
 
-	// Always populate Path so the fallback handler can key by it even
-	// when no profile resolved.
 	res := LookupResult{
 		Path:          p.Path,
 		DefaultAction: profile.DefaultActionAsk,
@@ -85,48 +92,76 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 		return res, nil
 	}
 
-	// Snapshot what we need from the profile under a single read-lock.
-	// Use the bare profile ID (not the scoped "source/id") because the
-	// consumers — the filequery recorder and the prompt UI — build the
-	// scoped key themselves as ProfileSource + "/" + ProfileID.
+	// Copy every profile-owned value while the profile lock is held. The
+	// returned snapshot never retains the raw rule slice.
 	local.RLock()
 	id := local.ID
-	rawRules := local.GetFileAccessRules()
-	defAct := local.DefaultAction()
+	rawRules := append([]string(nil), local.GetFileAccessRules()...)
+	defaultAction := local.DefaultAction()
 	source := string(local.Source)
 	name := local.Name
 	linkedPath := local.LinkedPath
 	local.RUnlock()
 
+	if defaultAction == profile.DefaultActionNotSet {
+		defaultAction = profile.DefaultActionAsk
+	}
+	snapshot := l.snapshotFor(id, source, defaultAction, rawRules)
 	res.Store = &profileRuleStore{p: local, id: id}
-	res.ParsedRules = l.parsedRulesFor(id, rawRules)
+	res.Snapshot = snapshot
+	res.ParsedRules = snapshot.Rules
+	res.DefaultAction = snapshot.DefaultAction
 	res.ProfileSource = source
 	res.ProfileName = name
 	res.ProfileLinkedPath = linkedPath
-	if defAct != profile.DefaultActionNotSet {
-		res.DefaultAction = defAct
-	}
 	return res, nil
 }
 
 // parsedRulesFor returns the cached PathRules for id, re-parsing only
 // when the raw rule count has changed.
 func (l *processProfileLookup) parsedRulesFor(id string, raw []string) PathRules {
-	v, _ := l.parseCache.LoadOrStore(id, &ruleCacheEntry{})
-	entry := v.(*ruleCacheEntry)
+	return l.snapshotFor(id, "", profile.DefaultActionAsk, raw).Rules
+}
+
+func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint8, raw []string) *DecisionSnapshot {
+	cacheKey := source + "/" + id
+	value, _ := l.parseCache.LoadOrStore(cacheKey, &ruleCacheEntry{})
+	entry := value.(*ruleCacheEntry)
 
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
-	if entry.rawN == len(raw) && entry.rawN > 0 {
-		return entry.parsed
+	if snapshot := entry.snapshot.Load(); snapshot != nil &&
+		snapshot.Source == source &&
+		snapshot.DefaultAction == defaultAction &&
+		sameRuleEntries(entry.rawRules, raw) {
+		return snapshot
 	}
-	entry.parsed = ParseRules(raw)
-	entry.rawN = len(raw)
-	return entry.parsed
+
+	entry.rawRules = append(entry.rawRules[:0], raw...)
+	entry.revision++
+	snapshot := newDecisionSnapshot(id, source, defaultAction, entry.rawRules, entry.revision)
+	entry.snapshot.Store(snapshot)
+	return snapshot
+}
+
+func sameRuleEntries(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // profileRuleStore is a thin adapter over *profile.Profile. All locking
 // is delegated to the profile's own RWMutex / addEndpointEntry path.
+func (l *processProfileLookup) RefreshProcessMapping(ctx context.Context, pid int32) error {
+	return refreshProcessMapping(ctx, int(pid))
+}
+
 type profileRuleStore struct {
 	p  *profile.Profile
 	id string

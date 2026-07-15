@@ -19,9 +19,11 @@ type FileAccess struct {
 	mgr      *mgr.Manager
 	instance instance
 
-	source  Source
-	handler Handler
+	source   Source
+	handler  Handler
+	pipeline *DecisionPipeline
 
+	pipelineConfig DecisionPipelineConfig
 	profileHandler *ProfileHandler
 }
 
@@ -46,6 +48,11 @@ func (d daemonMatchingData) Cmdline() string        { return "" }
 
 // SetProfileHandler supplies the profile-aware handler whose own daemon
 // profile is hydrated into memory before fanotify starts.
+// SetDecisionPipelineConfig configures the fixed worker pool before Start.
+func (fa *FileAccess) SetDecisionPipelineConfig(config DecisionPipelineConfig) {
+	fa.pipelineConfig = config.normalized()
+}
+
 func (fa *FileAccess) SetProfileHandler(handler *ProfileHandler) {
 	fa.profileHandler = handler
 }
@@ -101,9 +108,6 @@ func (fa *FileAccess) Start() error {
 		return err
 	}
 
-	// Standalone smoke and demo tools do not expose the daemon config
-	// module. Let them opt into paths explicitly through FM_WATCH_PATHS,
-	// while keeping an empty daemon config authoritative.
 	if _, ok := fa.instance.(configAccessor); !ok {
 		if paths := watchPathsFromEnv(); len(paths) > 0 {
 			if err := src.SetWatchPaths(paths); err != nil {
@@ -113,10 +117,21 @@ func (fa *FileAccess) Start() error {
 		}
 	}
 
-	fa.source = src
+	config := fa.pipelineConfig.normalized()
+	fa.pipeline = NewDecisionPipeline(fa.handler, config)
+	fa.pipeline.Activate()
+	if source, ok := src.(descriptorBudgetSource); ok {
+		source.SetDescriptorBudget(config.OutstandingLimit)
+	}
+	for range config.Workers {
+		fa.mgr.Go("file-access decision worker", func(w *mgr.WorkerCtx) error {
+			return fa.pipeline.Run(w.Ctx())
+		})
+	}
 
+	fa.source = src
 	fa.mgr.Go("file-access source", func(w *mgr.WorkerCtx) error {
-		return fa.source.Run(w.Ctx(), decisionPendingHandler{handler: fa.handler})
+		return fa.source.Run(w.Ctx(), fa.pipeline)
 	})
 	if reconciler, ok := src.(reconciliationSource); ok {
 		fa.mgr.Go("file-access mount reconciliation", func(w *mgr.WorkerCtx) error {
@@ -124,9 +139,6 @@ func (fa *FileAccess) Start() error {
 		})
 	}
 
-	// Subscribe to live config changes so updates to
-	// fileaccess/watchPaths re-mark without a restart. The config
-	// module fires EventConfigChange after every successful set.
 	if cfg, ok := fa.instance.(configAccessor); ok {
 		cfg.Config().EventConfigChange.AddCallback(
 			"fileaccess watchPaths reload",

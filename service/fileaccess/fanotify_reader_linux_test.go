@@ -155,6 +155,18 @@ func TestDescriptorHeadroomAndReadBatchCapacity(t *testing.T) {
 	}
 }
 
+func TestConfiguredOutstandingBudgetCapsReaderHeadroom(t *testing.T) {
+	source := newReaderTestSource(8)
+	source.SetDescriptorBudget(3)
+	if got := source.descriptorHeadroom(); got != 3 {
+		t.Fatalf("configured descriptor headroom = %d, want 3", got)
+	}
+	source.SetDescriptorBudget(10)
+	if got := source.descriptorHeadroom(); got != 3 {
+		t.Fatalf("descriptor budget enlarged headroom = %d, want 3", got)
+	}
+}
+
 func TestReaderDoesNotReadWithoutDescriptorHeadroom(t *testing.T) {
 	source := newReaderTestSource(1)
 	source.accountEventFD(101)

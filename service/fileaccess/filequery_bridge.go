@@ -18,27 +18,32 @@ func NewRecordingHandler(inner Handler, feed chan<- filequery.FileAccessRecord) 
 	return &recordingHandler{inner: inner, feed: feed}
 }
 
-func (h *recordingHandler) Decide(ctx context.Context, e *FileEvent) Verdict {
-	v := h.inner.Decide(ctx, e)
-	profile := e.ProfileSource + "/" + e.ProfileID
+func (h *recordingHandler) DecisionHandler() Handler {
+	return h.inner
+}
 
+func (h *recordingHandler) Observe(e *FileEvent, verdict Verdict) {
+	profile := e.ProfileSource + "/" + e.ProfileID
 	rec := filequery.FileAccessRecord{
 		At:      time.Now(),
 		PID:     e.PID,
 		Exe:     e.Exe,
 		Path:    e.Path,
 		Op:      e.Op.String(),
-		Verdict: verdictString(v),
+		Verdict: verdictString(verdict),
 		Profile: profile,
 		AppName: e.ProfileName,
 	}
-
 	select {
 	case h.feed <- rec:
 	default:
 	}
+}
 
-	return v
+func (h *recordingHandler) Decide(ctx context.Context, e *FileEvent) Verdict {
+	verdict := h.inner.Decide(ctx, e)
+	h.Observe(e, verdict)
+	return verdict
 }
 
 func verdictString(v Verdict) string {

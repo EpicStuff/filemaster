@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/safing/portmaster/service/process"
+	"github.com/safing/portmaster/service/profile"
 )
 
 // TestProcessProfileLookupGoesThroughPortmasterHook asserts the
@@ -56,5 +57,70 @@ func TestProcessProfileLookupNilProcessIsErrNoProfile(t *testing.T) {
 	_, err := l.Lookup(context.Background(), 1)
 	if !errors.Is(err, ErrNoProfile) {
 		t.Fatalf("err = %v, want ErrNoProfile", err)
+	}
+}
+
+func TestProcessProfileLookupReusesPortmasterIdentityStore(t *testing.T) {
+	orig := getProcessWithProfile
+	t.Cleanup(func() { getProcessWithProfile = orig })
+
+	processRecord := &process.Process{Path: "/usr/bin/reused"}
+	calls := 0
+	getProcessWithProfile = func(context.Context, int) (*process.Process, error) {
+		calls++
+		return processRecord, nil
+	}
+
+	lookup := &processProfileLookup{}
+	for range 2 {
+		result, err := lookup.Lookup(context.Background(), 42)
+		if err != nil {
+			t.Fatalf("Lookup: %v", err)
+		}
+		if result.Path != processRecord.Path {
+			t.Fatalf("Lookup path = %q, want %q", result.Path, processRecord.Path)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("portmaster process store calls = %d, want 2 without a fileaccess PID cache", calls)
+	}
+}
+
+func TestDecisionSnapshotReplacementCopiesRulesAndDetectsEqualLengthEdits(t *testing.T) {
+	lookup := &processProfileLookup{}
+	rules := []string{"+ /tmp/rule"}
+	first := lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, rules)
+	rules[0] = "- /tmp/rule"
+	if verdict, ok := first.Rules.Lookup("/tmp/rule"); !ok || verdict != VerdictAllow {
+		t.Fatalf("first snapshot changed after source mutation: verdict=%s ok=%v", verdict, ok)
+	}
+
+	second := lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, rules)
+	if same := lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, rules); same != second {
+		t.Fatal("unchanged profile rules replaced their immutable snapshot")
+	}
+	if second == first || second.Revision <= first.Revision {
+		t.Fatalf("snapshot replacement = %#v -> %#v, want newer immutable snapshot", first, second)
+	}
+	if verdict, ok := second.Rules.Lookup("/tmp/rule"); !ok || verdict != VerdictDeny {
+		t.Fatalf("equal-length rule edit verdict=%s ok=%v, want deny", verdict, ok)
+	}
+}
+
+func TestProcessProfileLookupRefreshesExistingProcessMapping(t *testing.T) {
+	orig := refreshProcessMapping
+	t.Cleanup(func() { refreshProcessMapping = orig })
+
+	calledWith := 0
+	refreshProcessMapping = func(_ context.Context, pid int) error {
+		calledWith = pid
+		return nil
+	}
+
+	if err := (&processProfileLookup{}).RefreshProcessMapping(context.Background(), 73); err != nil {
+		t.Fatalf("RefreshProcessMapping: %v", err)
+	}
+	if calledWith != 73 {
+		t.Fatalf("refresh pid = %d, want 73", calledWith)
 	}
 }

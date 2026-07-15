@@ -25,6 +25,10 @@ type reconciliationSource interface {
 	RunReconciliation(context.Context) error
 }
 
+type descriptorBudgetSource interface {
+	SetDescriptorBudget(int64)
+}
+
 // logger is the small subset of mgr.Manager / mgr.WorkerCtx that sources
 // need for diagnostic logging. Keeping it narrow lets the test source
 // pass a no-op logger.

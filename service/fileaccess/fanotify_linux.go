@@ -116,6 +116,15 @@ func currentDescriptorLimit() (int64, error) {
 	return calculateDescriptorLimit(limit.Cur, fanotifyDescriptorReserve), nil
 }
 
+// SetDescriptorBudget limits fanotify event descriptors below the RLIMIT
+// derived capacity. It is called before Run starts and can never enlarge the
+// safety margin reserved by Phase 3.
+func (s *fanotifySource) SetDescriptorBudget(limit int64) {
+	if limit > 0 && limit < s.descriptorLimit {
+		s.descriptorLimit = limit
+	}
+}
+
 func (s *fanotifySource) descriptorHeadroom() int64 {
 	headroom := s.descriptorLimit - s.outstanding.Load()
 	if headroom <= 0 {
