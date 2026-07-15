@@ -33,9 +33,231 @@ The systemd profile implementation exists, but host safety has not yet been exer
 * Send permission responses before audit, activity, detailed logging, and durable rule persistence work.
 * Preserve every implemented baseline behavior listed above.
 
+## Implementation workflow
+
+Implement one phase at a time in the listed order. Every implementation agent must read this entire document for context but edit only the active phase.
+
+For each phase:
+
+1. Inspect the current implementation and existing tests before editing.
+2. Reuse existing Portmaster and Filemaster abstractions where practical.
+3. Do not begin a later phase merely because it appears easy or adjacent.
+4. Add focused tests for the active phase.
+5. Run the focused tests and any directly affected existing suites.
+6. Stop when the phase completion criteria are met.
+7. Report files changed, tests run, unmet requirements, assumptions, and newly discovered risks.
+8. Update this document only when implementation reveals that the design itself must change.
+
+A later phase may depend on interfaces introduced by an earlier phase. Do not implement dependent behavior early. Small compile only scaffolding is allowed when required to keep the repository buildable, but it must not activate later phase behavior.
+
+## Implementation phases
+
+### Phase 1: Mount model and scope transitions
+
+Recommended model: Codex Terra.
+
+Implement:
+
+* `/proc/self/mountinfo` parsing and mount ID based identity.
+* Nested mount and bind mount discovery beneath configured scopes.
+* Scope normalization and component aware containment.
+* Configured symlink, rename, deleted path, bind mount alias, and missing path semantics.
+* Mount mark reconciliation and removal of recursive directory marking.
+* Partial coverage retention, compact warnings, retries, and diagnostics.
+* The staged union scope publication sequence.
+* Bitwise event mask updates where possible.
+
+Do not implement the new event ownership, worker pipeline, prompt coordinator, durable rule queue, or shutdown redesign.
+
+Completion criteria:
+
+* Recursive marking is replaced by mount reconciliation.
+* Scope transitions have no newly marked old snapshot allow window.
+* Mount identity and path semantics are covered by focused unit tests.
+* Partial mark failures preserve successful marks.
+* Existing baseline profile behavior remains unchanged.
+
+### Phase 2: Owned events and response writer
+
+Recommended model: Codex Sol.
+
+Depends on Phase 1.
+
+Implement:
+
+* The owned pending event abstraction.
+* Exactly one logical verdict.
+* Explicit ownership transfer.
+* Serialized complete `fanotify_response` writes.
+* `EINTR` retry.
+* Short write detection.
+* Event descriptor closure only after a complete accepted response.
+* Fatal degraded response state and controlled draining entry.
+
+Do not implement worker concurrency, prompt grouping, durable rule persistence, or the complete shutdown sequence.
+
+Completion criteria:
+
+* Every event has exactly one owner and one logical verdict.
+* All response and descriptor lifetime behavior has focused tests.
+* Unrecoverable response failures cannot be silently ignored or converted into group closure.
+
+### Phase 3: Reader, descriptor accounting, and event mask
+
+Recommended model: Codex Sol.
+
+Depends on Phase 2.
+
+Implement:
+
+* Immediate accounting for every valid event descriptor after `read()`.
+* Descriptor headroom and read batch control.
+* Explicit `EMFILE` handling and diagnostics.
+* `FAN_Q_OVERFLOW` detection before descriptor validation.
+* Path resolution and unresolved path denial.
+* Outside scope immediate allow only after conclusive classification.
+* `FAN_ONDIR`.
+* Optional `FAN_ACCESS_PERM` directory read behavior.
+* Focused path resolution recursion integration testing.
+
+Do not implement the worker pool or prompt grouping.
+
+Completion criteria:
+
+* Unclassified and outside scope descriptors count until response and close.
+* Multi event read batches cannot bypass accounting.
+* Directory open and directory read behavior is tested.
+* Unresolved paths enter a visible degraded state and default to deny.
+
+### Phase 4: Parallel decision pipeline and profile snapshots
+
+Recommended model: Codex Terra.
+
+Depends on Phases 2 and 3.
+
+Implement:
+
+* Bounded decision queue.
+* Configurable worker pool, initially four workers.
+* Global outstanding descriptor budget.
+* Per profile pending Ask budget.
+* Existing process store reuse.
+* Allowed exec process mapping refresh.
+* Immutable profile decision snapshots.
+* Correct rule cache invalidation when rule content changes without count changes.
+* Response before droppable observation work.
+
+Do not implement exact prompt grouping or durable Always persistence beyond interfaces required by later phases.
+
+Completion criteria:
+
+* Independent events can complete concurrently.
+* No goroutine is created per event.
+* Queue and budget overload paths always resolve event ownership.
+* Profile decisions do not parse raw rules or read profile storage in the hot path.
+* Filemaster self policy continues to use its existing in memory path.
+
+### Phase 5: Prompt coordinator and profile revision reevaluation
+
+Recommended model: Codex Terra. Use Claude Opus to review this phase before proceeding.
+
+Depends on Phase 4.
+
+Implement:
+
+* Exact grouping by profile source and ID, operation, and normalized exact path.
+* Stable unidentified process grouping.
+* Grouped event accounting.
+* Snapshot revision capture.
+* Pending group reevaluation after every profile snapshot replacement.
+* Automatic resolution when updated policy no longer returns Ask.
+* Timeout, overload, and closing state denial behavior.
+
+Do not implement broader parent directory grouping.
+
+Completion criteria:
+
+* One visible prompt safely owns multiple exact duplicate events.
+* All grouped events remain individually accounted for.
+* Profile edits cannot leave a stale prompt open when policy has resolved it.
+* Review findings from Claude Opus are resolved before Phase 6.
+
+### Phase 6: Durable permanent rule persistence
+
+Recommended model: Codex Terra.
+
+Depends on Phase 5.
+
+Implement:
+
+* Per profile dirty rule overlay.
+* Immediate in memory application of accepted Always rules.
+* Serialized persistence per profile.
+* Retry with bounded backoff.
+* Visible persistent failure state.
+* Reload merging and protection from newer revisions overwriting dirty rules.
+* Safe duplicate coalescing.
+* Bounded shutdown flush interface.
+
+Completion criteria:
+
+* Permanent rule work never shares the droppable observation queue.
+* An unpersisted Always rule remains effective for the current run.
+* Reloads and profile updates cannot silently discard dirty rules.
+* Retry, conflict, and failure behavior is tested.
+
+### Phase 7: Shared closing state and controlled shutdown
+
+Recommended model: Codex Sol.
+
+Depends on Phases 2 through 6.
+
+Implement:
+
+* One shared closing state observed by every pipeline component.
+* Configuration and reconciliation shutdown.
+* Queue admission rejection.
+* Denial of new prompt ownership transfers.
+* Mark removal.
+* Continued reader service after mark removal failure.
+* Queued, active, prompted, and response ownership draining.
+* Bounded permanent rule flush.
+* Final fanotify group closure rules.
+
+Completion criteria:
+
+* An active worker cannot create an undrained Ask after shutdown begins.
+* Failed mark removal cannot leave generated permission events unserviced.
+* Every owned event is resolved or explicitly reported at the shutdown deadline.
+* Shutdown race tests pass.
+
+### Phase 8: Integration, diagnostics, UI, and final review
+
+Recommended model: Codex Terra for ordinary implementation and fixes. Use Claude Opus for the complete architecture review. Use Codex Sol only for concurrency or kernel correctness findings.
+
+Depends on Phases 1 through 7.
+
+Implement and verify:
+
+* Backend settings and matching UI controls.
+* Required metrics, degraded states, and prominent warnings.
+* Fake source parity with the real ownership and coordinator interfaces.
+* Full backend, Playwright, and Karma suites.
+* Confined fanotify integration tests.
+* A real host test where PID 1 is systemd.
+* Root scope benchmark with the complete pipeline.
+* Root scope Ask rollout gate.
+
+Completion criteria:
+
+* Every requirement in this document has a corresponding implementation or test.
+* Claude Opus completes a plan against patch review.
+* All correctness findings are resolved.
+* Root scope Ask mode remains gated until queue limits, grouping, shutdown, diagnostics, persistence reliability, and real systemd host safety pass end to end testing.
+
 ## Mount mark strategy
 
-The first redesign supports mount marks only. Recursive directory marks are removed rather than retained as a second selectable strategy.
+The redesign supports mount marks only. Recursive directory marks are removed rather than retained as a second selectable strategy.
 
 ### Mount identity
 
@@ -461,4 +683,4 @@ Kernel queue overflow, `EMFILE`, unresolved paths, unrecoverable response failur
 19. Run the existing backend, Playwright, and Karma suites.
 20. Run a confined fanotify integration test and a real host systemd safety test.
 21. Re run the root benchmark with real profile handling, cold process resolution, exact prompt grouping, descriptor accounting, response writes, durable rule persistence, and observation enabled.
-22. Keep root scope Ask mode behind configuration until queue limits, grouping, shutdown, diagnostics, persistence reliability, and real host systemd safety have passed end to end testing.
+22. Keep root scope Ask mode behind configuration until queue limits, grouping, shutdown, diagnostics, persistence reliability, and real systemd host safety have passed end to end testing.
