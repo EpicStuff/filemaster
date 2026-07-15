@@ -6,10 +6,12 @@ package fileaccess
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync/atomic"
 
 	"github.com/safing/portmaster/base/config"
 	"github.com/safing/portmaster/service/mgr"
+	"github.com/safing/portmaster/service/profile"
 )
 
 // FileAccess is the file-access interception module.
@@ -19,6 +21,8 @@ type FileAccess struct {
 
 	source  Source
 	handler Handler
+
+	profileHandler *ProfileHandler
 }
 
 // Manager returns the module manager.
@@ -26,9 +30,72 @@ func (fa *FileAccess) Manager() *mgr.Manager {
 	return fa.mgr
 }
 
+type profileAccessor interface {
+	Profile() *profile.ProfileModule
+}
+
+type daemonMatchingData struct {
+	path string
+}
+
+func (d daemonMatchingData) Tags() []profile.Tag    { return nil }
+func (d daemonMatchingData) Env() map[string]string { return nil }
+func (d daemonMatchingData) Path() string           { return d.path }
+func (d daemonMatchingData) MatchingPath() string   { return d.path }
+func (d daemonMatchingData) Cmdline() string        { return "" }
+
+// SetProfileHandler supplies the profile-aware handler whose own daemon
+// profile is hydrated into memory before fanotify starts.
+func (fa *FileAccess) SetProfileHandler(handler *ProfileHandler) {
+	fa.profileHandler = handler
+}
+
+func (fa *FileAccess) hydrateSelfProfile() error {
+	if fa.profileHandler == nil {
+		return nil
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve daemon executable: %w", err)
+	}
+	matching := daemonMatchingData{path: executable}
+	refresh := func() error {
+		p, err := profile.GetLocalProfile(profile.PortmasterProfileID, matching, nil)
+		if err != nil {
+			return err
+		}
+		fa.profileHandler.SetSelfProfile(p, int32(os.Getpid()))
+		return nil
+	}
+	if err := refresh(); err != nil {
+		return fmt.Errorf("hydrate daemon file-access profile: %w", err)
+	}
+
+	if profiles, ok := fa.instance.(profileAccessor); ok {
+		profiles.Profile().EventConfigChange.AddCallback(
+			"fileaccess daemon profile reload",
+			func(_ *mgr.WorkerCtx, scopedID string) (bool, error) {
+				if scopedID != profile.MakeScopedID(profile.SourceLocal, profile.PortmasterProfileID) {
+					return false, nil
+				}
+				if err := refresh(); err != nil {
+					fa.mgr.Warn("fileaccess: failed to refresh daemon profile", "err", err)
+				}
+				return false, nil
+			},
+		)
+	}
+	return nil
+}
+
 // Start starts the module: build the platform source and run it under a
 // worker. The phase-1 default handler logs and allows every event.
 func (fa *FileAccess) Start() error {
+	if err := fa.hydrateSelfProfile(); err != nil {
+		return err
+	}
+
 	src, err := newPlatformSource(fa.mgr)
 	if err != nil {
 		return err

@@ -27,9 +27,8 @@ import (
 // for now; using FAN_REPORT_FID would let us autotrack but is a
 // larger refactor.
 type fanotifySource struct {
-	log    logger
-	fd     int
-	ownPID int32
+	log logger
+	fd  int
 
 	// marksMu guards roots AND markMask. fanotify_mark itself is safe
 	// to call concurrently, but we keep the in-memory state under a
@@ -93,7 +92,6 @@ func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
 	s := &fanotifySource{
 		log:      log,
 		fd:       fd,
-		ownPID:   int32(os.Getpid()),
 		roots:    make(map[string]map[string]struct{}),
 		markMask: resolveMarkMask(),
 	}
@@ -182,7 +180,20 @@ func (s *fanotifySource) SetWatchPaths(paths []string) error {
 	for root := range want {
 		marked, err := s.walkAndMark(root)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("add %s: %w", root, err))
+			// A recursive root can contain unreadable or transient
+			// subtrees. Keep the usable marks instead of disabling the
+			// entire root; only fail when the root itself could not be
+			// marked at all. This is not a policy ignore: accessible
+			// paths remain subject to normal profile decisions.
+			if len(marked) == 0 {
+				errs = append(errs, fmt.Errorf("add %s: %w", root, err))
+			} else {
+				s.log.Warn("fanotify root partially marked",
+					"root", root,
+					"marked", len(marked),
+					"err", err,
+				)
+			}
 		}
 		previous := s.roots[root]
 		if previous == nil {
@@ -262,14 +273,27 @@ func (s *fanotifySource) walkAndMarkVia(root string, mark func(string) error) (m
 	}
 
 	marked := make(map[string]struct{})
-	var errs []error
+	const maxReportedErrors = 16
+	var (
+		errs     []error
+		errCount int
+	)
+	recordErr := func(err error) {
+		if err == nil {
+			return
+		}
+		errCount++
+		if len(errs) < maxReportedErrors {
+			errs = append(errs, err)
+		}
+	}
 
 	walkErr := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// Permission denied / disappeared underneath us. Record
 			// and keep walking siblings -- a single unreadable subtree
 			// shouldn't void the whole root.
-			errs = append(errs, walkErr)
+			recordErr(walkErr)
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}
@@ -279,14 +303,18 @@ func (s *fanotifySource) walkAndMarkVia(root string, mark func(string) error) (m
 			return nil
 		}
 		if err := mark(p); err != nil {
-			errs = append(errs, fmt.Errorf("mark %s: %w", p, err))
+			recordErr(fmt.Errorf("mark %s: %w", p, err))
 			return nil
 		}
 		marked[p] = struct{}{}
 		return nil
 	})
-	if walkErr != nil {
-		errs = append(errs, walkErr)
+	recordErr(walkErr)
+	if errCount == 0 {
+		return marked, nil
+	}
+	if omitted := errCount - len(errs); omitted > 0 {
+		errs = append(errs, fmt.Errorf("%d additional walk/mark errors omitted", omitted))
 	}
 	return marked, errors.Join(errs...)
 }
@@ -399,15 +427,6 @@ func (s *fanotifySource) handleEvent(ctx context.Context, h Handler, meta *unix.
 	// predates OPEN_EXEC_PERM (0x40000), so check our own mask.
 	const allPerm = uint64(unix.FAN_OPEN_PERM | unix.FAN_ACCESS_PERM | unix.FAN_OPEN_EXEC_PERM)
 	isPerm := uint64(meta.Mask)&allPerm != 0
-
-	// Drop self-events to avoid deadlocking the daemon against itself
-	// (an open inside Decide blocking on a verdict from Decide).
-	if meta.Pid == s.ownPID {
-		if isPerm {
-			s.respond(meta.Fd, VerdictAllow)
-		}
-		return
-	}
 
 	// Exe resolution is the lookup chain's job (process module already
 	// does richer resolution -- cmdline, env, tags). Leaving Exe empty

@@ -31,9 +31,9 @@ func registerConfig() error {
 	err := config.Register(&config.Option{
 		Name:         "File Access Watch Paths",
 		Key:          CfgOptionWatchPathsKey,
-		Description:  "Absolute directory paths whose immediate children fanotify intercepts. Empty = no marks issued at startup.",
+		Description:  "Absolute directory paths whose immediate children fanotify intercepts. Defaults to /home; / enables whole-system monitoring and can disrupt essential services if policies are made restrictive.",
 		OptType:      config.OptTypeStringArray,
-		DefaultValue: []string{},
+		DefaultValue: []string{"/home"},
 		Annotations: config.Annotations{
 			config.DisplayOrderAnnotation: cfgOptionWatchPathsOrder,
 			config.CategoryAnnotation:     "File Access",
@@ -41,12 +41,12 @@ func registerConfig() error {
 		// Per-line: any non-empty absolute path. Validation is left
 		// permissive; the source surfaces a real error on Start if a
 		// path is unmarkable.
-		ValidationRegex: `^/.+$`,
+		ValidationRegex: `^/$|^/.+$`,
 	})
 	if err != nil {
 		return err
 	}
-	cfgOptionWatchPaths = config.Concurrent.GetAsStringArray(CfgOptionWatchPathsKey, []string{})
+	cfgOptionWatchPaths = config.Concurrent.GetAsStringArray(CfgOptionWatchPathsKey, []string{"/home"})
 
 	err = config.Register(&config.Option{
 		Name:         "Intercept Read Syscalls",

@@ -111,6 +111,11 @@ allow/deny, not redirect.
 - [ ] Build a launcher shim that applies the ruleset before `execve` (Landlock
 	must be set up by the parent).
 
+## Potential Future Features
+- comptemplate clamav integration feasability
+- comptemplate app groups feasablilty
+	- so python file1.py and python file2.py show under the same group but different rules/profile without needing to manually configure it
+
 ## Cross-cutting cleanup
 
 - [ ] Rename the binary and module path from `portmaster` to `filemaster`.

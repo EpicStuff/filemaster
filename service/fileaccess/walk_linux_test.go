@@ -3,11 +3,14 @@
 package fileaccess
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -155,6 +158,82 @@ func TestSetWatchPathsLiveReloadAddsNewSubdirsOnReload(t *testing.T) {
 	}
 	if got := totalMarks(s); got != first {
 		t.Errorf("after rm + reload: %d marks, want %d (reload should drop stale mark)", got, first)
+	}
+}
+
+// TestFanotifySelfEventPathResolutionDoesNotRecurse exercises the exact path
+// lookup used by handleEvent with the opening process also acting as fanotify
+// listener. readlink(/proc/self/fd/N) must not create another permission event.
+func TestFanotifySelfEventPathResolutionDoesNotRecurse(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "watched")
+	mkfile(t, root, "watched")
+
+	fd, err := unix.FanotifyInit(
+		unix.FAN_CLASS_CONTENT|unix.FAN_CLOEXEC,
+		unix.O_RDONLY|unix.O_LARGEFILE|unix.O_CLOEXEC,
+	)
+	if err != nil {
+		t.Skipf("fanotify_init unavailable (%v); skipping live test", err)
+	}
+	s := &fanotifySource{
+		log:      nopLogger{},
+		fd:       fd,
+		roots:    make(map[string]map[string]struct{}),
+		markMask: uint64(unix.FAN_OPEN_PERM | unix.FAN_EVENT_ON_CHILD),
+	}
+	if err := s.SetWatchPaths([]string{root}); err != nil {
+		_ = unix.Close(fd)
+		t.Fatalf("set watch path: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	t.Cleanup(func() { _ = s.Close() })
+
+	var handled atomic.Int32
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- s.Run(ctx, HandlerFunc(func(_ context.Context, event *FileEvent) Verdict {
+			if event.Path == path {
+				handled.Add(1)
+			}
+			return VerdictAllow
+		}))
+	}()
+
+	openDone := make(chan error, 1)
+	go func() {
+		f, err := os.Open(path)
+		if err == nil {
+			err = f.Close()
+		}
+		openDone <- err
+	}()
+
+	select {
+	case err := <-openDone:
+		if err != nil {
+			t.Fatalf("open watched file: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("open timed out waiting for fanotify verdict")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for handled.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := handled.Load(); got != 1 {
+		t.Fatalf("handled events for self-open = %d, want exactly 1", got)
+	}
+
+	cancel()
+	_ = s.Close()
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fanotify run loop did not exit")
 	}
 }
 

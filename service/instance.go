@@ -64,8 +64,8 @@ type Instance struct {
 	status        *status.Status
 	broadcasts    *broadcasts.Broadcasts
 	sync          *sync.Sync
-	fileAccess *fileaccess.FileAccess
-	fileQuery  *filequery.FileQuery
+	fileAccess    *fileaccess.FileAccess
+	fileQuery     *filequery.FileQuery
 
 	CommandLineOperation func() error
 	ShouldRestart        bool
@@ -156,6 +156,7 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	if err != nil {
 		return instance, fmt.Errorf("create profile module: %w", err)
 	}
+	profile.SetFilemasterSeedPaths([]string{svcCfg.BinDir, svcCfg.DataDir})
 	instance.status, err = status.New(instance)
 	if err != nil {
 		return instance, fmt.Errorf("create status module: %w", err)
@@ -199,14 +200,16 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	if err := fallbackPrompt.SetPersistPath(fallbackRulesPath); err != nil {
 		return instance, fmt.Errorf("load fallback rules from %s: %w", fallbackRulesPath, err)
 	}
+	profileHandler := fileaccess.NewProfileHandler(
+		fileaccess.NewProcessProfileLookup(),
+		&fileaccess.NotificationsPrompter{},
+		fallbackPrompt,
+		30*time.Second,
+		instance.fileAccess.Manager(),
+	)
+	instance.fileAccess.SetProfileHandler(profileHandler)
 	instance.fileAccess.SetHandler(fileaccess.NewRecordingHandler(
-		fileaccess.NewProfileHandler(
-			fileaccess.NewProcessProfileLookup(),
-			&fileaccess.NotificationsPrompter{},
-			fallbackPrompt,
-			30*time.Second,
-			instance.fileAccess.Manager(),
-		),
+		profileHandler,
 		instance.fileQuery.Feed(),
 	))
 

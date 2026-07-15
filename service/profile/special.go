@@ -1,6 +1,8 @@
 package profile
 
 import (
+	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/safing/portmaster/base/log"
@@ -53,6 +55,13 @@ In order to correctly handle these, DNS Requests (not regular connections), do n
 Additionally, the settings for the System DNS Client are specially pre-configured. If you are having issues or want to revert to the default settings, please delete this profile below. It will be automatically recreated with the default settings.
 `
 
+	// SystemdProfileID is the profile ID used for systemd PID 1 and its helpers.
+	SystemdProfileID = "_systemd"
+	// SystemdProfileName is the name used for systemd services.
+	SystemdProfileName = "systemd Services"
+	// SystemdProfileDescription explains the intentionally narrow systemd seed rules.
+	SystemdProfileDescription = "Editable allow rules seeded for systemd PID 1 and helpers. Requests outside these rules continue to use the normal default action."
+
 	// PortmasterProfileID is the profile ID used for the Portmaster Core itself.
 	PortmasterProfileID = "_portmaster"
 	// PortmasterProfileName is the name used for the Portmaster Core itself.
@@ -75,12 +84,108 @@ Additionally, the settings for the System DNS Client are specially pre-configure
 	PortmasterNotifierProfileDescription = `This is the Portmaster UI Tray Notifier.`
 )
 
+var (
+	filemasterSeedPathsMu sync.RWMutex
+	filemasterSeedPaths   []string
+)
+
+// SetFilemasterSeedPaths supplies the stable runtime directories that are
+// included when the Filemaster daemon profile is first created. Existing
+// profiles are intentionally left untouched so users retain control.
+func SetFilemasterSeedPaths(paths []string) {
+	seen := make(map[string]struct{}, len(paths))
+	cleaned := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		path = filepath.Clean(path)
+		if path == "." || path == "/" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		cleaned = append(cleaned, path)
+	}
+
+	filemasterSeedPathsMu.Lock()
+	filemasterSeedPaths = cleaned
+	filemasterSeedPathsMu.Unlock()
+}
+
+func filemasterFileAccessRules(executablePath string) []string {
+	seen := make(map[string]struct{})
+	rules := make([]string, 0, 4)
+
+	addFile := func(path string) {
+		if path == "" {
+			return
+		}
+		path = filepath.Clean(path)
+		if _, ok := seen["file:"+path]; ok {
+			return
+		}
+		seen["file:"+path] = struct{}{}
+		rules = append(rules, "+ "+path)
+	}
+	addDir := func(path string) {
+		if path == "" {
+			return
+		}
+		path = filepath.Clean(path)
+		if path == "." || path == "/" {
+			return
+		}
+		if _, ok := seen["dir:"+path]; ok {
+			return
+		}
+		seen["dir:"+path] = struct{}{}
+		rules = append(rules, "+ "+path+"/**")
+	}
+
+	addFile(executablePath)
+	addDir(filepath.Dir(executablePath))
+
+	filemasterSeedPathsMu.RLock()
+	paths := append([]string(nil), filemasterSeedPaths...)
+	filemasterSeedPathsMu.RUnlock()
+	for _, path := range paths {
+		addDir(path)
+	}
+
+	return rules
+}
+
+func systemdFileAccessRules() []string {
+	paths := []string{
+		"/run/systemd",
+		"/run/dbus",
+		"/var/lib/systemd",
+		"/etc/systemd",
+		"/usr/lib/systemd",
+		"/lib/systemd",
+		"/usr/lib64/systemd",
+		"/lib64/systemd",
+		"/proc",
+		"/sys",
+		"/dev",
+	}
+	rules := make([]string, 0, len(paths))
+	for _, path := range paths {
+		rules = append(rules, "+ "+path+"/**")
+	}
+	return rules
+}
+
 func isSpecialProfileID(id string) bool {
 	switch id {
 	case UnidentifiedProfileID,
 		UnsolicitedProfileID,
 		SystemProfileID,
 		SystemResolverProfileID,
+		SystemdProfileID,
 		PortmasterProfileID,
 		PortmasterAppProfileID,
 		PortmasterNotifierProfileID:
@@ -106,6 +211,9 @@ func updateSpecialProfileMetadata(profile *Profile, binaryPath string) (changed 
 	case SystemResolverProfileID:
 		newProfileName = SystemResolverProfileName
 		newDescription = SystemResolverProfileDescription
+	case SystemdProfileID:
+		newProfileName = SystemdProfileName
+		newDescription = SystemdProfileDescription
 	case PortmasterProfileID:
 		newProfileName = PortmasterProfileName
 		newDescription = PortmasterProfileDescription
@@ -176,17 +284,25 @@ func createSpecialProfile(profileID string, path string) *Profile {
 			},
 		})
 
+	case SystemdProfileID:
+		return New(&Profile{
+			ID:               SystemdProfileID,
+			Source:           SourceLocal,
+			PresentationPath: path,
+			Config: map[string]interface{}{
+				CfgOptionFileAccessRulesKey: systemdFileAccessRules(),
+			},
+		})
+
 	case PortmasterProfileID:
 		return New(&Profile{
 			ID:               PortmasterProfileID,
 			Source:           SourceLocal,
 			PresentationPath: path,
 			Config: map[string]interface{}{
-				// Self-process: permit everything to avoid the daemon
-				// blocking on its own opens during decision handling.
-				CfgOptionDefaultActionKey: DefaultActionPermitValue,
+				CfgOptionDefaultActionKey:   DefaultActionPermitValue,
+				CfgOptionFileAccessRulesKey: filemasterFileAccessRules(path),
 			},
-			Internal: true,
 		})
 
 	case PortmasterAppProfileID:
@@ -242,7 +358,9 @@ func specialProfileNeedsReset(profile *Profile) bool {
 	case SystemResolverProfileID:
 		return canBeUpgraded(profile, "22.8.2023")
 	case PortmasterProfileID:
-		return canBeUpgraded(profile, "22.8.2023")
+		// Seed the editable Filemaster file-access rules for unmodified
+		// installations. Edited profiles are preserved by the guard above.
+		return canBeUpgraded(profile, "15.7.2026")
 	case PortmasterAppProfileID:
 		return canBeUpgraded(profile, "22.8.2023")
 	default:

@@ -89,6 +89,10 @@ func (p *Process) getSpecialProfileID() (specialProfileID string) {
 				specialProfileID = profile.SystemResolverProfileID
 			}
 		case "linux":
+			if isSystemdProcess(p.Pid, p.Path) {
+				specialProfileID = profile.SystemdProfileID
+				break
+			}
 			switch p.Path {
 			case "/lib/systemd/systemd-resolved",
 				"/usr/lib/systemd/systemd-resolved",
@@ -104,6 +108,29 @@ func (p *Process) getSpecialProfileID() (specialProfileID string) {
 	}
 
 	return specialProfileID
+}
+
+func isSystemdProcess(pid int, path string) bool {
+	switch path {
+	case "/lib/systemd/systemd",
+		"/usr/lib/systemd/systemd",
+		"/lib64/systemd/systemd",
+		"/usr/lib64/systemd/systemd":
+		return pid == 1
+	case "/lib/systemd/systemd-journald",
+		"/usr/lib/systemd/systemd-journald",
+		"/lib/systemd/systemd-logind",
+		"/usr/lib/systemd/systemd-logind",
+		"/lib/systemd/systemd-udevd",
+		"/usr/lib/systemd/systemd-udevd",
+		"/lib/systemd/systemd-networkd",
+		"/usr/lib/systemd/systemd-networkd",
+		"/lib/systemd/systemd-timesyncd",
+		"/usr/lib/systemd/systemd-timesyncd":
+		return true
+	default:
+		return false
+	}
 }
 
 // IsPortmasterUi checks if the process is the Portmaster UI or its child (up to 3 parent levels).

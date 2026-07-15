@@ -321,3 +321,37 @@ func TestProfileHandlerNoProfilePopulatesExeAndFallback(t *testing.T) {
 		t.Errorf("fallback saw path %q, want /x", seen.Path)
 	}
 }
+
+func TestProfileHandlerSelfProfileUsesInMemorySnapshot(t *testing.T) {
+	store := &fakeRuleStore{id: profile.PortmasterProfileID}
+	h := NewProfileHandler(
+		&fakeLookup{err: errors.New("normal lookup must not run for self")},
+		&scriptedPrompter{},
+		HandlerFunc(func(context.Context, *FileEvent) Verdict { return VerdictDeny }),
+		time.Second,
+		nopLogger{},
+	)
+	h.setSelfProfile(4242, LookupResult{
+		Path:          "/usr/bin/filemaster",
+		Store:         store,
+		ParsedRules:   ParseRules([]string{"+ /var/lib/filemaster/**"}),
+		DefaultAction: profile.DefaultActionBlock,
+		ProfileSource: string(profile.SourceLocal),
+		ProfileName:   "Filemaster",
+	})
+
+	allowed := &FileEvent{PID: 4242, Path: "/var/lib/filemaster/state.db"}
+	if got := h.Decide(context.Background(), allowed); got != VerdictAllow {
+		t.Fatalf("self rule verdict = %s, want allow", got)
+	}
+	if allowed.Exe != "/usr/bin/filemaster" {
+		t.Fatalf("self event executable = %q, want daemon path", allowed.Exe)
+	}
+	if allowed.ProfileID != profile.PortmasterProfileID {
+		t.Fatalf("self event profile = %q, want daemon profile", allowed.ProfileID)
+	}
+
+	if got := h.Decide(context.Background(), &FileEvent{PID: 4242, Path: "/etc/shadow"}); got != VerdictDeny {
+		t.Fatalf("self default verdict = %s, want deny", got)
+	}
+}
