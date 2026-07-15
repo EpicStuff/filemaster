@@ -4,6 +4,7 @@ package fileaccess
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -26,8 +28,14 @@ type policyScope struct {
 	refFD      int
 }
 
+// scopeMatch is immutable data used only by the event reader.
+type scopeMatch struct {
+	Configured string
+	Canonical  string
+}
+
 type scopeSnapshot struct {
-	Scopes []*policyScope
+	Scopes []scopeMatch
 }
 
 type mountedMark struct {
@@ -176,19 +184,23 @@ func discoverRequiredMounts(scopes []*policyScope, mounts []mountInfo) (map[int]
 }
 
 func unionScopes(current, desired *scopeSnapshot) *scopeSnapshot {
-	seen := make(map[*policyScope]struct{})
-	union := &scopeSnapshot{}
+	byConfigured := make(map[string]scopeMatch)
 	for _, snapshot := range []*scopeSnapshot{current, desired} {
 		if snapshot == nil {
 			continue
 		}
 		for _, scope := range snapshot.Scopes {
-			if _, ok := seen[scope]; ok {
-				continue
-			}
-			seen[scope] = struct{}{}
-			union.Scopes = append(union.Scopes, scope)
+			byConfigured[scope.Configured] = scope
 		}
+	}
+	configured := make([]string, 0, len(byConfigured))
+	for path := range byConfigured {
+		configured = append(configured, path)
+	}
+	sort.Strings(configured)
+	union := &scopeSnapshot{Scopes: make([]scopeMatch, 0, len(configured))}
+	for _, path := range configured {
+		union.Scopes = append(union.Scopes, byConfigured[path])
 	}
 	return union
 }
@@ -208,11 +220,25 @@ func snapshotFromScopes(scopes map[string]*policyScope) *scopeSnapshot {
 		configured = append(configured, path)
 	}
 	sort.Strings(configured)
-	snapshot := &scopeSnapshot{Scopes: make([]*policyScope, 0, len(configured))}
+	snapshot := &scopeSnapshot{Scopes: make([]scopeMatch, 0, len(configured))}
 	for _, path := range configured {
-		snapshot.Scopes = append(snapshot.Scopes, scopes[path])
+		scope := scopes[path]
+		snapshot.Scopes = append(snapshot.Scopes, scopeMatch{Configured: scope.Configured, Canonical: scope.Canonical})
 	}
 	return snapshot
+}
+
+func mutableScopes(scopes map[string]*policyScope) []*policyScope {
+	configured := make([]string, 0, len(scopes))
+	for path := range scopes {
+		configured = append(configured, path)
+	}
+	sort.Strings(configured)
+	result := make([]*policyScope, 0, len(configured))
+	for _, path := range configured {
+		result = append(result, scopes[path])
+	}
+	return result
 }
 
 func (s *fanotifySource) prepareScopes(paths []string) (map[string]*policyScope, error) {
@@ -261,16 +287,37 @@ func (s *fanotifySource) reconcile() {
 	s.reconcileLocked()
 }
 
+// RunReconciliation is a dedicated managed loop so mount discovery and mark
+// syscalls never pause the fanotify event reader.
+func (s *fanotifySource) RunReconciliation(ctx context.Context) error {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			s.reconcile()
+		}
+	}
+}
+
 func (s *fanotifySource) reconcileLocked() {
 	mounts, err := s.mountInfo()
 	if err != nil {
 		s.recordReconcileFailure(err)
 		return
 	}
-	required, err := discoverRequiredMounts(snapshotFromScopes(s.scopes).Scopes, mounts)
+	required, err := discoverRequiredMounts(mutableScopes(s.scopes), mounts)
 	if err != nil {
 		s.recordReconcileFailure(err)
 		return
+	}
+	desiredSnapshot := snapshotFromScopes(s.scopes)
+	if s.pending {
+		s.activeScopes.Store(unionScopes(s.activeScopes.Load(), desiredSnapshot))
+	} else {
+		s.activeScopes.Store(desiredSnapshot)
 	}
 
 	newMask := resolveMarkMask()
@@ -311,10 +358,9 @@ func (s *fanotifySource) reconcileLocked() {
 		}
 	}
 	if complete && s.pending {
-		old := s.activeScopes.Load()
-		s.activeScopes.Store(snapshotFromScopes(s.scopes))
+		s.activeScopes.Store(desiredSnapshot)
 		s.pending = false
-		s.closeRetiredScopes(old)
+		s.closeRetiredScopes()
 	}
 	if complete {
 		for id, mark := range s.marks {
@@ -332,15 +378,11 @@ func (s *fanotifySource) reconcileLocked() {
 	s.updateDiagnostics(required, errs)
 }
 
-func (s *fanotifySource) closeRetiredScopes(previous *scopeSnapshot) {
-	if previous == nil {
-		return
+func (s *fanotifySource) closeRetiredScopes() {
+	for _, scope := range s.retiredScopes {
+		scope.close()
 	}
-	for _, scope := range previous.Scopes {
-		if s.scopes[scope.Configured] != scope {
-			scope.close()
-		}
-	}
+	s.retiredScopes = nil
 }
 
 func (s *fanotifySource) recordReconcileFailure(err error) {
@@ -391,8 +433,6 @@ func (s *fanotifySource) MountDiagnostics() MountDiagnostics {
 }
 
 func (s *fanotifySource) pathInActiveScope(path string) bool {
-	s.marksMu.Lock()
-	defer s.marksMu.Unlock()
 	snapshot := s.activeScopes.Load()
 	if snapshot == nil {
 		return false

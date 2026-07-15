@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strconv"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -268,11 +269,93 @@ func snapshotContains(snapshot *scopeSnapshot, path string) bool {
 	return false
 }
 
-func TestResolveMarkMaskIncludesDirectoryEvents(t *testing.T) {
+func TestPhaseOneMaskExcludesDirectoryEvents(t *testing.T) {
 	previous := cfgOptionInterceptReads
 	cfgOptionInterceptReads = nil
 	t.Cleanup(func() { cfgOptionInterceptReads = previous })
-	if mask := resolveMarkMask(); mask&uint64(unix.FAN_ONDIR) == 0 || mask&uint64(unix.FAN_EVENT_ON_CHILD) != 0 {
-		t.Fatalf("mount mask = 0x%x, want FAN_ONDIR without FAN_EVENT_ON_CHILD", mask)
+	if mask := resolveMarkMask(); mask&uint64(unix.FAN_ONDIR) != 0 || mask&uint64(unix.FAN_EVENT_ON_CHILD) != 0 {
+		t.Fatalf("phase 1 mask = 0x%x, must not include directory event bits", mask)
+	}
+}
+
+func TestEventScopeClassificationDoesNotAcquireReconciliationMutex(t *testing.T) {
+	s := newReconciliationTestSource(nil, nil)
+	s.activeScopes.Store(&scopeSnapshot{Scopes: []scopeMatch{{Canonical: "/watched"}}})
+	s.marksMu.Lock()
+	defer s.marksMu.Unlock()
+
+	classified := make(chan bool, 1)
+	go func() { classified <- s.pathInActiveScope("/watched/file") }()
+	select {
+	case inScope := <-classified:
+		if !inScope {
+			t.Fatal("path was not classified through the active snapshot")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scope classification waited on the reconciliation mutex")
+	}
+}
+
+func TestScopeSnapshotIsImmutableAfterSourceScopeRefresh(t *testing.T) {
+	root := t.TempDir()
+	original := filepath.Join(root, "original")
+	renamed := filepath.Join(root, "renamed")
+	if err := os.Mkdir(original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scope, err := activateScope(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(scope.close)
+	snapshot := snapshotFromScopes(map[string]*policyScope{scope.Configured: scope})
+	if err := os.Rename(original, renamed); err != nil {
+		t.Fatal(err)
+	}
+	if err := scope.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if !snapshotContains(snapshot, original) || snapshotContains(snapshot, renamed) {
+		t.Fatalf("snapshot changed after source scope refresh: %#v", snapshot)
+	}
+}
+
+func TestBlockedReconciliationDoesNotBlockScopeClassification(t *testing.T) {
+	oldRoot := t.TempDir()
+	newRoot := t.TempDir()
+	s := newReconciliationTestSource([]mountInfo{{ID: 1, MountPoint: "/"}, {ID: 2, MountPoint: oldRoot}, {ID: 3, MountPoint: newRoot}}, nil)
+	if err := s.SetWatchPaths([]string{oldRoot}); err != nil {
+		t.Fatal(err)
+	}
+	markStarted := make(chan struct{})
+	releaseMark := make(chan struct{})
+	s.mark = func(flags uint, _ uint64, path string) error {
+		if flags&uint(unix.FAN_MARK_ADD) != 0 && path == newRoot {
+			close(markStarted)
+			<-releaseMark
+		}
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.SetWatchPaths([]string{newRoot}) }()
+	select {
+	case <-markStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reconciliation did not reach the injected blocked mark")
+	}
+
+	classified := make(chan bool, 1)
+	go func() { classified <- s.pathInActiveScope(filepath.Join(oldRoot, "file")) }()
+	select {
+	case inScope := <-classified:
+		if !inScope {
+			t.Fatal("union snapshot did not retain the old scope during reconciliation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked reconciliation delayed scope classification")
+	}
+	close(releaseMark)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

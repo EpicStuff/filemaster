@@ -19,6 +19,12 @@ type Source interface {
 	SetWatchPaths(paths []string) error
 }
 
+// reconciliationSource is implemented by platform sources that need a
+// separate managed mount-reconciliation loop.
+type reconciliationSource interface {
+	RunReconciliation(context.Context) error
+}
+
 // logger is the small subset of mgr.Manager / mgr.WorkerCtx that sources
 // need for diagnostic logging. Keeping it narrow lets the test source
 // pass a no-op logger.

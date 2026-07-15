@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -22,11 +21,12 @@ type fanotifySource struct {
 	log logger
 	fd  int
 
-	marksMu  sync.Mutex
-	scopes   map[string]*policyScope
-	marks    map[int]mountedMark
-	markMask uint64
-	pending  bool
+	marksMu       sync.Mutex
+	scopes        map[string]*policyScope
+	retiredScopes []*policyScope
+	marks         map[int]mountedMark
+	markMask      uint64
+	pending       bool
 
 	activeScopes atomic.Pointer[scopeSnapshot]
 	diagnostics  MountDiagnostics
@@ -40,7 +40,7 @@ type fanotifySource struct {
 // InterceptReads config option (off by default because it fires per
 // read() syscall and can be very chatty).
 func resolveMarkMask() uint64 {
-	mask := uint64(unix.FAN_OPEN_PERM | unix.FAN_OPEN_EXEC_PERM | unix.FAN_ONDIR)
+	mask := uint64(unix.FAN_OPEN_PERM | unix.FAN_OPEN_EXEC_PERM)
 	if cfgOptionInterceptReads != nil && cfgOptionInterceptReads() {
 		mask |= uint64(unix.FAN_ACCESS_PERM)
 	}
@@ -111,7 +111,13 @@ func (s *fanotifySource) SetWatchPaths(paths []string) error {
 	if err != nil {
 		return err
 	}
+	previous := s.scopes
 	s.scopes = next
+	for configured, scope := range previous {
+		if next[configured] != scope {
+			s.retiredScopes = append(s.retiredScopes, scope)
+		}
+	}
 	s.pending = true
 	s.activeScopes.Store(unionScopes(s.activeScopes.Load(), snapshotFromScopes(next)))
 	s.reconcileLocked()
@@ -123,16 +129,11 @@ func (s *fanotifySource) SetWatchPaths(paths []string) error {
 func (s *fanotifySource) Run(ctx context.Context, h Handler) error {
 	buf := make([]byte, 4096)
 	pollFds := []unix.PollFd{{Fd: int32(s.fd), Events: unix.POLLIN}}
-	reconcileTicker := time.NewTicker(5 * time.Second)
-	defer reconcileTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-reconcileTicker.C:
-			s.reconcile()
-			continue
 		default:
 		}
 
@@ -172,6 +173,9 @@ func (s *fanotifySource) Run(ctx context.Context, h Handler) error {
 func (s *fanotifySource) Close() error {
 	s.marksMu.Lock()
 	for _, scope := range s.scopes {
+		scope.close()
+	}
+	for _, scope := range s.retiredScopes {
 		scope.close()
 	}
 	s.marksMu.Unlock()
