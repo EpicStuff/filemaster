@@ -16,7 +16,7 @@ import (
 
 func TestFanotifyResponseWriterClosesAfterCompleteResponse(t *testing.T) {
 	var order []string
-	writer := newFanotifyResponseWriter(41, nopLogger{})
+	writer := newFanotifyResponseWriter(41, nopLogger{}, nil)
 	writer.write = func(fd int, bytes []byte) (int, error) {
 		order = append(order, "write")
 		if fd != 41 {
@@ -46,7 +46,7 @@ func TestFanotifyResponseWriterClosesAfterCompleteResponse(t *testing.T) {
 }
 
 func TestFanotifyResponseWriterRetriesEINTRWithSameVerdict(t *testing.T) {
-	writer := newFanotifyResponseWriter(42, nopLogger{})
+	writer := newFanotifyResponseWriter(42, nopLogger{}, nil)
 	var responses []unix.FanotifyResponse
 	writer.write = func(_ int, bytes []byte) (int, error) {
 		responses = append(responses, *(*unix.FanotifyResponse)(unsafe.Pointer(&bytes[0])))
@@ -79,7 +79,7 @@ func TestFanotifyResponseWriterRetriesEINTRWithSameVerdict(t *testing.T) {
 }
 
 func TestFanotifyResponseWriterRejectsShortWrite(t *testing.T) {
-	writer := newFanotifyResponseWriter(43, nopLogger{})
+	writer := newFanotifyResponseWriter(43, nopLogger{}, nil)
 	writer.write = func(_ int, bytes []byte) (int, error) {
 		return len(bytes) - 1, nil
 	}
@@ -102,7 +102,7 @@ func TestFanotifyResponseWriterRejectsShortWrite(t *testing.T) {
 }
 
 func TestFanotifyResponseWriterUnrecoverableError(t *testing.T) {
-	writer := newFanotifyResponseWriter(44, nopLogger{})
+	writer := newFanotifyResponseWriter(44, nopLogger{}, nil)
 	writer.write = func(int, []byte) (int, error) {
 		return 0, unix.EIO
 	}
@@ -125,7 +125,7 @@ func TestFanotifyResponseWriterUnrecoverableError(t *testing.T) {
 }
 
 func TestFanotifyResponseWriterSerializesWrites(t *testing.T) {
-	writer := newFanotifyResponseWriter(45, nopLogger{})
+	writer := newFanotifyResponseWriter(45, nopLogger{}, nil)
 	var active atomic.Int32
 	var peak atomic.Int32
 	writer.write = func(_ int, bytes []byte) (int, error) {
@@ -183,7 +183,7 @@ func TestFatalResponseFailureStartsControlledDraining(t *testing.T) {
 	}
 	defer second.Close()
 
-	writer := newFanotifyResponseWriter(46, nopLogger{})
+	writer := newFanotifyResponseWriter(46, nopLogger{}, nil)
 	var writes atomic.Int32
 	var secondResponse unix.FanotifyResponse
 	writer.write = func(_ int, bytes []byte) (int, error) {
@@ -251,7 +251,7 @@ func TestRecoveryDenyFailureRetainsCurrentCoordinatorOwner(t *testing.T) {
 	}
 	defer file.Close()
 
-	writer := newFanotifyResponseWriter(47, nopLogger{})
+	writer := newFanotifyResponseWriter(47, nopLogger{}, nil)
 	var writes atomic.Int32
 	writer.write = func(int, []byte) (int, error) {
 		writes.Add(1)

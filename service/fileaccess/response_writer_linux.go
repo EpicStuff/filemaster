@@ -13,10 +13,11 @@ import (
 var ErrShortFanotifyResponse = errors.New("short fanotify response write")
 
 type fanotifyResponseWriter struct {
-	groupFD int
-	log     logger
-	write   func(int, []byte) (int, error)
-	close   func(int) error
+	groupFD  int
+	log      logger
+	write    func(int, []byte) (int, error)
+	close    func(int) error
+	onClosed func(int32)
 
 	writeMu  sync.Mutex
 	fatalMu  sync.Mutex
@@ -24,12 +25,13 @@ type fanotifyResponseWriter struct {
 	draining atomic.Bool
 }
 
-func newFanotifyResponseWriter(groupFD int, log logger) *fanotifyResponseWriter {
+func newFanotifyResponseWriter(groupFD int, log logger, onClosed func(int32)) *fanotifyResponseWriter {
 	return &fanotifyResponseWriter{
-		groupFD: groupFD,
-		log:     log,
-		write:   unix.Write,
-		close:   unix.Close,
+		groupFD:  groupFD,
+		log:      log,
+		write:    unix.Write,
+		close:    unix.Close,
+		onClosed: onClosed,
 	}
 }
 
@@ -67,6 +69,9 @@ func (writer *fanotifyResponseWriter) respond(eventFD int32, verdict Verdict) re
 			accepted: true,
 			err:      fmt.Errorf("close responded fanotify event fd %d: %w", eventFD, err),
 		}
+	}
+	if writer.onClosed != nil {
+		writer.onClosed(eventFD)
 	}
 	return responseResult{accepted: true}
 }

@@ -269,12 +269,17 @@ func snapshotContains(snapshot *scopeSnapshot, path string) bool {
 	return false
 }
 
-func TestPhaseOneMaskExcludesDirectoryEvents(t *testing.T) {
+func TestPhaseThreeMaskIncludesDirectoryEvents(t *testing.T) {
 	previous := cfgOptionInterceptReads
 	cfgOptionInterceptReads = nil
 	t.Cleanup(func() { cfgOptionInterceptReads = previous })
-	if mask := resolveMarkMask(); mask&uint64(unix.FAN_ONDIR) != 0 || mask&uint64(unix.FAN_EVENT_ON_CHILD) != 0 {
-		t.Fatalf("phase 1 mask = 0x%x, must not include directory event bits", mask)
+
+	mask := resolveMarkMask()
+	if mask&uint64(unix.FAN_ONDIR) == 0 {
+		t.Fatalf("phase 3 mask = 0x%x, must include FAN_ONDIR", mask)
+	}
+	if mask&uint64(unix.FAN_EVENT_ON_CHILD) != 0 {
+		t.Fatalf("phase 3 mount mask = 0x%x, must not include FAN_EVENT_ON_CHILD", mask)
 	}
 }
 
