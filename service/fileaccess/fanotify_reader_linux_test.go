@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -23,7 +24,7 @@ func newReaderTestSource(limit int64) *fanotifySource {
 		descriptorReleased: make(chan struct{}, 1),
 		failedEvents:       make(map[int32]PendingEvent),
 	}
-	source.responses = newFanotifyResponseWriter(99, nopLogger{}, source.releaseEventFD)
+	source.responses = newFanotifyResponseWriter(99, nopLogger{}, source.finishEventFDClose)
 	source.responses.write = func(_ int, bytes []byte) (int, error) {
 		return len(bytes), nil
 	}
@@ -35,8 +36,12 @@ func fanotifyEventBytes(events ...unix.FanotifyEventMetadata) []byte {
 	metadataSize := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
 	buf := make([]byte, 0, len(events)*metadataSize)
 	for _, event := range events {
-		event.Event_len = uint32(metadataSize)
-		event.Metadata_len = uint16(metadataSize)
+		if event.Event_len == 0 {
+			event.Event_len = uint32(metadataSize)
+		}
+		if event.Metadata_len == 0 {
+			event.Metadata_len = uint16(metadataSize)
+		}
 		bytes := unsafe.Slice((*byte)(unsafe.Pointer(&event)), metadataSize)
 		buf = append(buf, bytes...)
 	}
@@ -238,6 +243,234 @@ func TestQueueOverflowDetectedWithoutUsableDescriptor(t *testing.T) {
 	}
 }
 
+func TestMalformedVisiblePermissionEventsAreDeniedAndFatal(t *testing.T) {
+	metadataSize := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
+	tests := []struct {
+		name string
+		meta unix.FanotifyEventMetadata
+		want string
+	}{
+		{
+			name: "invalid event length",
+			meta: unix.FanotifyEventMetadata{
+				Event_len:    uint32(metadataSize - 1),
+				Metadata_len: uint16(metadataSize),
+				Vers:         unix.FANOTIFY_METADATA_VERSION,
+				Fd:           201,
+				Mask:         unix.FAN_OPEN_PERM,
+			},
+			want: "invalid fanotify event length",
+		},
+		{
+			name: "invalid metadata length",
+			meta: unix.FanotifyEventMetadata{
+				Event_len:    uint32(metadataSize),
+				Metadata_len: uint16(metadataSize - 1),
+				Vers:         unix.FANOTIFY_METADATA_VERSION,
+				Fd:           202,
+				Mask:         unix.FAN_OPEN_PERM,
+			},
+			want: "invalid fanotify metadata length",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			source := newReaderTestSource(1)
+			var response unix.FanotifyResponse
+			source.responses.write = func(_ int, bytes []byte) (int, error) {
+				response = *(*unix.FanotifyResponse)(unsafe.Pointer(&bytes[0]))
+				return len(bytes), nil
+			}
+			policyCalls := 0
+			err := source.handleEvents(context.Background(), PendingHandlerFunc(func(context.Context, PendingEvent) error {
+				policyCalls++
+				return nil
+			}), fanotifyEventBytes(tc.meta))
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("batch error = %v, want %q", err, tc.want)
+			}
+			if response.Fd != tc.meta.Fd || response.Response != unix.FAN_DENY {
+				t.Fatalf("malformed event response = %+v, want fd %d deny", response, tc.meta.Fd)
+			}
+			diagnostics := source.ReaderDiagnostics()
+			if diagnostics.OutstandingDescriptors != 0 || !diagnostics.Fatal || !diagnostics.Degraded {
+				t.Fatalf("malformed event diagnostics = %+v, want fatal without accounting leak", diagnostics)
+			}
+			if policyCalls != 0 || !source.responses.draining.Load() {
+				t.Fatalf("policy calls=%d draining=%v, want 0/true", policyCalls, source.responses.draining.Load())
+			}
+		})
+	}
+}
+
+func TestMalformedVisibleNonPermissionFDIsClosedAndReleased(t *testing.T) {
+	metadataSize := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
+	source := newReaderTestSource(1)
+	closeCalls := 0
+	source.responses.close = func(fd int) error {
+		closeCalls++
+		if fd != 203 {
+			t.Fatalf("close fd = %d, want 203", fd)
+		}
+		return nil
+	}
+
+	err := source.handleEvents(context.Background(), PendingHandlerFunc(func(context.Context, PendingEvent) error {
+		t.Fatal("malformed nonpermission event reached policy")
+		return nil
+	}), fanotifyEventBytes(unix.FanotifyEventMetadata{
+		Event_len:    uint32(metadataSize - 1),
+		Metadata_len: uint16(metadataSize),
+		Vers:         unix.FANOTIFY_METADATA_VERSION,
+		Fd:           203,
+	}))
+	if err == nil || closeCalls != 1 {
+		t.Fatalf("batch error=%v close calls=%d, want fatal error and one close", err, closeCalls)
+	}
+	if diagnostics := source.ReaderDiagnostics(); diagnostics.OutstandingDescriptors != 0 {
+		t.Fatalf("malformed nonpermission accounting = %+v, want released", diagnostics)
+	}
+}
+
+func TestOverflowDetectedBeforeVisibleFDHandling(t *testing.T) {
+	metadataSize := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
+	source := newReaderTestSource(1)
+	source.responses.write = func(_ int, bytes []byte) (int, error) {
+		diagnostics := source.ReaderDiagnostics()
+		if diagnostics.QueueOverflowCount != 1 || diagnostics.OutstandingDescriptors != 1 {
+			t.Fatalf("diagnostics during malformed overflow response = %+v, want overflow recorded before FD handling", diagnostics)
+		}
+		return len(bytes), nil
+	}
+
+	err := source.handleEvents(context.Background(), PendingHandlerFunc(func(context.Context, PendingEvent) error {
+		t.Fatal("malformed overflow event reached policy")
+		return nil
+	}), fanotifyEventBytes(unix.FanotifyEventMetadata{
+		Event_len:    uint32(metadataSize - 1),
+		Metadata_len: uint16(metadataSize),
+		Vers:         unix.FANOTIFY_METADATA_VERSION,
+		Fd:           204,
+		Mask:         unix.FAN_Q_OVERFLOW | unix.FAN_OPEN_PERM,
+	}))
+	if err == nil {
+		t.Fatal("malformed overflow batch returned nil error")
+	}
+	diagnostics := source.ReaderDiagnostics()
+	if diagnostics.QueueOverflowCount != 1 || diagnostics.OutstandingDescriptors != 0 {
+		t.Fatalf("final malformed overflow diagnostics = %+v", diagnostics)
+	}
+}
+
+func TestValidEarlierEventsAreResolvedBeforeMalformedBatchReturns(t *testing.T) {
+	metadataSize := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
+	source := newReaderTestSource(2)
+	var responses []unix.FanotifyResponse
+	source.responses.write = func(_ int, bytes []byte) (int, error) {
+		responses = append(responses, *(*unix.FanotifyResponse)(unsafe.Pointer(&bytes[0])))
+		return len(bytes), nil
+	}
+	policyCalls := 0
+	err := source.handleEvents(context.Background(), PendingHandlerFunc(func(context.Context, PendingEvent) error {
+		policyCalls++
+		return nil
+	}), fanotifyEventBytes(
+		unix.FanotifyEventMetadata{
+			Vers: unix.FANOTIFY_METADATA_VERSION,
+			Fd:   301,
+			Mask: unix.FAN_OPEN_PERM,
+		},
+		unix.FanotifyEventMetadata{
+			Event_len:    uint32(metadataSize - 1),
+			Metadata_len: uint16(metadataSize),
+			Vers:         unix.FANOTIFY_METADATA_VERSION,
+			Fd:           302,
+			Mask:         unix.FAN_OPEN_PERM,
+		},
+	))
+	if err == nil {
+		t.Fatal("valid-plus-malformed batch returned nil error")
+	}
+	if policyCalls != 0 {
+		t.Fatalf("policy calls = %d, want fatal batch to bypass policy", policyCalls)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("responses = %+v, want malformed and earlier event denied", responses)
+	}
+	responded := map[int32]uint32{}
+	for _, response := range responses {
+		responded[response.Fd] = response.Response
+	}
+	if responded[301] != unix.FAN_DENY || responded[302] != unix.FAN_DENY {
+		t.Fatalf("responses = %+v, want fds 301 and 302 denied", responses)
+	}
+	diagnostics := source.ReaderDiagnostics()
+	if diagnostics.OutstandingDescriptors != 0 || diagnostics.PeakOutstandingDescriptors != 2 || !diagnostics.Fatal {
+		t.Fatalf("valid-plus-malformed diagnostics = %+v", diagnostics)
+	}
+}
+
+func TestMetadataVersionMismatchTerminatesSourceBeforeLaterPolicy(t *testing.T) {
+	source := newReaderTestSource(4)
+	firstBatch := fanotifyEventBytes(
+		unix.FanotifyEventMetadata{
+			Vers: unix.FANOTIFY_METADATA_VERSION + 1,
+			Fd:   401,
+			Mask: unix.FAN_OPEN_PERM,
+		},
+		unix.FanotifyEventMetadata{
+			Vers: unix.FANOTIFY_METADATA_VERSION,
+			Fd:   402,
+			Mask: unix.FAN_OPEN_PERM,
+		},
+	)
+	secondBatch := fanotifyEventBytes(unix.FanotifyEventMetadata{
+		Vers: unix.FANOTIFY_METADATA_VERSION,
+		Fd:   403,
+		Mask: unix.FAN_OPEN_PERM,
+	})
+	readCalls := 0
+	source.poll = func([]unix.PollFd, int) (int, error) { return 1, nil }
+	source.read = func(_ int, bytes []byte) (int, error) {
+		readCalls++
+		batch := secondBatch
+		if readCalls == 1 {
+			batch = firstBatch
+		}
+		copy(bytes, batch)
+		return len(batch), nil
+	}
+	var responses []unix.FanotifyResponse
+	source.responses.write = func(_ int, bytes []byte) (int, error) {
+		responses = append(responses, *(*unix.FanotifyResponse)(unsafe.Pointer(&bytes[0])))
+		return len(bytes), nil
+	}
+	policyCalls := 0
+	err := source.Run(context.Background(), PendingHandlerFunc(func(context.Context, PendingEvent) error {
+		policyCalls++
+		return nil
+	}))
+
+	if err == nil || !strings.Contains(err.Error(), "metadata version mismatch") {
+		t.Fatalf("source error = %v, want metadata version mismatch", err)
+	}
+	if readCalls != 1 || policyCalls != 0 {
+		t.Fatalf("read calls=%d policy calls=%d, want source stop after first read without policy", readCalls, policyCalls)
+	}
+	if len(responses) != 1 || responses[0].Fd != 401 || responses[0].Response != unix.FAN_DENY {
+		t.Fatalf("fatal mismatch responses = %+v, want only mismatched fd 401 denied", responses)
+	}
+	diagnostics := source.ReaderDiagnostics()
+	if !diagnostics.Fatal || !diagnostics.Degraded || !strings.Contains(diagnostics.FatalError, "metadata version mismatch") {
+		t.Fatalf("metadata mismatch diagnostics = %+v", diagnostics)
+	}
+	if diagnostics.OutstandingDescriptors != 0 || !source.responses.draining.Load() {
+		t.Fatalf("metadata mismatch accounting/draining = %+v draining=%v", diagnostics, source.responses.draining.Load())
+	}
+}
+
 func TestUnresolvedPathDefaultsToDenyAndDegraded(t *testing.T) {
 	source := newReaderTestSource(8)
 	var response unix.FanotifyResponse
@@ -263,7 +496,7 @@ func TestUnresolvedPathDefaultsToDenyAndDegraded(t *testing.T) {
 	}
 }
 
-func TestDescriptorAccountingRetainedWhenEventCloseFails(t *testing.T) {
+func TestCloseErrorReleasesDescriptorHeadroomAndDegradesSource(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "close-failure")
 	if err := os.WriteFile(path, []byte("close"), 0o600); err != nil {
@@ -275,21 +508,40 @@ func TestDescriptorAccountingRetainedWhenEventCloseFails(t *testing.T) {
 	}
 	defer file.Close()
 
-	source := newReaderTestSource(8)
+	source := newReaderTestSource(1)
 	source.activeScopes.Store(&scopeSnapshot{Scopes: []scopeMatch{{Configured: dir, Canonical: dir}}})
-	source.responses.close = func(int) error { return unix.EIO }
-	source.handleEvents(context.Background(), PendingHandlerFunc(func(_ context.Context, pending PendingEvent) error {
+	closeCalls := 0
+	source.responses.close = func(int) error {
+		closeCalls++
+		return unix.EIO
+	}
+	err = source.handleEvents(context.Background(), PendingHandlerFunc(func(_ context.Context, pending PendingEvent) error {
 		return pending.Respond(VerdictAllow)
 	}), fanotifyEventBytes(unix.FanotifyEventMetadata{
 		Vers: unix.FANOTIFY_METADATA_VERSION,
 		Fd:   int32(file.Fd()),
 		Mask: unix.FAN_OPEN_PERM,
 	}))
-
-	if diagnostics := source.ReaderDiagnostics(); diagnostics.OutstandingDescriptors != 1 {
-		t.Fatalf("close-failed descriptor accounting = %+v, want outstanding 1", diagnostics)
+	if err != nil {
+		t.Fatalf("valid batch error = %v", err)
 	}
-	source.releaseEventFD(int32(file.Fd()))
+
+	diagnostics := source.ReaderDiagnostics()
+	if diagnostics.OutstandingDescriptors != 0 || diagnostics.DescriptorPressure || source.descriptorHeadroom() != 1 {
+		t.Fatalf("close-error descriptor accounting = %+v, headroom=%d; want released slot", diagnostics, source.descriptorHeadroom())
+	}
+	if !diagnostics.Degraded || diagnostics.Fatal || !strings.Contains(diagnostics.LastError, unix.EIO.Error()) {
+		t.Fatalf("close-error diagnostics = %+v, want nonfatal degraded EIO", diagnostics)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("close attempts = %d, want exactly 1", closeCalls)
+	}
+	source.failedMu.Lock()
+	failedEvents := len(source.failedEvents)
+	source.failedMu.Unlock()
+	if failedEvents != 0 {
+		t.Fatalf("accepted response retained %d failed owners", failedEvents)
+	}
 }
 
 func newFanotifyIntegrationSource(t *testing.T, paths []string) *fanotifySource {

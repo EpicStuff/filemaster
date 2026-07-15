@@ -45,6 +45,35 @@ func TestFanotifyResponseWriterClosesAfterCompleteResponse(t *testing.T) {
 	}
 }
 
+func TestFanotifyResponseWriterReleasesOnceAfterCloseError(t *testing.T) {
+	closeCalls := 0
+	releaseCalls := 0
+	writer := newFanotifyResponseWriter(48, nopLogger{}, func(fd int32, closeErr error) {
+		releaseCalls++
+		if fd != 18 || !errors.Is(closeErr, unix.EIO) {
+			t.Fatalf("close callback fd=%d err=%v, want fd 18 EIO", fd, closeErr)
+		}
+	})
+	writer.write = func(_ int, bytes []byte) (int, error) {
+		return len(bytes), nil
+	}
+	writer.close = func(fd int) error {
+		closeCalls++
+		if fd != 18 {
+			t.Fatalf("close fd = %d, want 18", fd)
+		}
+		return unix.EIO
+	}
+
+	result := writer.respond(18, VerdictDeny)
+	if !result.accepted || !errors.Is(result.err, unix.EIO) {
+		t.Fatalf("respond result = %+v, want accepted EIO close error", result)
+	}
+	if closeCalls != 1 || releaseCalls != 1 {
+		t.Fatalf("close calls=%d release calls=%d, want 1/1", closeCalls, releaseCalls)
+	}
+}
+
 func TestFanotifyResponseWriterRetriesEINTRWithSameVerdict(t *testing.T) {
 	writer := newFanotifyResponseWriter(42, nopLogger{}, nil)
 	var responses []unix.FanotifyResponse

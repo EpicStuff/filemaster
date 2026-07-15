@@ -52,8 +52,10 @@ type fanotifySource struct {
 	unresolvedPathDenies atomic.Uint64
 	descriptorPressure   atomic.Bool
 	readerDegraded       atomic.Bool
+	readerFatal          atomic.Bool
 	readerDiagMu         sync.Mutex
 	readerLastError      string
+	readerFatalError     string
 
 	responses    *fanotifyResponseWriter
 	failedMu     sync.Mutex
@@ -78,7 +80,9 @@ type ReaderDiagnostics struct {
 	QueueOverflowCount         uint64
 	UnresolvedPathDenyCount    uint64
 	Degraded                   bool
+	Fatal                      bool
 	LastError                  string
+	FatalError                 string
 }
 
 func calculateDescriptorLimit(softLimit, reserve uint64) int64 {
@@ -165,6 +169,74 @@ func (s *fanotifySource) releaseEventFD(fd int32) {
 	}
 }
 
+func (s *fanotifySource) finishEventFDClose(fd int32, closeErr error) {
+	// On Linux the descriptor number is released when close is attempted,
+	// even if later close processing reports an error. Retrying could close an
+	// unrelated descriptor that reused the same number.
+	s.releaseEventFD(fd)
+	if closeErr == nil {
+		return
+	}
+	err := fmt.Errorf("close fanotify event fd %d after close attempt: %w", fd, closeErr)
+	s.setReaderDegraded(err)
+	s.log.Error("fanotify event descriptor close failed after release", "fd", fd, "err", closeErr)
+}
+
+func (s *fanotifySource) closeAccountedEventFD(fd int32) error {
+	closeFD := unix.Close
+	if s.responses != nil && s.responses.close != nil {
+		closeFD = s.responses.close
+	}
+	closeErr := closeFD(int(fd))
+	s.finishEventFDClose(fd, closeErr)
+	if closeErr != nil {
+		return fmt.Errorf("close fanotify event fd %d: %w", fd, closeErr)
+	}
+	return nil
+}
+
+func (s *fanotifySource) enterReaderFatal(err error) {
+	first := s.readerFatal.CompareAndSwap(false, true)
+	s.readerDegraded.Store(true)
+	s.readerDiagMu.Lock()
+	s.readerLastError = err.Error()
+	if first {
+		s.readerFatalError = err.Error()
+	}
+	s.readerDiagMu.Unlock()
+	if s.responses != nil {
+		s.responses.enterFatal(err)
+	}
+	if first {
+		s.log.Error("fatal fanotify reader metadata failure; stopping source", "err", err)
+	}
+}
+
+func (s *fanotifySource) resolveAccountedEventForFatal(meta *unix.FanotifyEventMetadata) error {
+	if uint64(meta.Mask)&fanotifyPermissionEvents == 0 {
+		return s.closeAccountedEventFD(meta.Fd)
+	}
+	if s.responses == nil {
+		return errors.New("fanotify response writer unavailable while resolving fatal batch")
+	}
+
+	event := FileEvent{
+		PID: meta.Pid,
+		Op:  opFromMask(uint64(meta.Mask)),
+	}
+	pending := newPendingEvent(&event, func(verdict Verdict) responseResult {
+		return s.responses.respond(meta.Fd, verdict)
+	})
+	responseErr := pending.Respond(VerdictDeny)
+	if responseErr != nil {
+		s.log.Error("fatal fanotify batch event denial failed", "fd", meta.Fd, "err", responseErr)
+		if !pending.responseAccepted() {
+			s.retainFailedEvent(meta.Fd, pending)
+		}
+	}
+	return responseErr
+}
+
 func (s *fanotifySource) setReaderDegraded(err error) {
 	s.readerDegraded.Store(true)
 	s.readerDiagMu.Lock()
@@ -194,11 +266,10 @@ func (s *fanotifySource) recordUnresolvedPath(fd int32) {
 	s.log.Error("fanotify event path unresolved; denying", "fd", fd, "count", s.unresolvedPathDenies.Load())
 }
 
-// ReaderDiagnostics returns current descriptor accounting and reader failure
-// state without exposing mutable reconciliation state.
 func (s *fanotifySource) ReaderDiagnostics() ReaderDiagnostics {
 	s.readerDiagMu.Lock()
 	lastError := s.readerLastError
+	fatalError := s.readerFatalError
 	s.readerDiagMu.Unlock()
 	return ReaderDiagnostics{
 		DescriptorLimit:            s.descriptorLimit,
@@ -209,7 +280,9 @@ func (s *fanotifySource) ReaderDiagnostics() ReaderDiagnostics {
 		QueueOverflowCount:         s.queueOverflows.Load(),
 		UnresolvedPathDenyCount:    s.unresolvedPathDenies.Load(),
 		Degraded:                   s.readerDegraded.Load(),
+		Fatal:                      s.readerFatal.Load(),
 		LastError:                  lastError,
+		FatalError:                 fatalError,
 	}
 }
 
@@ -286,7 +359,7 @@ func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
 			return unix.FanotifyMark(fd, flags, mask, unix.AT_FDCWD, path)
 		},
 	}
-	s.responses = newFanotifyResponseWriter(fd, log, s.releaseEventFD)
+	s.responses = newFanotifyResponseWriter(fd, log, s.finishEventFDClose)
 
 	if err := s.SetWatchPaths(paths); err != nil {
 		_ = unix.Close(fd)
@@ -392,7 +465,9 @@ func (s *fanotifySource) Run(ctx context.Context, handler PendingHandler) error 
 			continue
 		}
 
-		s.handleEvents(ctx, handler, buf[:read])
+		if err := s.handleEvents(ctx, handler, buf[:read]); err != nil {
+			return err
+		}
 	}
 }
 
@@ -410,42 +485,70 @@ func (s *fanotifySource) Close() error {
 	return unix.Close(s.fd)
 }
 
-func (s *fanotifySource) handleEvents(ctx context.Context, handler PendingHandler, buf []byte) {
+func (s *fanotifySource) handleEvents(ctx context.Context, handler PendingHandler, buf []byte) error {
 	metaLen := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
 	events := make([]unix.FanotifyEventMetadata, 0, len(buf)/metaLen)
-	var parseErr error
-	for len(buf) >= metaLen {
-		// Copy the struct out of the read buffer before reslicing it.
-		meta := *(*unix.FanotifyEventMetadata)(unsafe.Pointer(&buf[0]))
-		evLen := int(meta.Event_len)
-		if evLen < metaLen || evLen > len(buf) {
-			parseErr = fmt.Errorf("invalid fanotify event length %d in %d-byte read remainder", evLen, len(buf))
-			break
-		}
+	var batchErr error
+	var invalidEvent *unix.FanotifyEventMetadata
 
-		// Overflow events use FAN_NOFD, so the mask must be inspected first.
+	for len(buf) >= metaLen {
+		// Copy the fixed metadata prefix out of the read buffer. The overflow
+		// bit and visible descriptor are handled before trusting any lengths.
+		meta := *(*unix.FanotifyEventMetadata)(unsafe.Pointer(&buf[0]))
 		if uint64(meta.Mask)&uint64(unix.FAN_Q_OVERFLOW) != 0 {
 			s.recordQueueOverflow()
 		}
 		if meta.Fd >= 0 {
 			s.accountEventFD(meta.Fd)
+		}
+
+		eventLen := int(meta.Event_len)
+		switch {
+		case eventLen < metaLen:
+			batchErr = fmt.Errorf("invalid fanotify event length %d: shorter than metadata length %d", eventLen, metaLen)
+		case eventLen > len(buf):
+			batchErr = fmt.Errorf("invalid fanotify event length %d in %d-byte read remainder", eventLen, len(buf))
+		case int(meta.Metadata_len) != metaLen:
+			batchErr = fmt.Errorf("invalid fanotify metadata length %d: want %d", meta.Metadata_len, metaLen)
+		case meta.Vers != unix.FANOTIFY_METADATA_VERSION:
+			batchErr = fmt.Errorf("fanotify metadata version mismatch: got %d, want %d", meta.Vers, unix.FANOTIFY_METADATA_VERSION)
+		}
+		if batchErr != nil {
+			if meta.Fd >= 0 {
+				invalidEvent = &meta
+			}
+			break
+		}
+
+		if meta.Fd >= 0 {
 			events = append(events, meta)
 		}
-		buf = buf[evLen:]
+		buf = buf[eventLen:]
 	}
-	if parseErr == nil && len(buf) != 0 {
-		parseErr = fmt.Errorf("trailing %d-byte partial fanotify metadata record", len(buf))
-	}
-	if parseErr != nil {
-		s.setReaderDegraded(parseErr)
-		s.log.Error("fanotify event batch malformed", "err", parseErr)
+	if batchErr == nil && len(buf) != 0 {
+		batchErr = fmt.Errorf("trailing %d-byte partial fanotify metadata record", len(buf))
 	}
 
-	// Every parseable descriptor from this read is accounted before any path
+	if batchErr != nil {
+		s.enterReaderFatal(batchErr)
+		var resolutionErr error
+		if invalidEvent != nil {
+			resolutionErr = s.resolveAccountedEventForFatal(invalidEvent)
+		}
+		// The fatal state makes every earlier valid event take the controlled
+		// deny path. Resolve all of them before returning the batch error.
+		for i := range events {
+			s.handleEvent(ctx, handler, &events[i])
+		}
+		return errors.Join(batchErr, resolutionErr)
+	}
+
+	// Every descriptor from this read is accounted before any path
 	// resolution, scope classification, response, or policy work starts.
 	for i := range events {
 		s.handleEvent(ctx, handler, &events[i])
 	}
+	return nil
 }
 
 func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler, meta *unix.FanotifyEventMetadata) {
@@ -454,33 +557,23 @@ func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler
 	}
 	s.accountEventFD(meta.Fd)
 
-	metadataValid := meta.Vers == unix.FANOTIFY_METADATA_VERSION
-	if !metadataValid {
+	if meta.Vers != unix.FANOTIFY_METADATA_VERSION {
 		err := fmt.Errorf("fanotify metadata version mismatch: got %d, want %d", meta.Vers, unix.FANOTIFY_METADATA_VERSION)
-		s.setReaderDegraded(err)
-		s.log.Error("fanotify metadata version mismatch", "got", meta.Vers, "want", unix.FANOTIFY_METADATA_VERSION)
+		s.enterReaderFatal(err)
+		_ = s.resolveAccountedEventForFatal(meta)
+		return
 	}
 
 	isPerm := uint64(meta.Mask)&fanotifyPermissionEvents != 0
 	if !isPerm {
-		if err := unix.Close(int(meta.Fd)); err != nil {
-			err = fmt.Errorf("close non-permission fanotify event fd %d: %w", meta.Fd, err)
-			s.setReaderDegraded(err)
-			s.log.Warn("close non-permission fanotify event fd", "fd", meta.Fd, "err", err)
-		} else {
-			s.releaseEventFD(meta.Fd)
-		}
+		_ = s.closeAccountedEventFD(meta.Fd)
 		return
 	}
 
 	// Exe resolution is the lookup chain's job (process module already
 	// does richer resolution -- cmdline, env, tags). Leaving Exe empty
 	// here keeps the fanotify hot path free of unrelated /proc reads.
-	path := ""
-	resolved := false
-	if metadataValid {
-		path, resolved = resolveEventPath(fmt.Sprintf("/proc/self/fd/%d", meta.Fd))
-	}
+	path, resolved := resolveEventPath(fmt.Sprintf("/proc/self/fd/%d", meta.Fd))
 	event := FileEvent{
 		PID:  meta.Pid,
 		Path: path,
@@ -493,8 +586,6 @@ func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler
 	var responseErr error
 	switch {
 	case s.responses.draining.Load():
-		responseErr = pending.Respond(VerdictDeny)
-	case !metadataValid:
 		responseErr = pending.Respond(VerdictDeny)
 	case !resolved:
 		s.recordUnresolvedPath(meta.Fd)

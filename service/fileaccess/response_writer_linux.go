@@ -13,11 +13,11 @@ import (
 var ErrShortFanotifyResponse = errors.New("short fanotify response write")
 
 type fanotifyResponseWriter struct {
-	groupFD  int
-	log      logger
-	write    func(int, []byte) (int, error)
-	close    func(int) error
-	onClosed func(int32)
+	groupFD    int
+	log        logger
+	write      func(int, []byte) (int, error)
+	close      func(int) error
+	afterClose func(int32, error)
 
 	writeMu  sync.Mutex
 	fatalMu  sync.Mutex
@@ -25,13 +25,13 @@ type fanotifyResponseWriter struct {
 	draining atomic.Bool
 }
 
-func newFanotifyResponseWriter(groupFD int, log logger, onClosed func(int32)) *fanotifyResponseWriter {
+func newFanotifyResponseWriter(groupFD int, log logger, afterClose func(int32, error)) *fanotifyResponseWriter {
 	return &fanotifyResponseWriter{
-		groupFD:  groupFD,
-		log:      log,
-		write:    unix.Write,
-		close:    unix.Close,
-		onClosed: onClosed,
+		groupFD:    groupFD,
+		log:        log,
+		write:      unix.Write,
+		close:      unix.Close,
+		afterClose: afterClose,
 	}
 }
 
@@ -64,14 +64,15 @@ func (writer *fanotifyResponseWriter) respond(eventFD int32, verdict Verdict) re
 		break
 	}
 
-	if err := writer.close(int(eventFD)); err != nil {
+	closeErr := writer.close(int(eventFD))
+	if writer.afterClose != nil {
+		writer.afterClose(eventFD, closeErr)
+	}
+	if closeErr != nil {
 		return responseResult{
 			accepted: true,
-			err:      fmt.Errorf("close responded fanotify event fd %d: %w", eventFD, err),
+			err:      fmt.Errorf("close responded fanotify event fd %d: %w", eventFD, closeErr),
 		}
-	}
-	if writer.onClosed != nil {
-		writer.onClosed(eventFD)
 	}
 	return responseResult{accepted: true}
 }
@@ -85,7 +86,7 @@ func (writer *fanotifyResponseWriter) enterFatal(err error) {
 	}
 	writer.fatalMu.Unlock()
 	if first {
-		writer.log.Error("fanotify response failure; entering controlled draining", "err", err)
+		writer.log.Error("fanotify enforcement failure; entering controlled draining", "err", err)
 	}
 }
 
