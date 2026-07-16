@@ -130,20 +130,27 @@ func (p *RulePersistence) BindStore(source, profileID string, store RuleStore) {
 	if store == nil {
 		return
 	}
-	p.mu.Lock()
-	key := source + "/" + profileID
-	binding := p.bindings[key]
-	if !sameRuleStore(binding.store, store) {
-		binding.store = store
-		binding.generation++
-		p.bindings[key] = binding
-	}
-	state := p.profiles[key]
 	var wake chan struct{}
-	if state != nil && len(state.dirty) != 0 {
-		wake = state.wake
+	bind := func() {
+		p.mu.Lock()
+		key := source + "/" + profileID
+		binding := p.bindings[key]
+		if !sameRuleStore(binding.store, store) {
+			binding.store = store
+			binding.generation++
+			p.bindings[key] = binding
+		}
+		state := p.profiles[key]
+		if state != nil && len(state.dirty) != 0 {
+			wake = state.wake
+		}
+		p.mu.Unlock()
 	}
-	p.mu.Unlock()
+	if synchronized, ok := store.(bindingSynchronizedRuleStore); ok {
+		synchronized.SynchronizeBinding(bind)
+	} else {
+		bind()
+	}
 	if wake != nil {
 		select {
 		case wake <- struct{}{}:
@@ -156,6 +163,10 @@ type ruleStoreIdentity interface{ ruleStoreIdentity() any }
 
 type guardedRuleStore interface {
 	AppendRuleIfCurrent(string, func() bool) error
+}
+
+type bindingSynchronizedRuleStore interface {
+	SynchronizeBinding(func())
 }
 
 func sameRuleStore(left, right RuleStore) bool {
@@ -304,16 +315,20 @@ func (state *dirtyRuleProfile) publishLocked(base *DecisionSnapshot) *DecisionSn
 		rules = append(rules, rule)
 	}
 	sort.Slice(rules, func(i, j int) bool { return rules[i].generation > rules[j].generation })
-	overlay := make(map[string]permanentRule, len(rules))
+	type overlayIdentity struct {
+		pattern string
+		exact   bool
+	}
+	overlay := make(map[overlayIdentity]permanentRule, len(rules))
 	for _, rule := range rules {
-		overlay[rule.pattern] = rule
+		overlay[overlayIdentity{pattern: rule.pattern, exact: true}] = rule
 	}
 	mergedRules := make([]PathRule, 0, len(base.Rules.Rules)+len(rules))
 	for _, rule := range rules {
 		mergedRules = append(mergedRules, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, Exact: true})
 	}
 	for _, rule := range base.Rules.Rules {
-		if _, covered := overlay[rule.Pattern]; !covered {
+		if _, covered := overlay[overlayIdentity{pattern: rule.Pattern, exact: rule.Exact}]; !covered {
 			mergedRules = append(mergedRules, rule)
 		}
 	}

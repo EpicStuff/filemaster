@@ -232,7 +232,9 @@ func (profile *Profile) Save() error {
 		return fmt.Errorf("profile: profile %s does not specify a source", profile.ID)
 	}
 
-	return profileDB.Put(profile)
+	return withProfileWriteLock(profile.Source, profile.ID, func() error {
+		return profileDB.Put(profile)
+	})
 }
 
 // delete deletes the profile from the database.
@@ -244,7 +246,9 @@ func (profile *Profile) delete() error {
 
 	// Delete from database.
 	profile.Meta().Delete()
-	err := profileDB.Put(profile)
+	err := withProfileWriteLock(profile.Source, profile.ID, func() error {
+		return profileDB.Put(profile)
+	})
 	if err != nil {
 		return err
 	}
@@ -308,25 +312,57 @@ func (profile *Profile) AddFileAccessRule(newEntry string) {
 // storage failure to its caller. Filemaster's durable rule worker uses this
 // instead of the fire-and-forget compatibility helper above.
 func (profile *Profile) PersistFileAccessRule(newEntry string) error {
-	return profile.persistFileAccessRule(newEntry, nil)
+	return PersistCurrentFileAccessRule(profile.Source, profile.ID, newEntry, nil)
 }
 
 // PersistFileAccessRuleIfCurrent aborts before storage when the caller's
 // profile authority changed while it prepared this update.
 func (profile *Profile) PersistFileAccessRuleIfCurrent(newEntry string, current func() bool) error {
-	return profile.persistFileAccessRule(newEntry, current)
+	return PersistCurrentFileAccessRule(profile.Source, profile.ID, newEntry, current)
+}
+
+// PersistCurrentFileAccessRule updates the current durable profile record, not
+// a profile object retained by an earlier lookup. The profile write lock also
+// serializes concurrent ordinary Profile.Save calls for this record.
+func PersistCurrentFileAccessRule(source ProfileSource, id, newEntry string, current func() bool) error {
+	if id == "" || source == "" {
+		return errors.New("profile: file access rule requires a scoped profile ID")
+	}
+	return withProfileWriteLock(source, id, func() error {
+		if current != nil && !current() {
+			return errors.New("profile: stale file access rule writer")
+		}
+		profile, err := getProfile(MakeScopedID(source, id))
+		if err != nil {
+			return err
+		}
+		profile.Lock()
+		list, ok := profile.configPerspective.GetAsStringArray(CfgOptionFileAccessRulesKey)
+		if !ok {
+			list = []string{newEntry}
+		} else {
+			list = coalesceFileAccessRuleEntries(list, newEntry)
+		}
+		config.PutValueIntoHierarchicalConfig(profile.Config, CfgOptionFileAccessRulesKey, list)
+		profile.dataParsed = false
+		err = profile.parseConfig()
+		profile.Unlock()
+		if err != nil {
+			return fmt.Errorf("profile: failed to parse file access rules: %w", err)
+		}
+		// Binding changes use the same record lock, so this validation and Put
+		// form one serialized current-record update.
+		if current != nil && !current() {
+			return errors.New("profile: stale file access rule writer")
+		}
+		return profileDB.Put(profile)
+	})
 }
 
 // addStringArrayEntry prepends an entry to a profile-stored StringArray
-// option, persisting + reparsing the profile. Duplicate entries with
-// the same first-token prefix as newEntry within the leading run are
-// dropped (cheap dedup that costs ~nothing for a list keyed by "+ "/"-").
+// option, persisting and reparsing the profile.
 func (profile *Profile) addStringArrayEntry(cfgKey, newEntry string) error {
 	return profile.persistStringArrayEntry(cfgKey, newEntry, nil)
-}
-
-func (profile *Profile) persistFileAccessRule(newEntry string, current func() bool) error {
-	return profile.persistStringArrayEntry(CfgOptionFileAccessRulesKey, newEntry, current)
 }
 
 func (profile *Profile) persistStringArrayEntry(cfgKey, newEntry string, current func() bool) error {

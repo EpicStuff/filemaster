@@ -112,7 +112,7 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	if defaultAction == profile.DefaultActionNotSet {
 		defaultAction = profile.DefaultActionAsk
 	}
-	store := &profileRuleStore{p: local, id: id}
+	store := &profileRuleStore{p: local, source: profile.ProfileSource(source), id: id}
 	l.bindPersistentStoreFor(source, id, store)
 	snapshot := l.snapshotFor(id, source, defaultAction, rawRules)
 	l.bindPersistentStore(snapshot, store)
@@ -220,8 +220,9 @@ func (l *processProfileLookup) RefreshProcessMapping(ctx context.Context, pid in
 }
 
 type profileRuleStore struct {
-	p  *profile.Profile
-	id string
+	p      *profile.Profile
+	source profile.ProfileSource
+	id     string
 }
 
 func (s *profileRuleStore) ID() string {
@@ -236,9 +237,13 @@ func (s *profileRuleStore) AppendRule(entry string) error {
 	if entry == "" {
 		return errors.New("empty rule entry")
 	}
-	return s.p.PersistFileAccessRule(entry)
+	return profile.PersistCurrentFileAccessRule(s.source, s.id, entry, nil)
 }
 
 func (s *profileRuleStore) AppendRuleIfCurrent(entry string, current func() bool) error {
-	return s.p.PersistFileAccessRuleIfCurrent(entry, current)
+	return profile.PersistCurrentFileAccessRule(s.source, s.id, entry, current)
+}
+
+func (s *profileRuleStore) SynchronizeBinding(fn func()) {
+	profile.SynchronizeFileAccessRuleStore(s.source, s.id, fn)
 }

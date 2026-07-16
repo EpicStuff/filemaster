@@ -404,3 +404,33 @@ func TestExactPermanentRulesRoundTripLiteralPaths(t *testing.T) {
 		t.Fatalf("legacy wildcard compatibility broken: %+v, %v", legacy, ok)
 	}
 }
+
+func TestPermanentRulesKeepExactAndLegacyPatternsDistinct(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	merged := persistence.Apply(persistenceSnapshot("- /tmp/a*b"), &persistenceTestStore{}, "/tmp/a*b", VerdictAllow)
+	if len(merged.Rules.Rules) != 2 {
+		t.Fatalf("merged rules = %#v, want exact and legacy rules", merged.Rules.Rules)
+	}
+	if exact := merged.Rules.Rules[0]; !exact.Exact || exact.Pattern != "/tmp/a*b" || exact.Verdict != VerdictAllow {
+		t.Fatalf("exact rule was not first: %+v", exact)
+	}
+	if legacy := merged.Rules.Rules[1]; legacy.Exact || legacy.Pattern != "/tmp/a*b" || legacy.Verdict != VerdictDeny {
+		t.Fatalf("legacy wildcard was incorrectly coalesced: %+v", legacy)
+	}
+	if verdict, ok := merged.Rules.Lookup("/tmp/a*b"); !ok || verdict != VerdictAllow {
+		t.Fatalf("literal exact rule did not win: %v, %v", verdict, ok)
+	}
+	if verdict, ok := merged.Rules.Lookup("/tmp/axxb"); !ok || verdict != VerdictDeny {
+		t.Fatalf("legacy wildcard no longer controlled neighboring path: %v, %v", verdict, ok)
+	}
+}
+
+func TestTaggedExactRulesAreCanonicalAbsolutePaths(t *testing.T) {
+	rule, ok := ParseRule(`+ @"/tmp/one/../two"`)
+	if !ok || !rule.Exact || rule.Pattern != "/tmp/two" {
+		t.Fatalf("tagged exact rule was not canonicalized: %+v, %v", rule, ok)
+	}
+	if _, ok := ParseRule(`+ @"relative/path"`); ok {
+		t.Fatal("tagged relative exact rule was accepted")
+	}
+}

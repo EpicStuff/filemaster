@@ -3,6 +3,7 @@ package fileaccess
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,7 +196,7 @@ func (h *ProfileHandler) SetSelfProfile(p *profile.Profile, pid int32) {
 	if defaultAction == profile.DefaultActionNotSet {
 		defaultAction = profile.DefaultActionAsk
 	}
-	store := &profileRuleStore{p: p, id: id}
+	store := &profileRuleStore{p: p, source: profile.ProfileSource(source), id: id}
 	if coordinator := h.coordinator(); coordinator != nil {
 		coordinator.RulePersistence().BindStore(source, id, store)
 	}
@@ -264,7 +265,7 @@ func (h *ProfileHandler) PublishProfileSnapshot(p *profile.Profile) {
 	if defaultAction == profile.DefaultActionNotSet {
 		defaultAction = profile.DefaultActionAsk
 	}
-	store := &profileRuleStore{p: p, id: id}
+	store := &profileRuleStore{p: p, source: profile.ProfileSource(source), id: id}
 	if coordinator := h.coordinator(); coordinator != nil {
 		coordinator.RulePersistence().BindStore(source, id, store)
 	}
@@ -486,6 +487,7 @@ func FormatRule(pattern string, v Verdict) string {
 // FormatExactRule stores a normalized literal path using a tagged Go-quoted
 // payload. Legacy +/- rules remain patterns; only this tagged form is exact.
 func FormatExactRule(path string, v Verdict) string {
+	path = filepath.Clean(path)
 	if v == VerdictAllow {
 		return "+ @" + strconv.Quote(path)
 	}
@@ -510,7 +512,8 @@ func ParseRule(entry string) (PathRule, bool) {
 	payload := entry[2:]
 	if strings.HasPrefix(payload, "@") {
 		path, err := strconv.Unquote(payload[1:])
-		if err != nil || path == "" {
+		path = filepath.Clean(path)
+		if err != nil || path == "." || !filepath.IsAbs(path) {
 			return PathRule{}, false
 		}
 		return PathRule{Pattern: path, Verdict: v, Exact: true}, true

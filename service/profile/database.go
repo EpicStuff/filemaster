@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/safing/portmaster/base/config"
 	"github.com/safing/portmaster/base/database"
@@ -24,6 +25,30 @@ var profileDB = database.NewInterface(&database.Options{
 	Local:    true,
 	Internal: true,
 })
+
+// profileWriteLocks serializes every durable write for one profile record.
+// File-access rules use this boundary to load the current record, merge their
+// one configuration entry, and write it without an obsolete profile object
+// racing a replacement save.
+var profileWriteLocks sync.Map // map[string]*sync.Mutex
+
+func withProfileWriteLock(source ProfileSource, id string, fn func() error) error {
+	key := MakeScopedID(source, id)
+	lock, _ := profileWriteLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := lock.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+	return fn()
+}
+
+// SynchronizeFileAccessRuleStore makes a profile-store binding change atomic
+// with a current-record file-access rule update. It deliberately runs no I/O.
+func SynchronizeFileAccessRuleStore(source ProfileSource, id string, fn func()) {
+	_ = withProfileWriteLock(source, id, func() error {
+		fn()
+		return nil
+	})
+}
 
 // MakeScopedID returns a scoped profile ID.
 func MakeScopedID(source ProfileSource, id string) string {
