@@ -54,8 +54,8 @@ func newCoordinatorHarness(prompter Prompter, limit int) *coordinatorHarness {
 			h.finished++
 			h.mu.Unlock()
 		}, true
-	}, func(_ context.Context, pending PendingEvent, verdict Verdict) {
-		_ = pending.Respond(verdict)
+	}, func(_ context.Context, pending PendingEvent, verdict Verdict) bool {
+		return pending.Respond(verdict) == nil
 	})
 	return h
 }

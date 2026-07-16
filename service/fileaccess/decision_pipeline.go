@@ -266,24 +266,34 @@ func (p *DecisionPipeline) decide(ctx context.Context, pending PendingEvent) {
 	}
 }
 
-func (p *DecisionPipeline) finishPromptEvent(ctx context.Context, pending PendingEvent, verdict Verdict) {
+func (p *DecisionPipeline) finishPromptEvent(ctx context.Context, pending PendingEvent, verdict Verdict) bool {
+	defer p.outstanding.Add(-1)
+
+	var event FileEvent
+	hasEvent := false
+	if source := pending.Event(); source != nil {
+		event = *source
+		hasEvent = true
+	}
 	err := pending.Respond(verdict)
 	accepted := err == nil
 	if owner, ok := pending.(*pendingEventOwner); ok {
 		accepted = owner.responseAccepted()
 	}
-	if accepted {
-		event := pending.Event()
-		if event != nil && verdict == VerdictAllow && event.Op == OpExec {
-			if handler, ok := p.handler.(processMappingRefresher); ok {
-				_ = handler.RefreshProcessMapping(ctx, event.PID)
+	if accepted && hasEvent {
+		func() {
+			defer func() { _ = recover() }()
+			if verdict == VerdictAllow && event.Op == OpExec {
+				if handler, ok := p.handler.(processMappingRefresher); ok {
+					_ = handler.RefreshProcessMapping(ctx, event.PID)
+				}
 			}
-		}
-		if event != nil && p.observe != nil {
-			p.observe(event, verdict)
-		}
+			if p.observe != nil {
+				p.observe(&event, verdict)
+			}
+		}()
 	}
-	p.outstanding.Add(-1)
+	return accepted
 }
 
 func (p *DecisionPipeline) acquireAsk(profileKey string) (func(), bool) {

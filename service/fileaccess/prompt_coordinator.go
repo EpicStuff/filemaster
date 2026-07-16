@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/safing/portmaster/service/profile"
@@ -53,22 +54,25 @@ type PromptCoordinator struct {
 	prompter Prompter
 	timeout  time.Duration
 	admit    func(string) (func(), bool)
-	finish   func(context.Context, PendingEvent, Verdict)
+	finish   func(context.Context, PendingEvent, Verdict) bool
 
-	mu       sync.Mutex
-	groups   map[promptKey]*promptGroup
-	profiles map[string]map[*promptGroup]struct{}
-	closing  bool
+	mu                    sync.Mutex
+	groups                map[promptKey]*promptGroup
+	profiles              map[string]map[*promptGroup]struct{}
+	latestProfileSnapshot map[string]*DecisionSnapshot
+	closing               bool
+	unidentifiedSequence  atomic.Uint64
 }
 
-func NewPromptCoordinator(prompter Prompter, timeout time.Duration, admit func(string) (func(), bool), finish func(context.Context, PendingEvent, Verdict)) *PromptCoordinator {
+func NewPromptCoordinator(prompter Prompter, timeout time.Duration, admit func(string) (func(), bool), finish func(context.Context, PendingEvent, Verdict) bool) *PromptCoordinator {
 	return &PromptCoordinator{
-		prompter: prompter,
-		timeout:  timeout,
-		admit:    admit,
-		finish:   finish,
-		groups:   make(map[promptKey]*promptGroup),
-		profiles: make(map[string]map[*promptGroup]struct{}),
+		prompter:              prompter,
+		timeout:               timeout,
+		admit:                 admit,
+		finish:                finish,
+		groups:                make(map[promptKey]*promptGroup),
+		profiles:              make(map[string]map[*promptGroup]struct{}),
+		latestProfileSnapshot: make(map[string]*DecisionSnapshot),
 	}
 }
 
@@ -83,13 +87,21 @@ func (c *PromptCoordinator) Admit(ctx context.Context, pending PendingEvent, sto
 	if err != nil {
 		return false, false, VerdictDeny, nil
 	}
-	key := newPromptKey(event, snapshot, path)
-
 	c.mu.Lock()
 	if c.closing {
 		c.mu.Unlock()
 		_ = pending.Respond(VerdictDeny)
 		return true, false, VerdictDeny, nil
+	}
+	snapshot = c.latestSnapshotLocked(snapshot)
+	if verdict, ask := decisionFromSnapshot(snapshot, path); !ask {
+		c.mu.Unlock()
+		if c.finish != nil {
+			c.finish(context.Background(), pending, verdict)
+		} else {
+			_ = pending.Respond(verdict)
+		}
+		return true, true, VerdictDeny, nil
 	}
 	c.mu.Unlock()
 
@@ -111,6 +123,18 @@ func (c *PromptCoordinator) Admit(ctx context.Context, pending PendingEvent, sto
 		_ = owner.Respond(VerdictDeny)
 		return true, false, VerdictDeny, nil
 	}
+	snapshot = c.latestSnapshotLocked(snapshot)
+	if verdict, ask := decisionFromSnapshot(snapshot, path); !ask {
+		c.mu.Unlock()
+		if c.finish != nil {
+			c.finish(context.Background(), owner, verdict)
+		} else {
+			_ = owner.Respond(verdict)
+		}
+		release()
+		return true, true, VerdictDeny, nil
+	}
+	key := c.newPromptKey(event, snapshot, path)
 	if group := c.groups[key]; group != nil {
 		group.entries = append(group.entries, promptEntry{pending: owner, release: release})
 		c.mu.Unlock()
@@ -162,13 +186,13 @@ func (c *PromptCoordinator) waitForPrompt(ctx context.Context, group *promptGrou
 	case ActionDeny:
 		c.resolve(group, VerdictDeny)
 	case ActionAllowAlways:
-		c.resolve(group, VerdictAllow)
-		if group.store != nil {
+		won, accepted := c.resolve(group, VerdictAllow)
+		if won && accepted && group.store != nil {
 			_ = group.store.AppendRule(FormatRule(group.key.path, VerdictAllow))
 		}
 	case ActionDenyAlways:
-		c.resolve(group, VerdictDeny)
-		if group.store != nil {
+		won, accepted := c.resolve(group, VerdictDeny)
+		if won && accepted && group.store != nil {
 			_ = group.store.AppendRule(FormatRule(group.key.path, VerdictDeny))
 		}
 	default:
@@ -184,6 +208,11 @@ func (c *PromptCoordinator) SnapshotReplaced(snapshot *DecisionSnapshot) {
 	}
 	profileKey := snapshot.Source + "/" + snapshot.ProfileID
 	c.mu.Lock()
+	if current := c.latestProfileSnapshot[profileKey]; current != nil && current.Revision >= snapshot.Revision {
+		c.mu.Unlock()
+		return
+	}
+	c.latestProfileSnapshot[profileKey] = snapshot
 	groups := make([]*promptGroup, 0, len(c.profiles[profileKey]))
 	for group := range c.profiles[profileKey] {
 		groups = append(groups, group)
@@ -222,11 +251,11 @@ func (c *PromptCoordinator) Close() {
 	}
 }
 
-func (c *PromptCoordinator) resolve(group *promptGroup, verdict Verdict) {
+func (c *PromptCoordinator) resolve(group *promptGroup, verdict Verdict) (won, accepted bool) {
 	c.mu.Lock()
 	if c.groups[group.key] != group {
 		c.mu.Unlock()
-		return
+		return false, false
 	}
 	delete(c.groups, group.key)
 	delete(c.profiles[group.key.profile], group)
@@ -237,9 +266,20 @@ func (c *PromptCoordinator) resolve(group *promptGroup, verdict Verdict) {
 	c.mu.Unlock()
 	group.cancel()
 	for _, entry := range entries {
-		c.finish(context.Background(), entry.pending, verdict)
-		entry.release()
+		func() {
+			defer func() { _ = recover() }()
+			if c.finish != nil && c.finish(context.Background(), entry.pending, verdict) {
+				accepted = true
+			}
+		}()
+		func() {
+			defer func() { _ = recover() }()
+			if entry.release != nil {
+				entry.release()
+			}
+		}()
 	}
+	return true, accepted
 }
 
 func decisionFromSnapshot(snapshot *DecisionSnapshot, path string) (Verdict, bool) {
@@ -256,13 +296,22 @@ func decisionFromSnapshot(snapshot *DecisionSnapshot, path string) (Verdict, boo
 	}
 }
 
-func newPromptKey(event *FileEvent, snapshot *DecisionSnapshot, path string) promptKey {
+func (c *PromptCoordinator) latestSnapshotLocked(snapshot *DecisionSnapshot) *DecisionSnapshot {
+	profileKey := snapshot.Source + "/" + snapshot.ProfileID
+	if current := c.latestProfileSnapshot[profileKey]; current != nil {
+		return current
+	}
+	c.latestProfileSnapshot[profileKey] = snapshot
+	return snapshot
+}
+
+func (c *PromptCoordinator) newPromptKey(event *FileEvent, snapshot *DecisionSnapshot, path string) promptKey {
 	key := promptKey{profile: snapshot.Source + "/" + snapshot.ProfileID, op: event.Op, path: path}
 	if snapshot.ProfileID == "" {
 		key.profile = ""
 		key.process = event.ProcessIdentity
 		if key.process == "" {
-			key.process = event.Exe + ":" + strconv.FormatInt(int64(event.PID), 10)
+			key.process = "unidentified:" + strconv.FormatUint(c.unidentifiedSequence.Add(1), 10)
 		}
 	}
 	return key

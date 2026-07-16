@@ -82,10 +82,9 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 		return LookupResult{Path: ""}, ErrNoProfile
 	}
 
-	res := LookupResult{
-		Path:            p.Path,
-		ProcessIdentity: fmt.Sprintf("%d-%d", p.Pid, p.CreatedAt),
-		DefaultAction:   profile.DefaultActionAsk,
+	res := LookupResult{Path: p.Path, DefaultAction: profile.DefaultActionAsk}
+	if p.CreatedAt != 0 {
+		res.ProcessIdentity = fmt.Sprintf("%d-%d", p.Pid, p.CreatedAt)
 	}
 
 	lp := p.Profile()
@@ -134,11 +133,11 @@ func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint
 	entry := value.(*ruleCacheEntry)
 
 	entry.mu.Lock()
-	defer entry.mu.Unlock()
 	if snapshot := entry.snapshot.Load(); snapshot != nil &&
 		snapshot.Source == source &&
 		snapshot.DefaultAction == defaultAction &&
 		sameRuleEntries(entry.rawRules, raw) {
+		entry.mu.Unlock()
 		return snapshot
 	}
 
@@ -146,6 +145,7 @@ func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint
 	entry.revision++
 	snapshot := newDecisionSnapshot(id, source, defaultAction, entry.rawRules, entry.revision)
 	entry.snapshot.Store(snapshot)
+	entry.mu.Unlock()
 	l.observerMu.RLock()
 	observer := l.observer
 	l.observerMu.RUnlock()
