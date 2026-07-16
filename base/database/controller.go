@@ -18,6 +18,11 @@ type Controller struct {
 	storage      storage.Interface
 	shadowDelete bool
 
+	// recordWriteLocks cover validation hooks and the storage commit together.
+	// Every Interface reaches Controller.Put, so database-specific optimistic
+	// concurrency hooks can compare a durable record and commit atomically.
+	recordWriteLocks sync.Map // map[string]*sync.Mutex
+
 	hooksLock sync.RWMutex
 	hooks     []*RegisteredHook
 
@@ -126,6 +131,10 @@ func (c *Controller) Put(r record.Record) (err error) {
 	if c.ReadOnly() {
 		return ErrReadOnly
 	}
+	lock, _ := c.recordWriteLocks.LoadOrStore(r.DatabaseKey(), &sync.Mutex{})
+	mu := lock.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
 
 	r, err = c.runPrePutHooks(r)
 	if err != nil {
@@ -168,13 +177,22 @@ func (c *Controller) PutMany() (chan<- record.Record, <-chan error) {
 		return make(chan record.Record), errs
 	}
 
-	if batcher, ok := c.storage.(storage.Batcher); ok {
-		return batcher.PutMany(c.shadowDelete)
-	}
-
+	// Do not delegate directly to a storage batcher: it would bypass both
+	// Controller.Put hooks and its per-record transaction lock. A single batch
+	// worker preserves the public streaming API while every record follows the
+	// same validation and commit path as a normal Put.
+	batch := make(chan record.Record)
 	errs := make(chan error, 1)
-	errs <- ErrNotImplemented
-	return make(chan record.Record), errs
+	go func() {
+		defer close(errs)
+		for r := range batch {
+			if err := c.Put(r); err != nil {
+				errs <- err
+				return
+			}
+		}
+	}()
+	return batch, errs
 }
 
 // Query executes the given query on the database.

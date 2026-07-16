@@ -46,6 +46,10 @@ type Profile struct { //nolint:maligned // not worth the effort
 	ID string // constant
 	// Source describes the source of the profile.
 	Source ProfileSource // constant
+	// Revision is the durable optimistic-concurrency token. It is incremented
+	// only by the profile database hook while Controller.Put holds its record
+	// transaction lock.
+	Revision uint64
 	// Name is a human readable name of the profile. It
 	// defaults to the basename of the application.
 	Name string
@@ -232,9 +236,7 @@ func (profile *Profile) Save() error {
 		return fmt.Errorf("profile: profile %s does not specify a source", profile.ID)
 	}
 
-	return withProfileWriteLock(profile.Source, profile.ID, func() error {
-		return profileDB.Put(profile)
-	})
+	return profileDB.Put(profile)
 }
 
 // delete deletes the profile from the database.
@@ -246,9 +248,7 @@ func (profile *Profile) delete() error {
 
 	// Delete from database.
 	profile.Meta().Delete()
-	err := withProfileWriteLock(profile.Source, profile.ID, func() error {
-		return profileDB.Put(profile)
-	})
+	err := profileDB.Put(profile)
 	if err != nil {
 		return err
 	}
@@ -328,35 +328,31 @@ func PersistCurrentFileAccessRule(source ProfileSource, id, newEntry string, cur
 	if id == "" || source == "" {
 		return errors.New("profile: file access rule requires a scoped profile ID")
 	}
-	return withProfileWriteLock(source, id, func() error {
-		if current != nil && !current() {
-			return errors.New("profile: stale file access rule writer")
-		}
-		profile, err := getProfile(MakeScopedID(source, id))
-		if err != nil {
-			return err
-		}
-		profile.Lock()
-		list, ok := profile.configPerspective.GetAsStringArray(CfgOptionFileAccessRulesKey)
-		if !ok {
-			list = []string{newEntry}
-		} else {
-			list = coalesceFileAccessRuleEntries(list, newEntry)
-		}
-		config.PutValueIntoHierarchicalConfig(profile.Config, CfgOptionFileAccessRulesKey, list)
-		profile.dataParsed = false
-		err = profile.parseConfig()
-		profile.Unlock()
-		if err != nil {
-			return fmt.Errorf("profile: failed to parse file access rules: %w", err)
-		}
-		// Binding changes use the same record lock, so this validation and Put
-		// form one serialized current-record update.
-		if current != nil && !current() {
-			return errors.New("profile: stale file access rule writer")
-		}
-		return profileDB.Put(profile)
-	})
+	if current != nil && !current() {
+		return errors.New("profile: stale file access rule writer")
+	}
+	profile, err := getProfile(MakeScopedID(source, id))
+	if err != nil {
+		return err
+	}
+	profile.Lock()
+	list, ok := profile.configPerspective.GetAsStringArray(CfgOptionFileAccessRulesKey)
+	if !ok {
+		list = []string{newEntry}
+	} else {
+		list = coalesceFileAccessRuleEntries(list, newEntry)
+	}
+	config.PutValueIntoHierarchicalConfig(profile.Config, CfgOptionFileAccessRulesKey, list)
+	profile.dataParsed = false
+	err = profile.parseConfig()
+	profile.Unlock()
+	if err != nil {
+		return fmt.Errorf("profile: failed to parse file access rules: %w", err)
+	}
+	if current != nil && !current() {
+		return errors.New("profile: stale file access rule writer")
+	}
+	return profileDB.Put(profile)
 }
 
 // addStringArrayEntry prepends an entry to a profile-stored StringArray

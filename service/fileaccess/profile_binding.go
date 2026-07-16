@@ -243,7 +243,3 @@ func (s *profileRuleStore) AppendRule(entry string) error {
 func (s *profileRuleStore) AppendRuleIfCurrent(entry string, current func() bool) error {
 	return profile.PersistCurrentFileAccessRule(s.source, s.id, entry, current)
 }
-
-func (s *profileRuleStore) SynchronizeBinding(fn func()) {
-	profile.SynchronizeFileAccessRuleStore(s.source, s.id, fn)
-}

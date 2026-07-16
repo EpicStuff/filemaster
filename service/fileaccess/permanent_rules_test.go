@@ -434,3 +434,37 @@ func TestTaggedExactRulesAreCanonicalAbsolutePaths(t *testing.T) {
 		t.Fatal("tagged relative exact rule was accepted")
 	}
 }
+
+func TestPermanentRulesRevisionConflictStaysDirtyUntilRetry(t *testing.T) {
+	wait := make(chan time.Time, 1)
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{
+		MinBackoff: time.Millisecond,
+		MaxBackoff: time.Millisecond,
+		After:      func(time.Duration) <-chan time.Time { return wait },
+	})
+	store := &persistenceTestStore{errs: []error{profile.ErrProfileRevisionConflict}}
+	persistence.Apply(persistenceSnapshot(), store, "/tmp/conflict", VerdictAllow)
+	waitRule(t, func() bool {
+		diagnostics := persistence.Diagnostics()["local/profile"]
+		return diagnostics.DirtyCount == 1 && errors.Is(diagnostics.LastError, profile.ErrProfileRevisionConflict)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := persistence.Flush(ctx); err == nil {
+		t.Fatal("flush succeeded while the revision-conflicted rule was dirty")
+	}
+	wait <- time.Now()
+	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
+}
+
+func TestPermanentRulesCurrentRevisionCanRemoveAppliedRule(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	store := &persistenceTestStore{}
+	base := persistenceSnapshot()
+	persistence.Apply(base, store, "/tmp/remove", VerdictDeny)
+	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
+	removed := persistence.Merge(newDecisionSnapshot("profile", "local", 2, nil, 2))
+	if verdict, ok := removed.Rules.Lookup("/tmp/remove"); ok || verdict != VerdictAllow {
+		t.Fatalf("removed durable rule was silently restored: %v, %v", verdict, ok)
+	}
+}

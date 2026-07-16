@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/safing/portmaster/base/config"
 	"github.com/safing/portmaster/base/database"
@@ -26,29 +25,9 @@ var profileDB = database.NewInterface(&database.Options{
 	Internal: true,
 })
 
-// profileWriteLocks serializes every durable write for one profile record.
-// File-access rules use this boundary to load the current record, merge their
-// one configuration entry, and write it without an obsolete profile object
-// racing a replacement save.
-var profileWriteLocks sync.Map // map[string]*sync.Mutex
-
-func withProfileWriteLock(source ProfileSource, id string, fn func() error) error {
-	key := MakeScopedID(source, id)
-	lock, _ := profileWriteLocks.LoadOrStore(key, &sync.Mutex{})
-	mu := lock.(*sync.Mutex)
-	mu.Lock()
-	defer mu.Unlock()
-	return fn()
-}
-
-// SynchronizeFileAccessRuleStore makes a profile-store binding change atomic
-// with a current-record file-access rule update. It deliberately runs no I/O.
-func SynchronizeFileAccessRuleStore(source ProfileSource, id string, fn func()) {
-	_ = withProfileWriteLock(source, id, func() error {
-		fn()
-		return nil
-	})
-}
+// ErrProfileRevisionConflict means a profile write was based on a stale
+// durable record. Callers must reload before applying their change again.
+var ErrProfileRevisionConflict = errors.New("profile revision conflict")
 
 // MakeScopedID returns a scoped profile ID.
 func MakeScopedID(source ProfileSource, id string) string {
@@ -169,6 +148,24 @@ func (h *databaseHook) PrePut(r record.Record) (record.Record, error) {
 	profile, err := EnsureProfile(r)
 	if err != nil {
 		return nil, err
+	}
+	// Controller.Put holds this record's transaction lock while hooks run and
+	// storage commits. Compare against the durable profile revision here so all
+	// interfaces, including generic database/API writes, reject stale objects.
+	current, currentErr := getProfile(MakeScopedID(profile.Source, profile.ID))
+	if currentErr != nil {
+		if !errors.Is(currentErr, database.ErrNotFound) {
+			return nil, currentErr
+		}
+		if profile.Revision != 0 {
+			return nil, fmt.Errorf("%w: profile %s expected revision %d, record is absent", ErrProfileRevisionConflict, profile.ScopedID(), profile.Revision)
+		}
+		profile.Revision = 1
+	} else {
+		if profile.Revision != current.Revision {
+			return nil, fmt.Errorf("%w: profile %s expected revision %d, current revision %d", ErrProfileRevisionConflict, profile.ScopedID(), profile.Revision, current.Revision)
+		}
+		profile.Revision = current.Revision + 1
 	}
 
 	// clean config

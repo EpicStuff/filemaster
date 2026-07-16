@@ -131,26 +131,19 @@ func (p *RulePersistence) BindStore(source, profileID string, store RuleStore) {
 		return
 	}
 	var wake chan struct{}
-	bind := func() {
-		p.mu.Lock()
-		key := source + "/" + profileID
-		binding := p.bindings[key]
-		if !sameRuleStore(binding.store, store) {
-			binding.store = store
-			binding.generation++
-			p.bindings[key] = binding
-		}
-		state := p.profiles[key]
-		if state != nil && len(state.dirty) != 0 {
-			wake = state.wake
-		}
-		p.mu.Unlock()
+	p.mu.Lock()
+	key := source + "/" + profileID
+	binding := p.bindings[key]
+	if !sameRuleStore(binding.store, store) {
+		binding.store = store
+		binding.generation++
+		p.bindings[key] = binding
 	}
-	if synchronized, ok := store.(bindingSynchronizedRuleStore); ok {
-		synchronized.SynchronizeBinding(bind)
-	} else {
-		bind()
+	state := p.profiles[key]
+	if state != nil && len(state.dirty) != 0 {
+		wake = state.wake
 	}
+	p.mu.Unlock()
 	if wake != nil {
 		select {
 		case wake <- struct{}{}:
@@ -163,10 +156,6 @@ type ruleStoreIdentity interface{ ruleStoreIdentity() any }
 
 type guardedRuleStore interface {
 	AppendRuleIfCurrent(string, func() bool) error
-}
-
-type bindingSynchronizedRuleStore interface {
-	SynchronizeBinding(func())
 }
 
 func sameRuleStore(left, right RuleStore) bool {
@@ -252,9 +241,19 @@ func (p *RulePersistence) Merge(snapshot *DecisionSnapshot) *DecisionSnapshot {
 		p.mu.Unlock()
 		return snapshot
 	}
+	previousBase := state.base
 	base := state.baseForLocked(snapshot)
+	advancedBase := previousBase != nil && base != previousBase && base.Revision > previousBase.Revision
 	for pattern, rule := range state.applied {
 		if durableExactRuleAtPrecedence(base, rule) {
+			delete(state.applied, pattern)
+			state.policyEpoch++
+			continue
+		}
+		// A newer durable profile revision deliberately removed or replaced an
+		// already-persisted Always rule. Applied overlays are confirmations, not
+		// permanent policy, so do not silently restore the old rule.
+		if advancedBase {
 			delete(state.applied, pattern)
 			state.policyEpoch++
 		}
