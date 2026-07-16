@@ -64,6 +64,8 @@ type processProfileLookup struct {
 
 	observerMu sync.RWMutex
 	observer   func(*DecisionSnapshot)
+	overlayMu  sync.RWMutex
+	overlay    *RulePersistence
 }
 
 type ruleCacheEntry struct {
@@ -138,7 +140,7 @@ func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint
 		snapshot.DefaultAction == defaultAction &&
 		sameRuleEntries(entry.rawRules, raw) {
 		entry.mu.Unlock()
-		return snapshot
+		return l.mergePersistentRules(snapshot)
 	}
 
 	entry.rawRules = append(entry.rawRules[:0], raw...)
@@ -146,6 +148,7 @@ func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint
 	snapshot := newDecisionSnapshot(id, source, defaultAction, entry.rawRules, entry.revision)
 	entry.snapshot.Store(snapshot)
 	entry.mu.Unlock()
+	snapshot = l.mergePersistentRules(snapshot)
 	l.observerMu.RLock()
 	observer := l.observer
 	l.observerMu.RUnlock()
@@ -159,6 +162,22 @@ func (l *processProfileLookup) setSnapshotObserver(observer func(*DecisionSnapsh
 	l.observerMu.Lock()
 	l.observer = observer
 	l.observerMu.Unlock()
+}
+
+func (l *processProfileLookup) setRulePersistence(overlay *RulePersistence) {
+	l.overlayMu.Lock()
+	l.overlay = overlay
+	l.overlayMu.Unlock()
+}
+
+func (l *processProfileLookup) mergePersistentRules(snapshot *DecisionSnapshot) *DecisionSnapshot {
+	l.overlayMu.RLock()
+	overlay := l.overlay
+	l.overlayMu.RUnlock()
+	if overlay == nil {
+		return snapshot
+	}
+	return overlay.Merge(snapshot)
 }
 
 func sameRuleEntries(left, right []string) bool {
@@ -192,6 +211,5 @@ func (s *profileRuleStore) AppendRule(entry string) error {
 	if entry == "" {
 		return errors.New("empty rule entry")
 	}
-	s.p.AddFileAccessRule(entry)
-	return nil
+	return s.p.PersistFileAccessRule(entry)
 }

@@ -155,6 +155,9 @@ func (h *ProfileHandler) setPromptCoordinator(coordinator *PromptCoordinator) {
 	h.promptCoordinatorMu.Lock()
 	h.promptCoordinator = coordinator
 	h.promptCoordinatorMu.Unlock()
+	if overlay, ok := h.lookup.(interface{ setRulePersistence(*RulePersistence) }); ok && coordinator != nil {
+		overlay.setRulePersistence(coordinator.RulePersistence())
+	}
 }
 
 func (h *ProfileHandler) coordinator() *PromptCoordinator {
@@ -192,6 +195,9 @@ func (h *ProfileHandler) SetSelfProfile(p *profile.Profile, pid int32) {
 		defaultAction = profile.DefaultActionAsk
 	}
 	snapshot := newDecisionSnapshot(id, source, defaultAction, rawRules, h.selfRevision.Add(1))
+	if coordinator := h.coordinator(); coordinator != nil {
+		snapshot = coordinator.RulePersistence().Merge(snapshot)
+	}
 	result := LookupResult{
 		Path:              path,
 		Store:             &profileRuleStore{p: p, id: id},
@@ -220,6 +226,15 @@ func (h *ProfileHandler) publishSnapshot(snapshot *DecisionSnapshot) {
 	if snapshot == nil {
 		return
 	}
+	// The Filemaster self path is intentionally in-memory. Keep its stored
+	// snapshot in lockstep with an Always overlay without doing process lookup.
+	h.selfMu.Lock()
+	if current := h.selfProfile.Snapshot; current != nil && current.ProfileID == snapshot.ProfileID && current.Source == snapshot.Source {
+		h.selfProfile.Snapshot = snapshot
+		h.selfProfile.ParsedRules = snapshot.Rules
+		h.selfProfile.DefaultAction = snapshot.DefaultAction
+	}
+	h.selfMu.Unlock()
 	if coordinator := h.coordinator(); coordinator != nil {
 		coordinator.SnapshotReplaced(snapshot)
 	}

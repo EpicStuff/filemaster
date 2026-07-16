@@ -62,10 +62,11 @@ type PromptCoordinator struct {
 	latestProfileSnapshot map[string]*DecisionSnapshot
 	closing               bool
 	unidentifiedSequence  atomic.Uint64
+	persistence           *RulePersistence
 }
 
 func NewPromptCoordinator(prompter Prompter, timeout time.Duration, admit func(string) (func(), bool), finish func(context.Context, PendingEvent, Verdict) bool) *PromptCoordinator {
-	return &PromptCoordinator{
+	coordinator := &PromptCoordinator{
 		prompter:              prompter,
 		timeout:               timeout,
 		admit:                 admit,
@@ -74,6 +75,23 @@ func NewPromptCoordinator(prompter Prompter, timeout time.Duration, admit func(s
 		profiles:              make(map[string]map[*promptGroup]struct{}),
 		latestProfileSnapshot: make(map[string]*DecisionSnapshot),
 	}
+	coordinator.persistence = NewRulePersistence(coordinator.SnapshotReplaced, RulePersistenceOptions{})
+	return coordinator
+}
+
+// RulePersistence exposes the bounded durable-rule flush interface needed by
+// the later shared shutdown phase without activating that shutdown behavior.
+func (c *PromptCoordinator) RulePersistence() *RulePersistence {
+	return c.persistence
+}
+
+// FlushPermanentRules is the bounded persistence-only hook for Phase 7. It
+// neither closes prompt admission nor drains fanotify ownership.
+func (c *PromptCoordinator) FlushPermanentRules(ctx context.Context) error {
+	if c.persistence == nil {
+		return nil
+	}
+	return c.persistence.Flush(ctx)
 }
 
 // Admit transfers a pending Ask to an exact group. The result tells the
@@ -187,13 +205,13 @@ func (c *PromptCoordinator) waitForPrompt(ctx context.Context, group *promptGrou
 		c.resolve(group, VerdictDeny)
 	case ActionAllowAlways:
 		won, accepted := c.resolve(group, VerdictAllow)
-		if won && accepted && group.store != nil {
-			_ = group.store.AppendRule(FormatRule(group.key.path, VerdictAllow))
+		if won && accepted && c.persistence != nil {
+			c.persistence.Apply(group.snapshot, group.store, group.key.path, VerdictAllow)
 		}
 	case ActionDenyAlways:
 		won, accepted := c.resolve(group, VerdictDeny)
-		if won && accepted && group.store != nil {
-			_ = group.store.AppendRule(FormatRule(group.key.path, VerdictDeny))
+		if won && accepted && c.persistence != nil {
+			c.persistence.Apply(group.snapshot, group.store, group.key.path, VerdictDeny)
 		}
 	default:
 		c.resolve(group, VerdictDeny)

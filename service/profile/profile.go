@@ -297,31 +297,27 @@ func (profile *Profile) DefaultAction() uint8 {
 // to the per-profile file-access rule list, saves the profile, and reloads
 // the configuration. Duplicate entries are dropped.
 func (profile *Profile) AddFileAccessRule(newEntry string) {
-	profile.addStringArrayEntry(CfgOptionFileAccessRulesKey, newEntry)
+	if err := profile.PersistFileAccessRule(newEntry); err != nil {
+		log.Warningf("profile: failed to save profile %s after add rule: %s", profile.ScopedID(), err)
+	}
+}
+
+// PersistFileAccessRule prepends one canonical file-access rule and returns a
+// storage failure to its caller. Filemaster's durable rule worker uses this
+// instead of the fire-and-forget compatibility helper above.
+func (profile *Profile) PersistFileAccessRule(newEntry string) error {
+	return profile.addStringArrayEntry(CfgOptionFileAccessRulesKey, newEntry)
 }
 
 // addStringArrayEntry prepends an entry to a profile-stored StringArray
 // option, persisting + reparsing the profile. Duplicate entries with
 // the same first-token prefix as newEntry within the leading run are
 // dropped (cheap dedup that costs ~nothing for a list keyed by "+ "/"-").
-func (profile *Profile) addStringArrayEntry(cfgKey, newEntry string) {
+func (profile *Profile) addStringArrayEntry(cfgKey, newEntry string) error {
 	changed := false
-
-	// When finished, save the profile.
-	defer func() {
-		if !changed {
-			return
-		}
-
-		err := profile.Save()
-		if err != nil {
-			log.Warningf("profile: failed to save profile %s after add rule: %s", profile.ScopedID(), err)
-		}
-	}()
 
 	// Lock the profile for editing.
 	profile.Lock()
-	defer profile.Unlock()
 
 	// Get the current list and add the new entry.
 	list, ok := profile.configPerspective.GetAsStringArray(cfgKey)
@@ -335,7 +331,8 @@ func (profile *Profile) addStringArrayEntry(cfgKey, newEntry string) {
 			}
 			if entry == newEntry {
 				log.Debugf("profile: ignoring new rule for %s, identical already present: %s", profile, newEntry)
-				return
+				profile.Unlock()
+				return nil
 			}
 		}
 		list = append([]string{newEntry}, list...)
@@ -353,6 +350,11 @@ func (profile *Profile) addStringArrayEntry(cfgKey, newEntry string) {
 	if err != nil {
 		log.Errorf("profile: failed to parse %s config after adding rule: %s", profile, err)
 	}
+	profile.Unlock()
+	if !changed {
+		return nil
+	}
+	return profile.Save()
 }
 
 // LayeredProfile returns the layered profile associated with this profile.
