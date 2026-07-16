@@ -133,6 +133,23 @@ func (l *processProfileLookup) parsedRulesFor(id string, raw []string) PathRules
 }
 
 func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint8, raw []string) *DecisionSnapshot {
+	snapshot, replaced := l.snapshotForRunning(id, source, defaultAction, raw)
+	if !replaced {
+		return snapshot
+	}
+	l.observerMu.RLock()
+	observer := l.observer
+	l.observerMu.RUnlock()
+	if observer != nil {
+		observer(snapshot)
+	}
+	return snapshot
+}
+
+// snapshotForRunning updates the immutable cache without notifying the
+// guarded observer. Callers holding the lifecycle activity barrier publish the
+// returned snapshot through their corresponding Running path.
+func (l *processProfileLookup) snapshotForRunning(id, source string, defaultAction uint8, raw []string) (*DecisionSnapshot, bool) {
 	cacheKey := source + "/" + id
 	value, _ := l.parseCache.LoadOrStore(cacheKey, &ruleCacheEntry{})
 	entry := value.(*ruleCacheEntry)
@@ -143,7 +160,7 @@ func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint
 		snapshot.DefaultAction == defaultAction &&
 		sameRuleEntries(entry.rawRules, raw) {
 		entry.mu.Unlock()
-		return l.mergePersistentRules(snapshot)
+		return l.mergePersistentRules(snapshot), false
 	}
 
 	entry.rawRules = append(entry.rawRules[:0], raw...)
@@ -152,13 +169,7 @@ func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint
 	entry.snapshot.Store(snapshot)
 	entry.mu.Unlock()
 	snapshot = l.mergePersistentRules(snapshot)
-	l.observerMu.RLock()
-	observer := l.observer
-	l.observerMu.RUnlock()
-	if observer != nil {
-		observer(snapshot)
-	}
-	return snapshot
+	return snapshot, true
 }
 
 func (l *processProfileLookup) setSnapshotObserver(observer func(*DecisionSnapshot)) {

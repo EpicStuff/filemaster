@@ -489,6 +489,15 @@ func TestShutdownBackgroundContextUsesBoundedReport(t *testing.T) {
 	if attempts == 0 || attempts > 10 {
 		t.Fatalf("bounded mark attempts = %d", attempts)
 	}
+	diagnostics := fileAccess.ShutdownDiagnostics()
+	if !diagnostics.Marks.Final || diagnostics.Marks.Pending || diagnostics.Marks.Complete || len(diagnostics.Marks.Errors) == 0 {
+		t.Fatalf("completed failed removal diagnostics are inaccurate: %+v", diagnostics.Marks)
+	}
+	for _, owner := range diagnostics.Unresolved {
+		if owner.Location == "mark_removal_worker" {
+			t.Fatalf("completed mark removal worker remained unresolved: %+v", diagnostics.Unresolved)
+		}
+	}
 }
 
 func TestDecisionPipelineWaitWorkersIncludesRegisteredIdleWorkers(t *testing.T) {
@@ -598,45 +607,135 @@ func TestProfileSnapshotPublicationFinishesInsideClosingBarrier(t *testing.T) {
 	coordinator := newPromptCoordinator(nil, time.Second, nil, nil, lifecycle)
 	handler := &ProfileHandler{lifecycle: lifecycle}
 	handler.setPromptCoordinator(coordinator)
-	entered := make(chan struct{})
+	publicationEntered := make(chan struct{})
 	release := make(chan struct{})
-	handler.beforeSnapshotPublication = func() {
-		close(entered)
+	handler.beforeProfilePublication = func() {
+		close(publicationEntered)
 		<-release
 	}
-	snapshot := coordinatorSnapshot("barrier", 1, profile.DefaultActionAsk)
+	closingAtBarrier := make(chan struct{})
+	lifecycle.beforeClosingBarrier = func() { close(closingAtBarrier) }
+	self := profile.New(&profile.Profile{ID: "barrier-self", Source: profile.SourceLocal, Name: "self"})
 	published := make(chan struct{})
 	go func() {
-		handler.publishSnapshot(snapshot)
+		handler.SetSelfProfile(self, 42)
 		close(published)
 	}()
-	<-entered
+	<-publicationEntered
 	closing := make(chan struct{})
 	go func() {
 		lifecycle.BeginClosing(context.Background())
 		close(closing)
 	}()
+	<-closingAtBarrier
 	select {
 	case <-closing:
-		t.Fatal("Closing passed an active snapshot publication")
-	case <-time.After(20 * time.Millisecond):
+		t.Fatal("Closing passed an active self-profile publication")
+	default:
 	}
 	close(release)
 	<-published
 	<-closing
-	key := snapshot.Source + "/" + snapshot.ProfileID
+
+	handler.selfMu.RLock()
+	selfSnapshot := handler.selfProfile.Snapshot
+	selfPID := handler.selfPID
+	handler.selfMu.RUnlock()
+	if selfSnapshot == nil || selfSnapshot.Revision != 1 || selfPID != 42 || handler.selfRevision.Load() != 1 {
+		t.Fatalf("self profile was not published exactly once: pid=%d revision=%d snapshot=%+v", selfPID, handler.selfRevision.Load(), selfSnapshot)
+	}
+	key := selfSnapshot.Source + "/" + selfSnapshot.ProfileID
 	coordinator.mu.Lock()
 	latest := coordinator.latestProfileSnapshot[key]
 	coordinator.mu.Unlock()
-	if latest == nil || latest.Revision != 1 {
+	if latest != selfSnapshot {
 		t.Fatalf("in-flight publication was not completed: %+v", latest)
 	}
-	handler.publishSnapshot(coordinatorSnapshot("barrier", 2, profile.DefaultActionPermit))
+}
+
+func TestPublishProfileSnapshotIsAtomicWithClosing(t *testing.T) {
+	lifecycle := NewPipelineLifecycle()
+	lookup := &processProfileLookup{}
+	coordinator := newPromptCoordinator(nil, time.Second, nil, nil, lifecycle)
+	handler := &ProfileHandler{lifecycle: lifecycle, lookup: lookup}
+	handler.setPromptCoordinator(coordinator)
+	publicationEntered := make(chan struct{})
+	release := make(chan struct{})
+	handler.beforeProfilePublication = func() {
+		close(publicationEntered)
+		<-release
+	}
+	closingAtBarrier := make(chan struct{})
+	lifecycle.beforeClosingBarrier = func() { close(closingAtBarrier) }
+	first := profile.New(&profile.Profile{
+		ID:     "atomic-publication",
+		Source: profile.SourceLocal,
+		Name:   "first",
+		Config: map[string]interface{}{profile.CfgOptionFileAccessRulesKey: []string{"+ /tmp/first"}},
+	})
+	published := make(chan struct{})
+	go func() {
+		handler.PublishProfileSnapshot(first)
+		close(published)
+	}()
+	<-publicationEntered
+	closing := make(chan struct{})
+	go func() {
+		lifecycle.BeginClosing(context.Background())
+		close(closing)
+	}()
+	<-closingAtBarrier
+	select {
+	case <-closing:
+		t.Fatal("Closing passed a partially published profile")
+	default:
+	}
+	close(release)
+	<-published
+	<-closing
+
+	key := string(first.Source) + "/" + first.ID
+	coordinator.RulePersistence().mu.Lock()
+	binding := coordinator.RulePersistence().bindings[key]
+	coordinator.RulePersistence().mu.Unlock()
+	bound, ok := binding.store.(*profileRuleStore)
+	if !ok || bound.p != first {
+		t.Fatalf("authoritative binding does not use the published profile: %+v", binding)
+	}
 	coordinator.mu.Lock()
-	latest = coordinator.latestProfileSnapshot[key]
+	latest := coordinator.latestProfileSnapshot[key]
 	coordinator.mu.Unlock()
-	if latest.Revision != 1 {
-		t.Fatalf("publication after Closing was accepted: %+v", latest)
+	if latest == nil {
+		t.Fatal("coordinator snapshot was not published")
+	}
+	expectedAction := first.DefaultAction()
+	if expectedAction == profile.DefaultActionNotSet {
+		expectedAction = profile.DefaultActionAsk
+	}
+	if latest.Revision != 1 || latest.ProfileID != first.ID || latest.Source != string(first.Source) || latest.DefaultAction != expectedAction {
+		t.Fatalf("coordinator snapshot does not match the bound profile: %+v", latest)
+	}
+
+	second := profile.New(&profile.Profile{
+		ID:     first.ID,
+		Source: first.Source,
+		Name:   "second",
+		Config: map[string]interface{}{profile.CfgOptionFileAccessRulesKey: []string{"- /tmp/second"}},
+	})
+	handler.beforeProfilePublication = nil
+	handler.PublishProfileSnapshot(second)
+	coordinator.RulePersistence().mu.Lock()
+	binding = coordinator.RulePersistence().bindings[key]
+	coordinator.RulePersistence().mu.Unlock()
+	bound, ok = binding.store.(*profileRuleStore)
+	if !ok || bound.p != first {
+		t.Fatal("publication after Closing replaced the authoritative binding")
+	}
+	coordinator.mu.Lock()
+	afterClosing := coordinator.latestProfileSnapshot[key]
+	coordinator.mu.Unlock()
+	if afterClosing != latest {
+		t.Fatalf("publication after Closing replaced the snapshot: %+v", afterClosing)
 	}
 }
 

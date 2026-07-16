@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -23,8 +24,41 @@ type MarkRemovalDiagnostics struct {
 	Attempts int
 	Complete bool
 	Final    bool
+	Pending  bool
 	Failures []MarkRemovalFailure
 	Errors   []MarkRemovalFailure
+}
+
+type markRemovalWorkerState struct {
+	mu     sync.Mutex
+	inCall bool
+}
+
+func (state *markRemovalWorkerState) beginCall(ctx context.Context, stop <-chan struct{}) bool {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+	select {
+	case <-stop:
+		return false
+	default:
+	}
+	state.inCall = true
+	return true
+}
+
+func (state *markRemovalWorkerState) endCall() {
+	state.mu.Lock()
+	state.inCall = false
+	state.mu.Unlock()
+}
+
+func (state *markRemovalWorkerState) callInFlight() bool {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.inCall
 }
 
 type ResponseWriterDiagnostics struct {
@@ -186,10 +220,10 @@ func (fa *FileAccess) runShutdownExecution(reportCtx context.Context, cancel con
 	fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) {
 		d.State = LifecycleClosing
 		d.ConfigurationStopped = true
-		d.Marks = MarkRemovalDiagnostics{Complete: fa.source == nil, Final: fa.source == nil}
+		_, controlled := fa.source.(controlledShutdownSource)
+		d.Marks = MarkRemovalDiagnostics{Complete: !controlled, Final: !controlled, Pending: controlled}
 		d.Source.GroupClosePending = fa.source != nil
 		d.Source.GroupClosed = fa.source == nil
-		_, controlled := fa.source.(controlledShutdownSource)
 		d.ReconciliationStopped = !controlled
 		d.Source.ScopeCleanupComplete = !controlled
 		d.Source.ScopeCleanupPending = controlled
@@ -254,10 +288,21 @@ func (fa *FileAccess) runFinalCleanup(reportCtx context.Context) {
 
 	stopMarks := make(chan struct{})
 	markDone := make(chan MarkRemovalDiagnostics, 1)
+	markState := &markRemovalWorkerState{}
 	if hasControlledSource {
-		go func() { markDone <- fa.removeMarksUntilBounded(reportCtx, stopMarks, controlled) }()
+		fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) {
+			d.Marks.Pending = true
+			d.Marks.Final = false
+		})
+		go func() {
+			marks := fa.removeMarksUntilBounded(reportCtx, stopMarks, controlled, markState)
+			fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) {
+				d.Marks = mergeMarkDiagnostics(d.Marks, marks)
+			})
+			markDone <- marks
+		}()
 	} else {
-		markDone <- MarkRemovalDiagnostics{Complete: true, Final: true}
+		markDone <- MarkRemovalDiagnostics{Complete: true, Final: true, Pending: false}
 	}
 
 	pipelineDone := make(chan struct{})
@@ -312,12 +357,18 @@ func (fa *FileAccess) runFinalCleanup(reportCtx context.Context) {
 	case marks = <-markDone:
 		markWorkerJoined = true
 	case <-reportCtx.Done():
-		fa.shutdownMu.Lock()
-		marks = cloneMarkDiagnostics(fa.shutdownDiagnostics.Marks)
-		fa.shutdownMu.Unlock()
-		marks.Final = true
+		if !hasControlledSource || !markState.callInFlight() {
+			marks = <-markDone
+			markWorkerJoined = true
+		} else {
+			fa.shutdownMu.Lock()
+			marks = cloneMarkDiagnostics(fa.shutdownDiagnostics.Marks)
+			fa.shutdownMu.Unlock()
+			marks.Pending = true
+			marks.Final = false
+		}
 	}
-	fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) { d.Marks = cloneMarkDiagnostics(marks) })
+	fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) { d.Marks = mergeMarkDiagnostics(d.Marks, marks) })
 
 	if hasControlledSource && marks.Complete {
 		fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) { d.Source.ReaderDrainPending = true })
@@ -416,31 +467,25 @@ func (fa *FileAccess) runFinalCleanup(reportCtx context.Context) {
 	if hasControlledSource && !markWorkerJoined {
 		finalMarks := <-markDone
 		fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) {
-			if finalMarks.Attempts >= d.Marks.Attempts {
-				d.Marks = cloneMarkDiagnostics(finalMarks)
-			}
-			d.Marks.Final = true
+			d.Marks = mergeMarkDiagnostics(d.Marks, finalMarks)
 		})
 	}
 	fa.refreshShutdownDiagnostics()
 }
 
-func (fa *FileAccess) removeMarksUntilBounded(ctx context.Context, stop <-chan struct{}, source controlledShutdownSource) MarkRemovalDiagnostics {
-	result := MarkRemovalDiagnostics{}
+func (fa *FileAccess) removeMarksUntilBounded(ctx context.Context, stop <-chan struct{}, source controlledShutdownSource, state *markRemovalWorkerState) MarkRemovalDiagnostics {
+	result := MarkRemovalDiagnostics{Pending: true}
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		if !state.beginCall(ctx, stop) {
 			result.Final = true
+			result.Pending = false
 			return result
-		case <-stop:
-			result.Final = true
-			return result
-		default:
 		}
 
 		attempt := source.RemoveAllMarks()
+		state.endCall()
 		result.Attempts++
 		result.Complete = attempt.Complete
 		result.Failures = append([]MarkRemovalFailure(nil), attempt.Failures...)
@@ -459,14 +504,17 @@ func (fa *FileAccess) removeMarksUntilBounded(ctx context.Context, stop <-chan s
 		fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) { d.Marks = cloneMarkDiagnostics(result) })
 		if attempt.Complete {
 			result.Final = true
+			result.Pending = false
 			return result
 		}
 		select {
 		case <-ctx.Done():
 			result.Final = true
+			result.Pending = false
 			return result
 		case <-stop:
 			result.Final = true
+			result.Pending = false
 			return result
 		case <-ticker.C:
 		}
@@ -552,6 +600,9 @@ func (fa *FileAccess) refreshShutdownDiagnostics() ShutdownDiagnostics {
 
 func unresolvedShutdownOwnership(d ShutdownDiagnostics) []UnresolvedOwnership {
 	unresolved := make([]UnresolvedOwnership, 0)
+	if d.Marks.Pending {
+		unresolved = append(unresolved, UnresolvedOwnership{Location: "mark_removal_worker", Count: 1})
+	}
 	if !d.ReconciliationStopped {
 		unresolved = append(unresolved, UnresolvedOwnership{Location: "reconciliation", Count: 1, Detail: d.ReconciliationError})
 	}
@@ -603,6 +654,28 @@ func cloneMarkDiagnostics(source MarkRemovalDiagnostics) MarkRemovalDiagnostics 
 	clone.Failures = append([]MarkRemovalFailure(nil), source.Failures...)
 	clone.Errors = append([]MarkRemovalFailure(nil), source.Errors...)
 	return clone
+}
+
+func mergeMarkDiagnostics(current, update MarkRemovalDiagnostics) MarkRemovalDiagnostics {
+	merged := cloneMarkDiagnostics(update)
+	if current.Attempts > update.Attempts {
+		merged.Attempts = current.Attempts
+		merged.Complete = current.Complete
+		merged.Failures = append([]MarkRemovalFailure(nil), current.Failures...)
+	}
+	for _, failure := range current.Errors {
+		seen := false
+		for _, existing := range merged.Errors {
+			if existing == failure {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			merged.Errors = append(merged.Errors, failure)
+		}
+	}
+	return merged
 }
 
 func cloneShutdownDiagnostics(source ShutdownDiagnostics) ShutdownDiagnostics {

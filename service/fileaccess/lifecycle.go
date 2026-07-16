@@ -52,6 +52,8 @@ type PipelineLifecycle struct {
 
 	closing chan struct{}
 	closed  chan struct{}
+
+	beforeClosingBarrier func()
 }
 
 func NewPipelineLifecycle() *PipelineLifecycle {
@@ -86,6 +88,8 @@ func (lifecycle *PipelineLifecycle) Closed() <-chan struct{} {
 	return lifecycle.closed
 }
 
+// whileRunning is the shared publication/admission barrier. It is not
+// reentrant: a guarded public method must call only unguarded Running helpers.
 func (lifecycle *PipelineLifecycle) whileRunning(fn func()) bool {
 	if lifecycle == nil {
 		fn()
@@ -118,6 +122,9 @@ func (lifecycle *PipelineLifecycle) BeginClosing(ctx context.Context) (context.C
 	// Reconciliation, configuration publication, queue admission, and prompt
 	// admission hold the read side only for their short publication section.
 	// Taking the write side here ensures none can publish after Closing.
+	if lifecycle.beforeClosingBarrier != nil {
+		lifecycle.beforeClosingBarrier()
+	}
 	lifecycle.activityMu.Lock()
 	lifecycle.mu.Lock()
 	lifecycle.closingCtx, lifecycle.closingStop = context.WithCancel(ctx)

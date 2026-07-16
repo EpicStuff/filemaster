@@ -225,16 +225,36 @@ func TestShutdownDeadlineWithBlockedMarkOperationStillClosesGroup(t *testing.T) 
 	result := make(chan error, 1)
 	go func() { result <- fileAccess.Shutdown(ctx) }()
 	<-started
+	var reported error
 	select {
 	case err := <-result:
 		if err == nil {
 			t.Fatal("blocked mark shutdown unexpectedly succeeded")
 		}
+		reported = err
 	case <-time.After(time.Second):
 		t.Fatal("blocked mark operation prevented bounded group closure")
 	}
-	if diagnostics := fileAccess.ShutdownDiagnostics(); diagnostics.FinalCleanupCompleted || lifecycle.State() != LifecycleClosing || !diagnostics.Source.ScopeCleanupPending {
+	diagnostics := fileAccess.ShutdownDiagnostics()
+	if diagnostics.FinalCleanupCompleted || lifecycle.State() != LifecycleClosing || !diagnostics.Source.ScopeCleanupPending || diagnostics.Marks.Final || !diagnostics.Marks.Pending {
 		t.Fatalf("bounded report falsely completed cleanup: %+v", diagnostics)
+	}
+	markWorkerReported := false
+	for _, owner := range diagnostics.Unresolved {
+		if owner.Location == "mark_removal_worker" && owner.Count == 1 {
+			markWorkerReported = true
+			break
+		}
+	}
+	if !markWorkerReported {
+		t.Fatalf("blocked mark worker missing from diagnostics: %+v", diagnostics.Unresolved)
+	}
+	shutdownErr, ok := reported.(*ShutdownError)
+	if !ok || shutdownErr.Diagnostics.Marks.Final || !shutdownErr.Diagnostics.Marks.Pending {
+		t.Fatalf("bounded shutdown result misreported mark finality: %#v", reported)
+	}
+	if repeated := fileAccess.Shutdown(context.Background()); repeated == nil || repeated.Error() != reported.Error() {
+		t.Fatalf("repeated shutdown did not retain the stable bounded result: first=%v repeated=%v", reported, repeated)
 	}
 	select {
 	case <-groupClosed:
@@ -249,6 +269,15 @@ func TestShutdownDeadlineWithBlockedMarkOperationStillClosesGroup(t *testing.T) 
 	case <-lifecycle.Closed():
 	case <-time.After(time.Second):
 		t.Fatal("scope cleanup release did not publish Closed")
+	}
+	diagnostics = fileAccess.ShutdownDiagnostics()
+	if !diagnostics.Marks.Final || diagnostics.Marks.Pending || !diagnostics.Source.ScopeCleanupComplete || diagnostics.State != LifecycleClosed {
+		t.Fatalf("final mark and scope cleanup state was not published: %+v", diagnostics)
+	}
+	for _, owner := range diagnostics.Unresolved {
+		if owner.Location == "mark_removal_worker" {
+			t.Fatalf("completed mark worker remained unresolved: %+v", diagnostics.Unresolved)
+		}
 	}
 }
 

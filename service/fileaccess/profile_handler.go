@@ -90,6 +90,7 @@ type ProfileHandler struct {
 	timeout                   time.Duration
 	lifecycle                 *PipelineLifecycle
 	beforeSnapshotPublication func()
+	beforeProfilePublication  func()
 
 	// fallback is used when ProfileLookup returns an error or no
 	// profile resolves. Without it the daemon would default-deny every
@@ -189,8 +190,16 @@ func (h *ProfileHandler) SetSelfProfile(p *profile.Profile, pid int32) {
 		return
 	}
 	if h.lifecycle != nil {
-		h.lifecycle.whileRunning(func() { h.setSelfProfileRunning(p, pid) })
+		h.lifecycle.whileRunning(func() {
+			if h.beforeProfilePublication != nil {
+				h.beforeProfilePublication()
+			}
+			h.setSelfProfileRunning(p, pid)
+		})
 		return
+	}
+	if h.beforeProfilePublication != nil {
+		h.beforeProfilePublication()
 	}
 	h.setSelfProfileRunning(p, pid)
 }
@@ -232,16 +241,24 @@ func (h *ProfileHandler) setSelfProfileRunning(p *profile.Profile, pid int32) {
 		ProfileLinkedPath: linkedPath,
 	}
 
-	h.setSelfProfile(pid, result)
+	h.setSelfProfileResultRunning(pid, result)
 }
 
 func (h *ProfileHandler) setSelfProfile(pid int32, result LookupResult) {
+	if h.lifecycle != nil {
+		h.lifecycle.whileRunning(func() { h.setSelfProfileResultRunning(pid, result) })
+		return
+	}
+	h.setSelfProfileResultRunning(pid, result)
+}
+
+func (h *ProfileHandler) setSelfProfileResultRunning(pid int32, result LookupResult) {
 	h.selfMu.Lock()
 	h.selfPID = pid
 	h.selfProfile = result
 	h.selfMu.Unlock()
 	if result.Snapshot != nil {
-		h.publishSnapshot(result.Snapshot)
+		h.publishSnapshotRunning(result.Snapshot)
 	}
 }
 
@@ -283,6 +300,22 @@ func (h *ProfileHandler) PublishProfileSnapshot(p *profile.Profile) {
 	if p == nil {
 		return
 	}
+	if h.lifecycle != nil {
+		h.lifecycle.whileRunning(func() {
+			if h.beforeProfilePublication != nil {
+				h.beforeProfilePublication()
+			}
+			h.publishProfileSnapshotRunning(p)
+		})
+		return
+	}
+	if h.beforeProfilePublication != nil {
+		h.beforeProfilePublication()
+	}
+	h.publishProfileSnapshotRunning(p)
+}
+
+func (h *ProfileHandler) publishProfileSnapshotRunning(p *profile.Profile) {
 	p.RLock()
 	id := p.ID
 	rawRules := append([]string(nil), p.GetFileAccessRules()...)
@@ -294,21 +327,21 @@ func (h *ProfileHandler) PublishProfileSnapshot(p *profile.Profile) {
 	}
 	store := &profileRuleStore{p: p, source: profile.ProfileSource(source), id: id}
 	if coordinator := h.coordinator(); coordinator != nil {
-		coordinator.RulePersistence().BindStore(source, id, store)
+		coordinator.RulePersistence().bindStoreRunning(source, id, store)
 	}
 
 	var snapshot *DecisionSnapshot
 	if lookup, ok := h.lookup.(*processProfileLookup); ok {
-		snapshot = lookup.snapshotFor(id, source, defaultAction, rawRules)
+		snapshot, _ = lookup.snapshotForRunning(id, source, defaultAction, rawRules)
 	} else {
 		snapshot = newDecisionSnapshot(id, source, defaultAction, rawRules, h.selfRevision.Add(1))
 		if coordinator := h.coordinator(); coordinator != nil {
 			snapshot = coordinator.RulePersistence().Merge(snapshot)
 		}
-		h.publishSnapshot(snapshot)
 	}
+	h.publishSnapshotRunning(snapshot)
 	if coordinator := h.coordinator(); coordinator != nil && snapshot != nil {
-		coordinator.RulePersistence().Bind(snapshot, store)
+		coordinator.RulePersistence().bindStoreRunning(snapshot.Source, snapshot.ProfileID, store)
 	}
 }
 
