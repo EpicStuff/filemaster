@@ -113,13 +113,15 @@ func (w *Wrapper) CommitRecordTransaction() {
 	commit()
 }
 
-// CommittedRecord returns the profile record that subscribers should observe
-// after a transaction commit rather than its serialized wrapper transport.
-func (w *Wrapper) CommittedRecord() Record {
-	if w.committedRecord == nil {
+// TakeCommittedRecord returns the record subscribers should observe after a
+// transaction commit and releases the temporary transaction reference.
+func (w *Wrapper) TakeCommittedRecord() Record {
+	committed := w.committedRecord
+	w.committedRecord = nil
+	if committed == nil {
 		return w
 	}
-	return w.committedRecord
+	return committed
 }
 
 // Marshal marshals the format and data.

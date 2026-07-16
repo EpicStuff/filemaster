@@ -150,6 +150,10 @@ func (h *databaseHook) PrePut(r record.Record) (record.Record, error) {
 	if err != nil {
 		return nil, err
 	}
+	expectedKey := MakeProfileKey(submitted.Source, submitted.ID)
+	if r.Key() != expectedKey {
+		return nil, fmt.Errorf("%w: profile payload %s does not match record key %s", ErrProfileRevisionConflict, submitted.ScopedID(), r.Key())
+	}
 	transaction, wrapper, err := newProfileTransaction(r, submitted)
 	if err != nil {
 		return nil, err
@@ -158,7 +162,11 @@ func (h *databaseHook) PrePut(r record.Record) (record.Record, error) {
 	// Controller.Put holds this record's transaction lock while hooks run and
 	// storage commits. Compare against the durable profile revision here so all
 	// interfaces, including generic database/API writes, reject stale objects.
-	current, currentErr := getProfile(MakeScopedID(profile.Source, profile.ID))
+	currentRecord, currentErr := profileDB.Get(r.Key())
+	var current *Profile
+	if currentErr == nil {
+		current, currentErr = loadProfile(currentRecord)
+	}
 	if currentErr != nil {
 		if !errors.Is(currentErr, database.ErrNotFound) {
 			return nil, currentErr

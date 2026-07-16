@@ -35,12 +35,18 @@ type rejectingPutHook struct {
 type revisionRecord struct {
 	record.Base
 	sync.Mutex
-	Revision uint64
-	target   *revisionRecord
+	Revision                 uint64
+	target                   *revisionRecord
+	publishedUnderRecordLock bool
 }
 
 func (r *revisionRecord) CommitRecordTransaction() {
 	if r.target != nil {
+		if r.target.TryLock() {
+			r.target.Unlock()
+		} else {
+			r.target.publishedUnderRecordLock = true
+		}
 		r.target.Revision = r.Revision
 	}
 }
@@ -234,5 +240,41 @@ func TestPutManyDrainsAfterFailure(t *testing.T) {
 	}
 	if err := put(NewExample(dbName+":later", "later", 4)); !errors.Is(err, hookErr) {
 		t.Fatalf("submission after final failure = %v, want hook failure", err)
+	}
+}
+
+func TestControllerPutManyLocksDirectRecordsAndPublishesUnderLock(t *testing.T) {
+	dbName := "direct-putmany-lock-phase6"
+	controller := newController(&Database{Name: dbName}, &blockingStorage{entered: make(chan string, 3), release: closedChannel()}, false)
+	hookErr := errors.New("direct batch failure")
+	hook := &rejectingPutHook{key: dbName + ":failure", err: hookErr}
+	controller.hooks = append(controller.hooks, &RegisteredHook{q: q.New(dbName).MustBeValid(), h: hook}, &RegisteredHook{q: q.New(dbName).MustBeValid(), h: &revisionHook{}})
+
+	success := &revisionRecord{Revision: 1}
+	success.SetKey(dbName + ":success")
+	success.CreateMeta()
+	failure := NewExample(dbName+":failure", "failure", 2)
+	failure.CreateMeta()
+	drained := NewExample(dbName+":drained", "drained", 3)
+	drained.CreateMeta()
+	batch, errs := controller.PutMany()
+	batch <- success
+	batch <- failure
+	batch <- drained
+	close(batch)
+	if err := <-errs; !errors.Is(err, hookErr) {
+		t.Fatalf("direct batch error = %v, want %v", err, hookErr)
+	}
+	if !hook.observedLock || !success.publishedUnderRecordLock {
+		t.Fatal("direct Controller.PutMany did not retain the record lock through hooks and transaction publication")
+	}
+	for _, r := range []interface {
+		TryLock() bool
+		Unlock()
+	}{success, failure, drained} {
+		if !r.TryLock() {
+			t.Fatal("direct Controller.PutMany left a record locked")
+		}
+		r.Unlock()
 	}
 }

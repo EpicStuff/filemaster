@@ -287,3 +287,49 @@ func TestWrappedProfileValidationFailureDoesNotPublishPayload(t *testing.T) {
 		t.Fatal("failed wrapped profile save published payload or metadata")
 	}
 }
+
+func TestProfilePayloadMustMatchSubmittedKey(t *testing.T) {
+	setupPhase6ProfileDatabase(t)
+	profileA := New(&Profile{ID: "key-identity-a", Source: SourceLocal, Name: "A"})
+	if err := profileA.Save(); err != nil {
+		t.Fatalf("save profile A: %v", err)
+	}
+	profileB := New(&Profile{ID: "key-identity-b", Source: SourceLocal, Name: "B"})
+	if err := profileB.Save(); err != nil {
+		t.Fatalf("save profile B: %v", err)
+	}
+	profileB.Name = "B revision two"
+	if err := profileB.Save(); err != nil {
+		t.Fatalf("advance profile B: %v", err)
+	}
+
+	payload, err := profileB.MarshalDataOnly(profileB, dsd.JSON)
+	if err != nil {
+		t.Fatalf("marshal profile B: %v", err)
+	}
+	mismatched, err := record.NewWrapper(profileA.Key(), profileA.Meta().Duplicate(), dsd.JSON, payload)
+	if err != nil {
+		t.Fatalf("create mismatched wrapper: %v", err)
+	}
+	if err := profileDB.Put(mismatched); !errors.Is(err, ErrProfileRevisionConflict) {
+		t.Fatalf("mismatched wrapper error = %v, want revision conflict", err)
+	}
+	loadedA, err := getProfile(MakeScopedID(SourceLocal, profileA.ID))
+	if err != nil {
+		t.Fatalf("load profile A: %v", err)
+	}
+	loadedB, err := getProfile(MakeScopedID(SourceLocal, profileB.ID))
+	if err != nil {
+		t.Fatalf("load profile B: %v", err)
+	}
+	if loadedA.Revision != 1 || loadedA.Name != "A" || loadedB.Revision != 2 || loadedB.Name != "B revision two" {
+		t.Fatalf("mismatched write changed profiles: A=%d/%q B=%d/%q", loadedA.Revision, loadedA.Name, loadedB.Revision, loadedB.Name)
+	}
+
+	concrete := New(&Profile{ID: profileB.ID, Source: SourceLocal, Name: "mismatched concrete"})
+	concrete.ResetKey()
+	concrete.SetKey(profileA.Key())
+	if err := concrete.Save(); !errors.Is(err, ErrProfileRevisionConflict) {
+		t.Fatalf("mismatched concrete error = %v, want revision conflict", err)
+	}
+}

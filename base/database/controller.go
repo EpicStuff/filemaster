@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -133,6 +134,7 @@ func (c *Controller) Put(r record.Record) (err error) {
 	if c.ReadOnly() {
 		return ErrReadOnly
 	}
+	lockedKey := r.Key()
 	mu := c.recordWriteLock(r.DatabaseKey())
 	mu.Lock()
 	defer mu.Unlock()
@@ -141,15 +143,19 @@ func (c *Controller) Put(r record.Record) (err error) {
 	if err != nil {
 		return err
 	}
-	transactional, _ := r.(interface{ CommitRecordTransaction() })
-	notificationRecord := r
+	if r.Key() != lockedKey {
+		return fmt.Errorf("database pre put hook changed locked record key from %q to %q", lockedKey, r.Key())
+	}
+	carrier := r
+	transactional, _ := carrier.(interface{ CommitRecordTransaction() })
+	notificationRecord := carrier
 
-	if !c.shadowDelete && r.Meta().IsDeleted() {
+	if !c.shadowDelete && carrier.Meta().IsDeleted() {
 		// Immediate delete.
-		err = c.storage.Delete(r.DatabaseKey())
+		err = c.storage.Delete(carrier.DatabaseKey())
 	} else {
 		// Put or shadow delete.
-		r, err = c.storage.Put(r)
+		r, err = c.storage.Put(carrier)
 	}
 
 	if err != nil {
@@ -161,9 +167,11 @@ func (c *Controller) Put(r record.Record) (err error) {
 	}
 	if transactional != nil {
 		transactional.CommitRecordTransaction()
-		if committed, ok := r.(interface{ CommittedRecord() record.Record }); ok {
-			notificationRecord = committed.CommittedRecord()
+		if committed, ok := carrier.(interface{ TakeCommittedRecord() record.Record }); ok {
+			notificationRecord = committed.TakeCommittedRecord()
 		}
+	} else {
+		notificationRecord = r
 	}
 
 	c.notifySubscribers(notificationRecord)
@@ -212,7 +220,10 @@ func (c *Controller) PutMany() (chan<- record.Record, <-chan error) {
 				// batch after an earlier failure.
 				continue
 			}
-			if err := c.Put(r); err != nil {
+			r.Lock()
+			err := c.Put(r)
+			r.Unlock()
+			if err != nil {
 				firstErr = err
 				errs <- err
 			}
