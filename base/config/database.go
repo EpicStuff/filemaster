@@ -164,6 +164,8 @@ func pushUpdate(option *Option) {
 	if err != nil {
 		log.Errorf("failed to export option to push update: %s", err)
 	} else {
+		r.Lock()
+		defer r.Unlock()
 		dbController.PushUpdate(r)
 	}
 }

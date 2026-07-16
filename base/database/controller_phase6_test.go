@@ -453,3 +453,39 @@ func TestStorageReturnedNotificationRecordIsLocked(t *testing.T) {
 	}
 	original.Unlock()
 }
+
+func TestPushUpdateUsesCallerOwnedRecordLock(t *testing.T) {
+	r := &notificationRecord{}
+	r.SetKey("push-update-lock:record")
+	r.CreateMeta()
+	controller := newController(&Database{Name: "push-update-lock"}, &notificationStorage{}, false)
+	controller.subscriptions = append(controller.subscriptions, &Subscription{
+		q:        q.New("push-update-lock").MustBeValid(),
+		local:    true,
+		internal: true,
+		Feed:     make(chan record.Record, 1),
+	})
+
+	r.Lock()
+	done := make(chan struct{})
+	go func() {
+		controller.PushUpdate(r)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		r.Unlock()
+		t.Fatal("PushUpdate attempted to reacquire the caller-owned record lock")
+	}
+	if r.matchedWhileOpen.Load() {
+		r.Unlock()
+		t.Fatal("subscriber matching observed an unlocked record")
+	}
+	if r.TryLock() {
+		r.Unlock()
+		r.Unlock()
+		t.Fatal("PushUpdate unlocked the caller-owned record")
+	}
+	r.Unlock()
+}

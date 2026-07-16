@@ -261,8 +261,6 @@ func (c *Controller) PushUpdate(r record.Record) {
 			return
 		}
 
-		r.Lock()
-		defer r.Unlock()
 		c.notifySubscribers(r)
 	}
 }
