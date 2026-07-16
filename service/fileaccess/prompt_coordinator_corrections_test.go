@@ -61,6 +61,14 @@ type orderedRuleStore struct {
 	appended []string
 }
 
+type panicRefreshHandler struct{}
+
+func (panicRefreshHandler) Decide(context.Context, *FileEvent) Verdict { return VerdictDeny }
+
+func (panicRefreshHandler) RefreshProcessMapping(context.Context, int32) error {
+	panic("refresh panic")
+}
+
 func (s *orderedRuleStore) ID() string { return "profile" }
 
 func (s *orderedRuleStore) AppendRule(rule string) error {
@@ -219,6 +227,50 @@ func TestPromptCoordinatorLatestSnapshotPreventsStaleAdmission(t *testing.T) {
 	}
 }
 
+func TestPromptCoordinatorNewerSnapshotCannotBeOverwrittenByOlderRevision(t *testing.T) {
+	prompter := &actionPrompter{entered: make(chan struct{}, 1), actions: make(chan string, 1)}
+	h := newCoordinatorHarness(prompter, 2)
+	pending, _ := coordinatorPending(FileEvent{Path: "/tmp/file", Op: OpOpen})
+	if handled, handedOff, _, _ := h.coordinator.Admit(context.Background(), pending, nil, coordinatorSnapshot("profile", 1, profile.DefaultActionAsk)); !handled || !handedOff {
+		t.Fatal("event was not admitted")
+	}
+	waitPromptStart(t, prompter)
+	newer := coordinatorSnapshot("profile", 3, profile.DefaultActionAsk)
+	h.coordinator.SnapshotReplaced(newer)
+	h.coordinator.SnapshotReplaced(coordinatorSnapshot("profile", 2, profile.DefaultActionAsk))
+	h.coordinator.mu.Lock()
+	for _, group := range h.coordinator.groups {
+		if group.snapshot != newer {
+			h.coordinator.mu.Unlock()
+			t.Fatal("older Ask revision replaced newer group snapshot")
+		}
+	}
+	h.coordinator.mu.Unlock()
+	h.coordinator.Close()
+}
+
+func TestPromptCoordinatorNewerDispositionCannotBeReplacedByOlderRevision(t *testing.T) {
+	prompter := &actionPrompter{entered: make(chan struct{}, 1), actions: make(chan string, 1)}
+	h := newCoordinatorHarness(prompter, 2)
+	pending, responses := coordinatorPending(FileEvent{Path: "/tmp/file", Op: OpOpen})
+	if handled, handedOff, _, _ := h.coordinator.Admit(context.Background(), pending, nil, coordinatorSnapshot("profile", 1, profile.DefaultActionAsk)); !handled || !handedOff {
+		t.Fatal("event was not admitted")
+	}
+	waitPromptStart(t, prompter)
+	permit := coordinatorSnapshot("profile", 3, profile.DefaultActionPermit)
+	h.coordinator.SnapshotReplaced(permit)
+	h.coordinator.SnapshotReplaced(coordinatorSnapshot("profile", 2, profile.DefaultActionBlock))
+	if got := waitCoordinatorVerdict(t, responses); got != VerdictAllow {
+		t.Fatalf("newer permit verdict = %s, want allow", got)
+	}
+	h.coordinator.mu.Lock()
+	latest := h.coordinator.latestProfileSnapshot["local/profile"]
+	h.coordinator.mu.Unlock()
+	if latest != permit {
+		t.Fatal("older disposition replaced newer published snapshot")
+	}
+}
+
 func TestPromptCoordinatorLosingAlwaysActionDoesNotPersist(t *testing.T) {
 	prompter := &actionPrompter{entered: make(chan struct{}, 1), actions: make(chan string, 1), completed: make(chan struct{}, 1)}
 	store := &fakeRuleStore{id: "profile"}
@@ -362,6 +414,69 @@ func TestPromptCoordinatorMixedResponseGroupReleasesPipelineAccountingOnce(t *te
 	pipeline.askMu.Unlock()
 	if remainingAsk != 0 {
 		t.Fatalf("pending Ask profiles = %d, want 0", remainingAsk)
+	}
+}
+
+func TestFinishPromptEventRefreshPanicStillObserves(t *testing.T) {
+	observed := make(chan struct{}, 1)
+	pipeline := &DecisionPipeline{
+		handler: panicRefreshHandler{},
+		observe: func(*FileEvent, Verdict) { observed <- struct{}{} },
+	}
+	pipeline.outstanding.Store(1)
+	pending, responses := coordinatorPending(FileEvent{PID: 7, Path: "/tmp/exec", Op: OpExec})
+	if accepted := pipeline.finishPromptEvent(context.Background(), pending, VerdictAllow); !accepted {
+		t.Fatal("accepted response reported false")
+	}
+	if got := waitCoordinatorVerdict(t, responses); got != VerdictAllow {
+		t.Fatalf("verdict = %s, want allow", got)
+	}
+	select {
+	case <-observed:
+	case <-time.After(time.Second):
+		t.Fatal("refresh panic suppressed observation")
+	}
+	if got := pipeline.outstanding.Load(); got != 0 {
+		t.Fatalf("outstanding = %d, want 0", got)
+	}
+}
+
+func TestFinishPromptEventObservationPanicDoesNotBlockLaterEntries(t *testing.T) {
+	var observations int
+	pipeline := &DecisionPipeline{handler: allowAll}
+	pipeline.observe = func(*FileEvent, Verdict) {
+		observations++
+		if observations == 1 {
+			panic("observation panic")
+		}
+	}
+	pipeline.outstanding.Store(2)
+	prompter := &actionPrompter{entered: make(chan struct{}, 1), actions: make(chan string, 1)}
+	coordinator := NewPromptCoordinator(prompter, time.Second, func(string) (func(), bool) {
+		return func() {}, true
+	}, pipeline.finishPromptEvent)
+	first, firstResponses := coordinatorPending(FileEvent{Path: "/tmp/file", Op: OpOpen})
+	second, secondResponses := coordinatorPending(FileEvent{Path: "/tmp/file", Op: OpOpen})
+	snapshot := coordinatorSnapshot("profile", 1, profile.DefaultActionAsk)
+	if handled, handedOff, _, _ := coordinator.Admit(context.Background(), first, nil, snapshot); !handled || !handedOff {
+		t.Fatal("first event was not admitted")
+	}
+	if handled, handedOff, _, _ := coordinator.Admit(context.Background(), second, nil, snapshot); !handled || !handedOff {
+		t.Fatal("second event was not admitted")
+	}
+	waitPromptStart(t, prompter)
+	prompter.actions <- ActionAllow
+	if got := waitCoordinatorVerdict(t, firstResponses); got != VerdictAllow {
+		t.Fatalf("first verdict = %s, want allow", got)
+	}
+	if got := waitCoordinatorVerdict(t, secondResponses); got != VerdictAllow {
+		t.Fatalf("second verdict = %s, want allow", got)
+	}
+	if got := pipeline.outstanding.Load(); got != 0 {
+		t.Fatalf("outstanding = %d, want 0", got)
+	}
+	if observations != 2 {
+		t.Fatalf("observations = %d, want 2", observations)
 	}
 }
 

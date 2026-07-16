@@ -281,17 +281,20 @@ func (p *DecisionPipeline) finishPromptEvent(ctx context.Context, pending Pendin
 		accepted = owner.responseAccepted()
 	}
 	if accepted && hasEvent {
-		func() {
-			defer func() { _ = recover() }()
-			if verdict == VerdictAllow && event.Op == OpExec {
+		if verdict == VerdictAllow && event.Op == OpExec {
+			func() {
+				defer func() { _ = recover() }()
 				if handler, ok := p.handler.(processMappingRefresher); ok {
 					_ = handler.RefreshProcessMapping(ctx, event.PID)
 				}
-			}
-			if p.observe != nil {
+			}()
+		}
+		if p.observe != nil {
+			func() {
+				defer func() { _ = recover() }()
 				p.observe(&event, verdict)
-			}
-		}()
+			}()
+		}
 	}
 	return accepted
 }

@@ -213,23 +213,28 @@ func (c *PromptCoordinator) SnapshotReplaced(snapshot *DecisionSnapshot) {
 		return
 	}
 	c.latestProfileSnapshot[profileKey] = snapshot
-	groups := make([]*promptGroup, 0, len(c.profiles[profileKey]))
+	type detachedGroup struct {
+		group   *promptGroup
+		entries []promptEntry
+		verdict Verdict
+	}
+	detached := make([]detachedGroup, 0, len(c.profiles[profileKey]))
 	for group := range c.profiles[profileKey] {
-		groups = append(groups, group)
+		latest := c.latestProfileSnapshot[profileKey]
+		verdict, ask := decisionFromSnapshot(latest, group.key.path)
+		if ask {
+			group.snapshot = latest
+			continue
+		}
+		entries, won := c.claimGroupLocked(group)
+		if won {
+			detached = append(detached, detachedGroup{group: group, entries: entries, verdict: verdict})
+		}
 	}
 	c.mu.Unlock()
 
-	for _, group := range groups {
-		verdict, ask := decisionFromSnapshot(snapshot, group.key.path)
-		if ask {
-			c.mu.Lock()
-			if c.groups[group.key] == group {
-				group.snapshot = snapshot
-			}
-			c.mu.Unlock()
-			continue
-		}
-		c.resolve(group, verdict)
+	for _, group := range detached {
+		c.completeGroup(group.group, group.entries, group.verdict)
 	}
 }
 
@@ -253,17 +258,29 @@ func (c *PromptCoordinator) Close() {
 
 func (c *PromptCoordinator) resolve(group *promptGroup, verdict Verdict) (won, accepted bool) {
 	c.mu.Lock()
-	if c.groups[group.key] != group {
-		c.mu.Unlock()
+	entries, won := c.claimGroupLocked(group)
+	c.mu.Unlock()
+	if !won {
 		return false, false
+	}
+	return true, c.completeGroup(group, entries, verdict)
+}
+
+// claimGroupLocked is the single resolution winner primitive. Callers must
+// hold c.mu; successful claims detach a group before responses run.
+func (c *PromptCoordinator) claimGroupLocked(group *promptGroup) ([]promptEntry, bool) {
+	if c.groups[group.key] != group {
+		return nil, false
 	}
 	delete(c.groups, group.key)
 	delete(c.profiles[group.key.profile], group)
 	if len(c.profiles[group.key.profile]) == 0 {
 		delete(c.profiles, group.key.profile)
 	}
-	entries := group.entries
-	c.mu.Unlock()
+	return group.entries, true
+}
+
+func (c *PromptCoordinator) completeGroup(group *promptGroup, entries []promptEntry, verdict Verdict) (accepted bool) {
 	group.cancel()
 	for _, entry := range entries {
 		func() {
@@ -279,7 +296,7 @@ func (c *PromptCoordinator) resolve(group *promptGroup, verdict Verdict) (won, a
 			}
 		}()
 	}
-	return true, accepted
+	return accepted
 }
 
 func decisionFromSnapshot(snapshot *DecisionSnapshot, path string) (Verdict, bool) {
