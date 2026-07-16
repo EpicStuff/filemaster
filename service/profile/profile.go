@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -307,7 +308,13 @@ func (profile *Profile) AddFileAccessRule(newEntry string) {
 // storage failure to its caller. Filemaster's durable rule worker uses this
 // instead of the fire-and-forget compatibility helper above.
 func (profile *Profile) PersistFileAccessRule(newEntry string) error {
-	return profile.addStringArrayEntry(CfgOptionFileAccessRulesKey, newEntry)
+	return profile.persistFileAccessRule(newEntry, nil)
+}
+
+// PersistFileAccessRuleIfCurrent aborts before storage when the caller's
+// profile authority changed while it prepared this update.
+func (profile *Profile) PersistFileAccessRuleIfCurrent(newEntry string, current func() bool) error {
+	return profile.persistFileAccessRule(newEntry, current)
 }
 
 // addStringArrayEntry prepends an entry to a profile-stored StringArray
@@ -315,6 +322,14 @@ func (profile *Profile) PersistFileAccessRule(newEntry string) error {
 // the same first-token prefix as newEntry within the leading run are
 // dropped (cheap dedup that costs ~nothing for a list keyed by "+ "/"-").
 func (profile *Profile) addStringArrayEntry(cfgKey, newEntry string) error {
+	return profile.persistStringArrayEntry(cfgKey, newEntry, nil)
+}
+
+func (profile *Profile) persistFileAccessRule(newEntry string, current func() bool) error {
+	return profile.persistStringArrayEntry(CfgOptionFileAccessRulesKey, newEntry, current)
+}
+
+func (profile *Profile) persistStringArrayEntry(cfgKey, newEntry string, current func() bool) error {
 	// Lock the profile for editing.
 	profile.Lock()
 
@@ -336,25 +351,28 @@ func (profile *Profile) addStringArrayEntry(cfgKey, newEntry string) error {
 		log.Errorf("profile: failed to parse %s config after adding rule: %s", profile, err)
 	}
 	profile.Unlock()
+	if current != nil && !current() {
+		return errors.New("profile: stale file access rule writer")
+	}
 	return profile.Save()
 }
 
 func coalesceFileAccessRuleEntries(list []string, newEntry string) []string {
-	if sign, pattern, valid := parseFileAccessRule(newEntry); valid {
+	if sign, pattern, exact, valid := parseFileAccessRule(newEntry); valid {
 		effectiveExact := false
 		for _, entry := range list {
-			entrySign, entryPattern, entryValid := parseFileAccessRule(entry)
-			if !entryValid || !fileAccessRuleMatches(entryPattern, pattern) {
+			entrySign, entryPattern, entryExact, entryValid := parseFileAccessRule(entry)
+			if !entryValid || (entryExact && entryPattern != pattern) || (!entryExact && !fileAccessRuleMatches(entryPattern, pattern)) {
 				continue
 			}
-			effectiveExact = entrySign == sign && entryPattern == pattern
+			effectiveExact = entrySign == sign && entryExact == exact && entryPattern == pattern
 			break
 		}
 		filtered := make([]string, 0, len(list)+1)
 		keptExact := false
 		for _, entry := range list {
-			_, entryPattern, entryValid := parseFileAccessRule(entry)
-			if entryValid && entryPattern == pattern {
+			_, entryPattern, entryExact, entryValid := parseFileAccessRule(entry)
+			if entryValid && entryExact == exact && entryPattern == pattern {
 				if effectiveExact && !keptExact {
 					keptExact = true
 					filtered = append(filtered, entry)
@@ -371,12 +389,21 @@ func coalesceFileAccessRuleEntries(list []string, newEntry string) []string {
 	return append([]string{newEntry}, list...)
 }
 
-func parseFileAccessRule(entry string) (sign byte, pattern string, ok bool) {
+func parseFileAccessRule(entry string) (sign byte, pattern string, exact bool, ok bool) {
 	if len(entry) < 3 || entry[1] != ' ' || (entry[0] != '+' && entry[0] != '-') {
-		return 0, "", false
+		return 0, "", false, false
 	}
-	pattern = filepath.Clean(strings.TrimSpace(entry[2:]))
-	return entry[0], pattern, filepath.IsAbs(pattern)
+	payload := entry[2:]
+	if strings.HasPrefix(payload, "@") {
+		literal, err := strconv.Unquote(payload[1:])
+		if err != nil {
+			return 0, "", false, false
+		}
+		pattern = filepath.Clean(literal)
+		return entry[0], pattern, true, filepath.IsAbs(pattern)
+	}
+	pattern = filepath.Clean(strings.TrimSpace(payload))
+	return entry[0], pattern, false, filepath.IsAbs(pattern)
 }
 
 func fileAccessRuleMatches(rulePattern, path string) bool {

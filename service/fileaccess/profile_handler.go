@@ -3,6 +3,7 @@ package fileaccess
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -482,6 +483,15 @@ func FormatRule(pattern string, v Verdict) string {
 	return "- " + pattern
 }
 
+// FormatExactRule stores a normalized literal path using a tagged Go-quoted
+// payload. Legacy +/- rules remain patterns; only this tagged form is exact.
+func FormatExactRule(path string, v Verdict) string {
+	if v == VerdictAllow {
+		return "+ @" + strconv.Quote(path)
+	}
+	return "- @" + strconv.Quote(path)
+}
+
 // ParseRule decodes a "<+|-> <pattern>" string into a PathRule. Returns
 // false on malformed input.
 func ParseRule(entry string) (PathRule, bool) {
@@ -497,7 +507,15 @@ func ParseRule(entry string) (PathRule, bool) {
 	default:
 		return PathRule{}, false
 	}
-	return PathRule{Pattern: strings.TrimSpace(entry[2:]), Verdict: v}, true
+	payload := entry[2:]
+	if strings.HasPrefix(payload, "@") {
+		path, err := strconv.Unquote(payload[1:])
+		if err != nil || path == "" {
+			return PathRule{}, false
+		}
+		return PathRule{Pattern: path, Verdict: v, Exact: true}, true
+	}
+	return PathRule{Pattern: strings.TrimSpace(payload), Verdict: v}, true
 }
 
 // ParseRules parses a []string of rule entries (as stored in a profile)

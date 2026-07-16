@@ -110,7 +110,7 @@ func canonicalPermanentRule(pattern string, verdict Verdict) (permanentRule, boo
 	if pattern == "." || !filepath.IsAbs(pattern) || (verdict != VerdictAllow && verdict != VerdictDeny) {
 		return permanentRule{}, false
 	}
-	return permanentRule{pattern: pattern, verdict: verdict, entry: FormatRule(pattern, verdict)}, true
+	return permanentRule{pattern: pattern, verdict: verdict, entry: FormatExactRule(pattern, verdict)}, true
 }
 
 // Bind attaches the current writable profile object without changing any dirty
@@ -154,6 +154,10 @@ func (p *RulePersistence) BindStore(source, profileID string, store RuleStore) {
 
 type ruleStoreIdentity interface{ ruleStoreIdentity() any }
 
+type guardedRuleStore interface {
+	AppendRuleIfCurrent(string, func() bool) error
+}
+
 func sameRuleStore(left, right RuleStore) bool {
 	if left == nil || right == nil {
 		return left == right
@@ -161,7 +165,9 @@ func sameRuleStore(left, right RuleStore) bool {
 	leftIdentity, leftOK := left.(ruleStoreIdentity)
 	rightIdentity, rightOK := right.(ruleStoreIdentity)
 	if leftOK && rightOK {
-		return reflect.DeepEqual(leftIdentity.ruleStoreIdentity(), rightIdentity.ruleStoreIdentity())
+		leftValue := reflect.ValueOf(leftIdentity.ruleStoreIdentity())
+		rightValue := reflect.ValueOf(rightIdentity.ruleStoreIdentity())
+		return leftValue.IsValid() && rightValue.IsValid() && leftValue.Type() == rightValue.Type() && leftValue.Type().Comparable() && leftValue.Interface() == rightValue.Interface()
 	}
 	leftValue := reflect.ValueOf(left)
 	rightValue := reflect.ValueOf(right)
@@ -281,7 +287,7 @@ func durableExactRuleAtPrecedence(snapshot *DecisionSnapshot, rule permanentRule
 		if !existing.Matches(rule.pattern) {
 			continue
 		}
-		return existing.Pattern == rule.pattern && existing.Verdict == rule.verdict
+		return existing.Exact && existing.Pattern == rule.pattern && existing.Verdict == rule.verdict
 	}
 	return false
 }
@@ -304,7 +310,7 @@ func (state *dirtyRuleProfile) publishLocked(base *DecisionSnapshot) *DecisionSn
 	}
 	mergedRules := make([]PathRule, 0, len(base.Rules.Rules)+len(rules))
 	for _, rule := range rules {
-		mergedRules = append(mergedRules, PathRule{Pattern: rule.pattern, Verdict: rule.verdict})
+		mergedRules = append(mergedRules, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, Exact: true})
 	}
 	for _, rule := range base.Rules.Rules {
 		if _, covered := overlay[rule.Pattern]; !covered {
@@ -334,7 +340,14 @@ func (p *RulePersistence) runProfile(key string, state *dirtyRuleProfile) {
 			if !ok {
 				break
 			}
-			err := binding.store.AppendRule(rule.entry)
+			var err error
+			if guarded, ok := binding.store.(guardedRuleStore); ok {
+				err = guarded.AppendRuleIfCurrent(rule.entry, func() bool {
+					return p.bindingCurrent(key, binding.generation, binding.store)
+				})
+			} else {
+				err = binding.store.AppendRule(rule.entry)
+			}
 			if err == nil {
 				p.persisted(key, state, rule, binding.generation)
 				continue
@@ -344,6 +357,13 @@ func (p *RulePersistence) runProfile(key string, state *dirtyRuleProfile) {
 			}
 		}
 	}
+}
+
+func (p *RulePersistence) bindingCurrent(key string, generation uint64, store RuleStore) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	binding := p.bindings[key]
+	return binding.generation == generation && sameRuleStore(binding.store, store)
 }
 
 func (p *RulePersistence) nextRule(key string, expected *dirtyRuleProfile) (permanentRule, ruleStoreBinding, bool) {

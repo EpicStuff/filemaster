@@ -238,3 +238,7 @@ func (s *profileRuleStore) AppendRule(entry string) error {
 	}
 	return s.p.PersistFileAccessRule(entry)
 }
+
+func (s *profileRuleStore) AppendRuleIfCurrent(entry string, current func() bool) error {
+	return s.p.PersistFileAccessRuleIfCurrent(entry, current)
+}

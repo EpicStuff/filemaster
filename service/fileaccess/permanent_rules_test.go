@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/safing/portmaster/service/profile"
 )
 
 type persistenceTestStore struct {
@@ -99,7 +101,7 @@ func TestPermanentRulesFailureStaysDirtyAndRetries(t *testing.T) {
 	wait <- time.Now()
 	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
 	entries, _ = store.snapshot()
-	if len(entries) != 2 || entries[0] != "+ /tmp/retry" || entries[1] != "+ /tmp/retry" {
+	if len(entries) != 2 || entries[0] != FormatExactRule("/tmp/retry", VerdictAllow) || entries[1] != FormatExactRule("/tmp/retry", VerdictAllow) {
 		t.Fatalf("retry writes = %v", entries)
 	}
 	if diagnostics := persistence.Diagnostics()["local/profile"]; diagnostics.PersistentFailure || diagnostics.LastError != nil {
@@ -149,7 +151,7 @@ func TestPermanentRulesCoalesceAndNewerOppositeWins(t *testing.T) {
 	store.release <- struct{}{}
 	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
 	entries, _ := store.snapshot()
-	if len(entries) != 2 || entries[0] != "+ /tmp/same" || entries[1] != "- /tmp/same" {
+	if len(entries) != 2 || entries[0] != FormatExactRule("/tmp/same", VerdictAllow) || entries[1] != FormatExactRule("/tmp/same", VerdictDeny) {
 		t.Fatalf("serialized writes = %v", entries)
 	}
 }
@@ -364,5 +366,41 @@ func TestPermanentRulesBindingsAreIndependentAndDoNotLoseWakeups(t *testing.T) {
 	entriesB, maxB := storeB.snapshot()
 	if len(entriesA) != 1 || len(entriesB) != 1 || maxA != 1 || maxB != 1 {
 		t.Fatalf("independent bindings A=%v/%d B=%v/%d", entriesA, maxA, entriesB, maxB)
+	}
+}
+
+func TestRuleStoreIdentityUsesProfilePointerOnly(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	first := &profile.Profile{ID: "same", Name: "same"}
+	second := &profile.Profile{ID: "same", Name: "same"}
+	persistence.BindStore("local", "profile", &profileRuleStore{p: first, id: "profile"})
+	firstGeneration := persistence.bindings["local/profile"].generation
+	persistence.BindStore("local", "profile", &profileRuleStore{p: first, id: "profile"})
+	if got := persistence.bindings["local/profile"].generation; got != firstGeneration {
+		t.Fatalf("wrappers around one profile pointer changed binding generation: %d -> %d", firstGeneration, got)
+	}
+	persistence.BindStore("local", "profile", &profileRuleStore{p: second, id: "profile"})
+	if got := persistence.bindings["local/profile"].generation; got != firstGeneration+1 {
+		t.Fatalf("distinct profile pointers did not replace binding: %d -> %d", firstGeneration, got)
+	}
+}
+
+func TestExactPermanentRulesRoundTripLiteralPaths(t *testing.T) {
+	paths := []string{"/tmp/a*b", "/tmp/a?b", "/tmp/a[b]", "/tmp/back\\slash\"quote ", "/tmp/trailing "}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			entry := FormatExactRule(path, VerdictAllow)
+			rule, ok := ParseRule(entry)
+			if !ok || !rule.Exact || rule.Pattern != path || rule.Verdict != VerdictAllow {
+				t.Fatalf("literal rule round trip = %+v, %v", rule, ok)
+			}
+			if !rule.Matches(path) || rule.Matches(path+"x") {
+				t.Fatalf("literal rule matched an adjacent path: %+v", rule)
+			}
+		})
+	}
+	legacy, ok := ParseRule("+ /tmp/a*")
+	if !ok || legacy.Exact || !legacy.Matches("/tmp/abc") {
+		t.Fatalf("legacy wildcard compatibility broken: %+v, %v", legacy, ok)
 	}
 }

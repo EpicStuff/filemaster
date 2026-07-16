@@ -21,10 +21,14 @@ import (
 type PathRule struct {
 	Pattern string
 	Verdict Verdict
+	Exact   bool
 }
 
 // Matches reports whether the rule applies to path.
 func (r PathRule) Matches(path string) bool {
+	if r.Exact {
+		return r.Pattern == path
+	}
 	return matchPathPattern(r.Pattern, path)
 }
 
