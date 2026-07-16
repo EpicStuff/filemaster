@@ -299,3 +299,70 @@ func TestPermanentRulesRetryUsesReboundStore(t *testing.T) {
 		t.Fatalf("retry stores old=%v new=%v, want old failed once and new saved once", oldEntries, newEntries)
 	}
 }
+
+func TestPermanentRulesCurrentBindingWinsOverOldPromptStore(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	storeA := &persistenceTestStore{}
+	storeB := &persistenceTestStore{}
+	snapshot := persistenceSnapshot()
+	persistence.BindStore("local", "profile", storeB)
+	persistence.Apply(snapshot, storeA, "/tmp/current", VerdictAllow)
+	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
+	entriesA, _ := storeA.snapshot()
+	entriesB, _ := storeB.snapshot()
+	if len(entriesA) != 0 || len(entriesB) != 1 {
+		t.Fatalf("old prompt store replaced current binding: A=%v B=%v", entriesA, entriesB)
+	}
+}
+
+func TestPermanentRulesRejectsStaleSuccessfulBindingWrite(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	storeA := &persistenceTestStore{started: make(chan struct{}, 1), release: make(chan struct{}, 1)}
+	storeB := &persistenceTestStore{started: make(chan struct{}, 1), release: make(chan struct{}, 1)}
+	snapshot := persistenceSnapshot()
+	persistence.Apply(snapshot, storeA, "/tmp/rebound", VerdictAllow)
+	<-storeA.started
+	persistence.BindStore("local", "profile", storeB)
+	storeA.release <- struct{}{}
+	<-storeB.started
+	if diagnostics := persistence.Diagnostics()["local/profile"]; diagnostics.DirtyCount != 1 {
+		t.Fatalf("stale successful write cleared dirty state: %+v", diagnostics)
+	}
+	flushContext, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := persistence.Flush(flushContext); err == nil {
+		t.Fatal("flush succeeded before the current store accepted the rule")
+	}
+	storeB.release <- struct{}{}
+	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
+	entriesA, _ := storeA.snapshot()
+	entriesB, _ := storeB.snapshot()
+	if len(entriesA) != 1 || len(entriesB) != 1 {
+		t.Fatalf("binding writes = A:%v B:%v, want one stale and one current attempt", entriesA, entriesB)
+	}
+}
+
+func TestPermanentRulesBindingsAreIndependentAndDoNotLoseWakeups(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	storeA := &persistenceTestStore{}
+	storeB := &persistenceTestStore{}
+	first := newDecisionSnapshot("first", "local", 2, nil, 1)
+	second := newDecisionSnapshot("second", "local", 2, nil, 1)
+	persistence.BindStore("local", "first", storeA)
+	persistence.BindStore("local", "second", storeB)
+	persistence.Apply(first, storeA, "/tmp/first", VerdictAllow)
+	persistence.Apply(second, storeB, "/tmp/second", VerdictDeny)
+	for range 5 {
+		persistence.BindStore("local", "first", storeA)
+		persistence.BindStore("local", "second", storeB)
+	}
+	waitRule(t, func() bool {
+		diagnostics := persistence.Diagnostics()
+		return diagnostics["local/first"].DirtyCount == 0 && diagnostics["local/second"].DirtyCount == 0
+	})
+	entriesA, maxA := storeA.snapshot()
+	entriesB, maxB := storeB.snapshot()
+	if len(entriesA) != 1 || len(entriesB) != 1 || maxA != 1 || maxB != 1 {
+		t.Fatalf("independent bindings A=%v/%d B=%v/%d", entriesA, maxA, entriesB, maxB)
+	}
+}

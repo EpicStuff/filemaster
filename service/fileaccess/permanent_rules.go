@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -39,12 +40,6 @@ type permanentRule struct {
 }
 
 type dirtyRuleProfile struct {
-	store RuleStore
-
-	// writeMu serializes storage calls and rebinding. The RulePersistence mutex
-	// is never held while this lock protects a storage call.
-	writeMu sync.Mutex
-
 	generation uint64
 	dirty      map[string]permanentRule
 	applied    map[string]permanentRule // writes known to have succeeded
@@ -63,11 +58,17 @@ type dirtyRuleProfile struct {
 	failure bool
 }
 
+type ruleStoreBinding struct {
+	store      RuleStore
+	generation uint64
+}
+
 // RulePersistence owns the durable, per-profile permanent-rule overlay. Its
 // mutex protects bookkeeping only: storage and observers always run unlocked.
 type RulePersistence struct {
 	mu       sync.Mutex
 	profiles map[string]*dirtyRuleProfile
+	bindings map[string]ruleStoreBinding
 	observe  func(*DecisionSnapshot)
 	min      time.Duration
 	max      time.Duration
@@ -89,6 +90,7 @@ func NewRulePersistence(observe func(*DecisionSnapshot), options RulePersistence
 	}
 	return &RulePersistence{
 		profiles: make(map[string]*dirtyRuleProfile),
+		bindings: make(map[string]ruleStoreBinding),
 		observe:  observe,
 		min:      options.MinBackoff,
 		max:      options.MaxBackoff,
@@ -128,20 +130,42 @@ func (p *RulePersistence) BindStore(source, profileID string, store RuleStore) {
 	if store == nil {
 		return
 	}
+	p.mu.Lock()
 	key := source + "/" + profileID
-	p.mu.Lock()
+	binding := p.bindings[key]
+	if !sameRuleStore(binding.store, store) {
+		binding.store = store
+		binding.generation++
+		p.bindings[key] = binding
+	}
 	state := p.profiles[key]
-	p.mu.Unlock()
-	if state == nil {
-		return
-	}
-	state.writeMu.Lock()
-	p.mu.Lock()
-	if current := p.profiles[key]; current == state {
-		state.store = store
+	var wake chan struct{}
+	if state != nil && len(state.dirty) != 0 {
+		wake = state.wake
 	}
 	p.mu.Unlock()
-	state.writeMu.Unlock()
+	if wake != nil {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+type ruleStoreIdentity interface{ ruleStoreIdentity() any }
+
+func sameRuleStore(left, right RuleStore) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	leftIdentity, leftOK := left.(ruleStoreIdentity)
+	rightIdentity, rightOK := right.(ruleStoreIdentity)
+	if leftOK && rightOK {
+		return reflect.DeepEqual(leftIdentity.ruleStoreIdentity(), rightIdentity.ruleStoreIdentity())
+	}
+	leftValue := reflect.ValueOf(left)
+	rightValue := reflect.ValueOf(right)
+	return leftValue.Type() == rightValue.Type() && leftValue.Type().Comparable() && leftValue.Interface() == rightValue.Interface()
 }
 
 // Apply makes an accepted Always decision visible before storage is attempted.
@@ -155,7 +179,9 @@ func (p *RulePersistence) Apply(snapshot *DecisionSnapshot, store RuleStore, pat
 	p.mu.Lock()
 	state := p.profileLocked(key)
 	base := state.baseForLocked(snapshot)
-	state.store = store
+	if p.bindings[key].store == nil {
+		p.bindings[key] = ruleStoreBinding{store: store, generation: 1}
+	}
 	if current, exists := state.dirty[rule.pattern]; exists && current.verdict == rule.verdict {
 		merged := state.publishLocked(base)
 		p.mu.Unlock()
@@ -304,29 +330,29 @@ func (state *dirtyRuleProfile) publishLocked(base *DecisionSnapshot) *DecisionSn
 func (p *RulePersistence) runProfile(key string, state *dirtyRuleProfile) {
 	for range state.wake {
 		for {
-			rule, store, ok := p.nextRule(key, state)
+			rule, binding, ok := p.nextRule(key, state)
 			if !ok {
 				break
 			}
-			err := store.AppendRule(rule.entry)
+			err := binding.store.AppendRule(rule.entry)
 			if err == nil {
-				p.persisted(key, state, rule)
+				p.persisted(key, state, rule, binding.generation)
 				continue
 			}
-			p.failed(key, state, rule, err)
-			<-p.after(p.backoff(state))
+			if p.failed(key, state, rule, binding.generation, err) {
+				<-p.after(p.backoff(state))
+			}
 		}
 	}
 }
 
-func (p *RulePersistence) nextRule(key string, expected *dirtyRuleProfile) (permanentRule, RuleStore, bool) {
-	expected.writeMu.Lock()
+func (p *RulePersistence) nextRule(key string, expected *dirtyRuleProfile) (permanentRule, ruleStoreBinding, bool) {
 	p.mu.Lock()
 	state := p.profiles[key]
-	if state != expected || state == nil || state.store == nil || len(state.dirty) == 0 {
+	binding := p.bindings[key]
+	if state != expected || state == nil || binding.store == nil || len(state.dirty) == 0 {
 		p.mu.Unlock()
-		expected.writeMu.Unlock()
-		return permanentRule{}, nil, false
+		return permanentRule{}, ruleStoreBinding{}, false
 	}
 	var selected permanentRule
 	for _, rule := range state.dirty {
@@ -334,30 +360,26 @@ func (p *RulePersistence) nextRule(key string, expected *dirtyRuleProfile) (perm
 			selected = rule
 		}
 	}
-	store := state.store
 	p.mu.Unlock()
-	return selected, &lockedRuleStore{store: store, unlock: expected.writeMu.Unlock}, true
+	return selected, binding, true
 }
 
-// lockedRuleStore keeps the per-profile write/rebind lock until the storage
-// call ends without exposing that detail to RuleStore implementations.
-type lockedRuleStore struct {
-	store  RuleStore
-	unlock func()
-}
-
-func (s *lockedRuleStore) ID() string { return s.store.ID() }
-
-func (s *lockedRuleStore) AppendRule(entry string) error {
-	defer s.unlock()
-	return s.store.AppendRule(entry)
-}
-
-func (p *RulePersistence) persisted(key string, expected *dirtyRuleProfile, rule permanentRule) {
+func (p *RulePersistence) persisted(key string, expected *dirtyRuleProfile, rule permanentRule, bindingGeneration uint64) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	state := p.profiles[key]
-	if state != expected || state == nil {
+	binding := p.bindings[key]
+	if state != expected || state == nil || binding.generation != bindingGeneration {
+		var wake chan struct{}
+		if state == expected && state != nil && len(state.dirty) != 0 {
+			wake = state.wake
+		}
+		p.mu.Unlock()
+		if wake != nil {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		}
 		return
 	}
 	if current, ok := state.dirty[rule.pattern]; ok && current.generation == rule.generation {
@@ -369,20 +391,26 @@ func (p *RulePersistence) persisted(key string, expected *dirtyRuleProfile, rule
 		state.failure = false
 		state.lastErr = nil
 	}
+	p.mu.Unlock()
 }
 
-func (p *RulePersistence) failed(key string, expected *dirtyRuleProfile, rule permanentRule, err error) {
+func (p *RulePersistence) failed(key string, expected *dirtyRuleProfile, rule permanentRule, bindingGeneration uint64, err error) bool {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	state := p.profiles[key]
-	if state != expected || state == nil {
-		return
+	binding := p.bindings[key]
+	if state != expected || state == nil || binding.generation != bindingGeneration {
+		p.mu.Unlock()
+		return false
 	}
 	if current, ok := state.dirty[rule.pattern]; ok && current.generation == rule.generation {
 		state.retries++
 		state.lastErr = err
 		state.failure = true
+		p.mu.Unlock()
+		return true
 	}
+	p.mu.Unlock()
+	return false
 }
 
 func (p *RulePersistence) backoff(state *dirtyRuleProfile) time.Duration {

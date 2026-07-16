@@ -228,6 +228,10 @@ func (s *profileRuleStore) ID() string {
 	return s.id
 }
 
+func (s *profileRuleStore) ruleStoreIdentity() any {
+	return s.p
+}
+
 func (s *profileRuleStore) AppendRule(entry string) error {
 	if entry == "" {
 		return errors.New("empty rule entry")

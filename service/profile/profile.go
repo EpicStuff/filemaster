@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -314,38 +315,19 @@ func (profile *Profile) PersistFileAccessRule(newEntry string) error {
 // the same first-token prefix as newEntry within the leading run are
 // dropped (cheap dedup that costs ~nothing for a list keyed by "+ "/"-").
 func (profile *Profile) addStringArrayEntry(cfgKey, newEntry string) error {
-	changed := false
-
 	// Lock the profile for editing.
 	profile.Lock()
 
 	// Get the current list and add the new entry.
 	list, ok := profile.configPerspective.GetAsStringArray(cfgKey)
-	if ok {
-		// A list already exists, check for duplicates within the leading
-		// same-prefix run.
-		newEntryPrefix := strings.Split(newEntry, " ")[0] + " "
-		for _, entry := range list {
-			if !strings.HasPrefix(entry, newEntryPrefix) {
-				break
-			}
-			if entry == newEntry {
-				// The identical in-memory entry may be the result of a previous
-				// failed Save. Keep the current profile state intact, but still
-				// attempt real storage so Filemaster's retry worker can distinguish
-				// durable success from that failed mutation.
-				profile.Unlock()
-				return profile.Save()
-			}
-		}
-		list = append([]string{newEntry}, list...)
-	} else {
+	if !ok {
 		list = []string{newEntry}
+	} else {
+		list = coalesceFileAccessRuleEntries(list, newEntry)
 	}
 
 	// Save new value back to profile.
 	config.PutValueIntoHierarchicalConfig(profile.Config, cfgKey, list)
-	changed = true
 
 	// Reload the profile manually so the newly added entry is parsed.
 	profile.dataParsed = false
@@ -354,10 +336,56 @@ func (profile *Profile) addStringArrayEntry(cfgKey, newEntry string) error {
 		log.Errorf("profile: failed to parse %s config after adding rule: %s", profile, err)
 	}
 	profile.Unlock()
-	if !changed {
-		return nil
-	}
 	return profile.Save()
+}
+
+func coalesceFileAccessRuleEntries(list []string, newEntry string) []string {
+	if sign, pattern, valid := parseFileAccessRule(newEntry); valid {
+		effectiveExact := false
+		for _, entry := range list {
+			entrySign, entryPattern, entryValid := parseFileAccessRule(entry)
+			if !entryValid || !fileAccessRuleMatches(entryPattern, pattern) {
+				continue
+			}
+			effectiveExact = entrySign == sign && entryPattern == pattern
+			break
+		}
+		filtered := make([]string, 0, len(list)+1)
+		keptExact := false
+		for _, entry := range list {
+			_, entryPattern, entryValid := parseFileAccessRule(entry)
+			if entryValid && entryPattern == pattern {
+				if effectiveExact && !keptExact {
+					keptExact = true
+					filtered = append(filtered, entry)
+				}
+				continue
+			}
+			filtered = append(filtered, entry)
+		}
+		if !keptExact {
+			filtered = append([]string{newEntry}, filtered...)
+		}
+		return filtered
+	}
+	return append([]string{newEntry}, list...)
+}
+
+func parseFileAccessRule(entry string) (sign byte, pattern string, ok bool) {
+	if len(entry) < 3 || entry[1] != ' ' || (entry[0] != '+' && entry[0] != '-') {
+		return 0, "", false
+	}
+	pattern = filepath.Clean(strings.TrimSpace(entry[2:]))
+	return entry[0], pattern, filepath.IsAbs(pattern)
+}
+
+func fileAccessRuleMatches(rulePattern, path string) bool {
+	if strings.HasSuffix(rulePattern, "/**") {
+		prefix := filepath.Clean(strings.TrimSuffix(rulePattern, "/**"))
+		return path == prefix || strings.HasPrefix(path, prefix+string(filepath.Separator))
+	}
+	matched, err := filepath.Match(rulePattern, path)
+	return err == nil && matched
 }
 
 // LayeredProfile returns the layered profile associated with this profile.
