@@ -35,6 +35,8 @@ type Hook interface {
 	// extended validation or mutations on the record.
 	// The passed record is already locked by the database system
 	// so users can safely access all data of r.
+	// A replacement record must be returned unlocked; the controller takes
+	// ownership of that replacement lock for subsequent hooks and storage.
 	PrePut(r record.Record) (record.Record, error)
 }
 

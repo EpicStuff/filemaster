@@ -3,6 +3,7 @@ package database
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,10 +58,10 @@ func (h *revisionHook) UsesPrePut() bool { return true }
 
 func (h *revisionHook) PrePut(r record.Record) (record.Record, error) {
 	submitted := r.(*revisionRecord)
-	candidate := *submitted
-	candidate.Revision++
-	candidate.target = submitted
-	return &candidate, nil
+	candidate := &revisionRecord{Revision: submitted.Revision + 1, target: submitted}
+	candidate.SetKey(submitted.Key())
+	candidate.SetMeta(submitted.Meta().Duplicate())
+	return candidate, nil
 }
 
 type failingStorage struct {
@@ -71,6 +72,73 @@ type failingStorage struct {
 func (s *failingStorage) ReadOnly() bool { return false }
 
 func (s *failingStorage) Put(record.Record) (record.Record, error) { return nil, s.err }
+
+type notificationRecord struct {
+	record.Base
+	mu               sync.Mutex
+	locked           atomic.Int32
+	matchedWhileOpen atomic.Bool
+}
+
+func (r *notificationRecord) Lock() {
+	r.mu.Lock()
+	r.locked.Add(1)
+}
+
+func (r *notificationRecord) Unlock() {
+	r.locked.Add(-1)
+	r.mu.Unlock()
+}
+
+func (r *notificationRecord) Meta() *record.Meta {
+	if r.locked.Load() == 0 {
+		r.matchedWhileOpen.Store(true)
+	}
+	return r.Base.Meta()
+}
+
+func (r *notificationRecord) TryLock() bool {
+	if !r.mu.TryLock() {
+		return false
+	}
+	r.locked.Add(1)
+	return true
+}
+
+type notificationStorage struct {
+	storage.InjectBase
+	returned record.Record
+}
+
+func (s *notificationStorage) ReadOnly() bool { return false }
+
+func (s *notificationStorage) Put(record.Record) (record.Record, error) { return s.returned, nil }
+
+type replacementHook struct {
+	HookBase
+	replacement  record.Record
+	err          error
+	observedLock bool
+}
+
+func (h *replacementHook) UsesPrePut() bool { return true }
+
+func (h *replacementHook) PrePut(r record.Record) (record.Record, error) {
+	if locker, ok := r.(interface {
+		TryLock() bool
+		Unlock()
+	}); ok {
+		if locker.TryLock() {
+			locker.Unlock()
+		} else {
+			h.observedLock = true
+		}
+	}
+	if h.err != nil {
+		return nil, h.err
+	}
+	return h.replacement, nil
+}
 
 func TestControllerPublishesTransactionalRecordOnlyAfterCommit(t *testing.T) {
 	makeRecord := func() *revisionRecord {
@@ -277,4 +345,111 @@ func TestControllerPutManyLocksDirectRecordsAndPublishesUnderLock(t *testing.T) 
 		}
 		r.Unlock()
 	}
+}
+
+func TestPrePutReplacementLocksAreOwnedAndReleased(t *testing.T) {
+	makeRecord := func(key string) *Example {
+		r := NewExample(key, key, 1)
+		r.CreateMeta()
+		return r
+	}
+	makeController := func(storageInt storage.Interface, hooks ...Hook) *Controller {
+		c := newController(&Database{Name: "replacement-lock"}, storageInt, false)
+		for _, hook := range hooks {
+			c.hooks = append(c.hooks, &RegisteredHook{q: q.New("replacement-lock").MustBeValid(), h: hook})
+		}
+		return c
+	}
+
+	original := makeRecord("replacement-lock:original")
+	first := makeRecord("replacement-lock:original")
+	second := makeRecord("replacement-lock:original")
+	firstHook := &replacementHook{replacement: first}
+	secondHook := &replacementHook{replacement: second}
+	thirdHook := &replacementHook{replacement: second}
+	original.Lock()
+	if err := makeController(&blockingStorage{entered: make(chan string, 1), release: closedChannel()}, firstHook, secondHook, thirdHook).Put(original); err != nil {
+		t.Fatalf("replacement chain: %v", err)
+	}
+	if !firstHook.observedLock || !secondHook.observedLock || !thirdHook.observedLock {
+		t.Fatal("every hook did not receive its current record locked")
+	}
+	for _, r := range []*Example{first, second} {
+		if !r.TryLock() {
+			t.Fatal("controller-owned replacement remained locked")
+		}
+		r.Unlock()
+	}
+	if original.TryLock() {
+		original.Unlock()
+		t.Fatal("Controller.Put unlocked the caller-owned original record")
+	}
+	original.Unlock()
+
+	for _, test := range []struct {
+		name    string
+		storage storage.Interface
+		hooks   []Hook
+	}{
+		{
+			name:    "hook failure",
+			storage: &blockingStorage{entered: make(chan string, 1), release: closedChannel()},
+			hooks:   []Hook{&replacementHook{replacement: makeRecord("replacement-lock:original")}, &replacementHook{err: errors.New("hook failed")}},
+		},
+		{
+			name:    "key mismatch",
+			storage: &blockingStorage{entered: make(chan string, 1), release: closedChannel()},
+			hooks:   []Hook{&replacementHook{replacement: makeRecord("replacement-lock:other")}},
+		},
+		{
+			name:    "storage failure",
+			storage: &failingStorage{err: errors.New("storage failed")},
+			hooks:   []Hook{&replacementHook{replacement: makeRecord("replacement-lock:original")}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			original := makeRecord("replacement-lock:original")
+			replacement := test.hooks[0].(*replacementHook).replacement.(*Example)
+			original.Lock()
+			if err := makeController(test.storage, test.hooks...).Put(original); err == nil {
+				t.Fatal("replacement failure unexpectedly succeeded")
+			}
+			if !replacement.TryLock() {
+				t.Fatal("failed replacement remained locked")
+			}
+			replacement.Unlock()
+			original.Unlock()
+		})
+	}
+}
+
+func TestStorageReturnedNotificationRecordIsLocked(t *testing.T) {
+	returned := &notificationRecord{}
+	returned.SetKey("notification-lock:returned")
+	returned.CreateMeta()
+	controller := newController(&Database{Name: "notification-lock"}, &notificationStorage{returned: returned}, false)
+	controller.subscriptions = append(controller.subscriptions, &Subscription{
+		q:        q.New("notification-lock").MustBeValid(),
+		local:    true,
+		internal: true,
+		Feed:     make(chan record.Record, 1),
+	})
+	original := NewExample("notification-lock:original", "original", 1)
+	original.CreateMeta()
+	original.Lock()
+	if err := controller.Put(original); err != nil {
+		t.Fatalf("notify storage return: %v", err)
+	}
+	if returned.matchedWhileOpen.Load() {
+		t.Fatal("subscriber matching observed an unlocked storage-returned record")
+	}
+	if !returned.TryLock() {
+		t.Fatal("storage-returned notification record remained locked after Put")
+	}
+	returned.Unlock()
+	if original.TryLock() {
+		original.Unlock()
+		t.Fatal("Controller.Put unlocked the caller-owned original during notification")
+	}
+	original.Unlock()
 }

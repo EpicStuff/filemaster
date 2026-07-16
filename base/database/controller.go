@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -134,19 +135,20 @@ func (c *Controller) Put(r record.Record) (err error) {
 	if c.ReadOnly() {
 		return ErrReadOnly
 	}
+	submitted := r
 	lockedKey := r.Key()
 	mu := c.recordWriteLock(r.DatabaseKey())
 	mu.Lock()
 	defer mu.Unlock()
 
-	r, err = c.runPrePutHooks(r)
+	carrier, releaseCarrier, err := c.runPrePutHooks(r)
 	if err != nil {
 		return err
 	}
-	if r.Key() != lockedKey {
-		return fmt.Errorf("database pre put hook changed locked record key from %q to %q", lockedKey, r.Key())
+	defer releaseCarrier()
+	if carrier.Key() != lockedKey {
+		return fmt.Errorf("database pre put hook changed locked record key from %q to %q", lockedKey, carrier.Key())
 	}
-	carrier := r
 	transactional, _ := carrier.(interface{ CommitRecordTransaction() })
 	notificationRecord := carrier
 
@@ -174,6 +176,10 @@ func (c *Controller) Put(r record.Record) (err error) {
 		notificationRecord = r
 	}
 
+	if !sameRecord(notificationRecord, carrier) && !sameRecord(notificationRecord, submitted) {
+		notificationRecord.Lock()
+		defer notificationRecord.Unlock()
+	}
 	c.notifySubscribers(notificationRecord)
 
 	return nil
@@ -255,6 +261,8 @@ func (c *Controller) PushUpdate(r record.Record) {
 			return
 		}
 
+		r.Lock()
+		defer r.Unlock()
 		c.notifySubscribers(r)
 	}
 }
@@ -342,6 +350,8 @@ func (c *Controller) Shutdown() error {
 // in r. r must be locked when calling notifySubscribers.
 // Any subscriber that is not blocking on it's feed channel will
 // be skipped.
+// notifySubscribers requires r to remain locked for the full matching and
+// delivery iteration so subscribers cannot mutate it between feed checks.
 func (c *Controller) notifySubscribers(r record.Record) {
 	c.subscriptionLock.RLock()
 	defer c.subscriptionLock.RUnlock()
@@ -354,6 +364,17 @@ func (c *Controller) notifySubscribers(r record.Record) {
 			}
 		}
 	}
+}
+
+func sameRecord(a, b record.Record) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	typeA := reflect.TypeOf(a)
+	if typeA != reflect.TypeOf(b) || !typeA.Comparable() {
+		return false
+	}
+	return a == b
 }
 
 func (c *Controller) runPreGetHooks(key string) error {
@@ -400,25 +421,57 @@ func (c *Controller) runPostGetHooks(r record.Record) (record.Record, error) {
 	return r, nil
 }
 
-func (c *Controller) runPrePutHooks(r record.Record) (record.Record, error) {
+// runPrePutHooks keeps the caller-owned initial record locked. A hook that
+// replaces it must return an unlocked replacement; the controller locks that
+// replacement before invoking another hook and releases it through cleanup.
+func (c *Controller) runPrePutHooks(r record.Record) (record.Record, func(), error) {
 	c.hooksLock.RLock()
 	defer c.hooksLock.RUnlock()
 
-	var err error
+	original := r
+	current := r
+	var owned record.Record
+	cleanup := func() {
+		if owned != nil {
+			owned.Unlock()
+		}
+	}
 	for _, hook := range c.hooks {
 		if !hook.h.UsesPrePut() {
 			continue
 		}
 
-		if !hook.q.Matches(r) {
+		if !hook.q.Matches(current) {
 			continue
 		}
 
-		r, err = hook.h.PrePut(r)
+		next, err := hook.h.PrePut(current)
 		if err != nil {
-			return nil, err
+			cleanup()
+			return nil, nil, err
 		}
+		if next == nil {
+			cleanup()
+			return nil, nil, errors.New("database pre put hook returned nil record")
+		}
+		if sameRecord(next, current) {
+			continue
+		}
+		if sameRecord(next, original) {
+			if owned != nil {
+				owned.Unlock()
+				owned = nil
+			}
+			current = original
+			continue
+		}
+		next.Lock()
+		if owned != nil {
+			owned.Unlock()
+		}
+		owned = next
+		current = next
 	}
 
-	return r, nil
+	return current, cleanup, nil
 }
