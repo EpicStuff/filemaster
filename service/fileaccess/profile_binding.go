@@ -3,6 +3,7 @@ package fileaccess
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -60,6 +61,9 @@ type processProfileLookup struct {
 	// parseCache owns immutable snapshots. It is deliberately separate from
 	// profileRuleStore so snapshots survive per-event store adapters.
 	parseCache sync.Map // map[string]*ruleCacheEntry
+
+	observerMu sync.RWMutex
+	observer   func(*DecisionSnapshot)
 }
 
 type ruleCacheEntry struct {
@@ -79,8 +83,9 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	}
 
 	res := LookupResult{
-		Path:          p.Path,
-		DefaultAction: profile.DefaultActionAsk,
+		Path:            p.Path,
+		ProcessIdentity: fmt.Sprintf("%d-%d", p.Pid, p.CreatedAt),
+		DefaultAction:   profile.DefaultActionAsk,
 	}
 
 	lp := p.Profile()
@@ -141,7 +146,19 @@ func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint
 	entry.revision++
 	snapshot := newDecisionSnapshot(id, source, defaultAction, entry.rawRules, entry.revision)
 	entry.snapshot.Store(snapshot)
+	l.observerMu.RLock()
+	observer := l.observer
+	l.observerMu.RUnlock()
+	if observer != nil {
+		observer(snapshot)
+	}
 	return snapshot
+}
+
+func (l *processProfileLookup) setSnapshotObserver(observer func(*DecisionSnapshot)) {
+	l.observerMu.Lock()
+	l.observer = observer
+	l.observerMu.Unlock()
 }
 
 func sameRuleEntries(left, right []string) bool {

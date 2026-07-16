@@ -46,9 +46,18 @@ type NotificationsPrompter struct {
 	id atomic.Uint64
 }
 
+// PromptGroup preserves a stable notification identity for exact duplicate
+// requests. Prompt remains the compatibility entry point for existing callers.
+func (p *NotificationsPrompter) PromptGroup(ctx context.Context, e FileEvent, timeout time.Duration, groupID string) (string, bool) {
+	return p.prompt(ctx, e, timeout, "fileaccess:"+groupID)
+}
+
 // Prompt implements Prompter.
 func (p *NotificationsPrompter) Prompt(ctx context.Context, e FileEvent, timeout time.Duration) (string, bool) {
-	nid := fmt.Sprintf("fileaccess:%s:%d", e.Op, p.id.Add(1))
+	return p.prompt(ctx, e, timeout, fmt.Sprintf("fileaccess:%s:%d", e.Op, p.id.Add(1)))
+}
+
+func (p *NotificationsPrompter) prompt(ctx context.Context, e FileEvent, timeout time.Duration, nid string) (string, bool) {
 	title := "File access request"
 	msg := fmt.Sprintf("%s (pid %d) wants to %s %s", displayExe(e.Exe), e.PID, opVerb(e.Op), e.Path)
 

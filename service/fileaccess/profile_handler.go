@@ -40,6 +40,10 @@ type LookupResult struct {
 	// Process.Path. Empty when the process couldn't be resolved.
 	Path string
 
+	// ProcessIdentity distinguishes a process lifetime from a reused PID when
+	// no profile can be resolved.
+	ProcessIdentity string
+
 	// Store is the rule store backing the matched profile, or nil
 	// when no profile resolved.
 	Store RuleStore
@@ -99,6 +103,9 @@ type ProfileHandler struct {
 	promptAdmissionMu sync.RWMutex
 	promptAdmission   func(string) (func(), bool)
 
+	promptCoordinatorMu sync.RWMutex
+	promptCoordinator   *PromptCoordinator
+
 	// The daemon's own profile is a complete in-memory decision snapshot.
 	// It is refreshed before fanotify marks are installed and on profile
 	// changes, so an event from this process never resolves /proc, reads the
@@ -122,13 +129,17 @@ func NewProfileHandler(lookup ProfileLookup, prompter Prompter, fallback Handler
 	if log == nil {
 		log = nopLogger{}
 	}
-	return &ProfileHandler{
+	handler := &ProfileHandler{
 		lookup:   lookup,
 		prompter: prompter,
 		timeout:  timeout,
 		fallback: fallback,
 		log:      log,
 	}
+	if publisher, ok := lookup.(interface{ setSnapshotObserver(func(*DecisionSnapshot)) }); ok {
+		publisher.setSnapshotObserver(handler.publishSnapshot)
+	}
+	return handler
 }
 
 // SetSelfProfile atomically replaces the daemon's in-memory policy snapshot.
@@ -138,6 +149,18 @@ func (h *ProfileHandler) setPromptAdmission(admission func(string) (func(), bool
 	h.promptAdmissionMu.Lock()
 	h.promptAdmission = admission
 	h.promptAdmissionMu.Unlock()
+}
+
+func (h *ProfileHandler) setPromptCoordinator(coordinator *PromptCoordinator) {
+	h.promptCoordinatorMu.Lock()
+	h.promptCoordinator = coordinator
+	h.promptCoordinatorMu.Unlock()
+}
+
+func (h *ProfileHandler) coordinator() *PromptCoordinator {
+	h.promptCoordinatorMu.RLock()
+	defer h.promptCoordinatorMu.RUnlock()
+	return h.promptCoordinator
 }
 
 func (h *ProfileHandler) acquirePromptSlot(profileKey string) (func(), bool) {
@@ -188,6 +211,44 @@ func (h *ProfileHandler) setSelfProfile(pid int32, result LookupResult) {
 	h.selfPID = pid
 	h.selfProfile = result
 	h.selfMu.Unlock()
+	if result.Snapshot != nil {
+		h.publishSnapshot(result.Snapshot)
+	}
+}
+
+func (h *ProfileHandler) publishSnapshot(snapshot *DecisionSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	if coordinator := h.coordinator(); coordinator != nil {
+		coordinator.SnapshotReplaced(snapshot)
+	}
+}
+
+// PublishProfileSnapshot is called from the profile change event path. It
+// replaces the immutable decision snapshot before pending prompt groups are
+// reevaluated, without doing profile storage work in a decision worker.
+func (h *ProfileHandler) PublishProfileSnapshot(p *profile.Profile) {
+	if p == nil {
+		return
+	}
+	p.RLock()
+	id := p.ID
+	rawRules := append([]string(nil), p.GetFileAccessRules()...)
+	defaultAction := p.DefaultAction()
+	source := string(p.Source)
+	p.RUnlock()
+	if defaultAction == profile.DefaultActionNotSet {
+		defaultAction = profile.DefaultActionAsk
+	}
+
+	var snapshot *DecisionSnapshot
+	if lookup, ok := h.lookup.(*processProfileLookup); ok {
+		snapshot = lookup.snapshotFor(id, source, defaultAction, rawRules)
+	} else {
+		snapshot = newDecisionSnapshot(id, source, defaultAction, rawRules, h.selfRevision.Add(1))
+		h.publishSnapshot(snapshot)
+	}
 }
 
 func (h *ProfileHandler) lookupSelfProfile(pid int32) (LookupResult, bool) {
@@ -231,6 +292,9 @@ func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (V
 
 	if res.Path != "" {
 		e.Exe = res.Path
+	}
+	if res.ProcessIdentity != "" {
+		e.ProcessIdentity = res.ProcessIdentity
 	}
 	if res.Store == nil {
 		return h.fallbackDecision(ctx, e)
@@ -292,6 +356,74 @@ func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (V
 	default:
 		return VerdictDeny, nil
 	}
+}
+
+// DecidePending routes Ask decisions to the prompt coordinator. It is used by
+// DecisionPipeline only; the older synchronous DecideForResponse entry point
+// remains available to callers outside the owned-event pipeline.
+func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent) (handled, handedOff bool, verdict Verdict, afterResponse func()) {
+	e := pending.Event()
+	if e == nil {
+		return false, false, VerdictDeny, nil
+	}
+
+	res, isSelf := h.lookupSelfProfile(e.PID)
+	if !isSelf {
+		var err error
+		res, err = h.lookup.Lookup(ctx, e.PID)
+		if err != nil {
+			if res.Path != "" {
+				e.Exe = res.Path
+			}
+			if res.ProcessIdentity != "" {
+				e.ProcessIdentity = res.ProcessIdentity
+			}
+			if coordinator := h.coordinator(); coordinator != nil {
+				return coordinator.Admit(ctx, pending, nil, &DecisionSnapshot{DefaultAction: profile.DefaultActionAsk})
+			}
+			verdict, afterResponse = h.fallbackDecision(ctx, e)
+			return false, false, verdict, afterResponse
+		}
+	}
+
+	if res.Path != "" {
+		e.Exe = res.Path
+	}
+	if res.ProcessIdentity != "" {
+		e.ProcessIdentity = res.ProcessIdentity
+	}
+	if res.Store == nil {
+		if coordinator := h.coordinator(); coordinator != nil {
+			return coordinator.Admit(ctx, pending, nil, &DecisionSnapshot{DefaultAction: profile.DefaultActionAsk})
+		}
+		verdict, afterResponse = h.fallbackDecision(ctx, e)
+		return false, false, verdict, afterResponse
+	}
+
+	e.ProfileID = res.Store.ID()
+	e.ProfileSource = res.ProfileSource
+	e.ProfileName = res.ProfileName
+	e.ProfileLinkedPath = res.ProfileLinkedPath
+
+	snapshot := res.Snapshot
+	if snapshot == nil {
+		snapshot = &DecisionSnapshot{
+			ProfileID:     e.ProfileID,
+			Source:        e.ProfileSource,
+			DefaultAction: res.DefaultAction,
+			Rules:         res.ParsedRules,
+		}
+	}
+	if decision, ask := decisionFromSnapshot(snapshot, e.Path); !ask {
+		return false, false, decision, nil
+	}
+
+	coordinator := h.coordinator()
+	if coordinator == nil {
+		verdict, afterResponse = h.DecideForResponse(ctx, e)
+		return false, false, verdict, afterResponse
+	}
+	return coordinator.Admit(ctx, pending, res.Store, snapshot)
 }
 
 func (h *ProfileHandler) fallbackDecision(ctx context.Context, e *FileEvent) (Verdict, func()) {

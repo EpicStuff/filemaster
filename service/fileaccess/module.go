@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 
 	"github.com/safing/portmaster/base/config"
@@ -81,14 +82,24 @@ func (fa *FileAccess) hydrateSelfProfile() error {
 
 	if profiles, ok := fa.instance.(profileAccessor); ok {
 		profiles.Profile().EventConfigChange.AddCallback(
-			"fileaccess daemon profile reload",
+			"fileaccess decision snapshot reload",
 			func(_ *mgr.WorkerCtx, scopedID string) (bool, error) {
-				if scopedID != profile.MakeScopedID(profile.SourceLocal, profile.PortmasterProfileID) {
+				source, id, ok := strings.Cut(scopedID, "/")
+				if !ok || source != string(profile.SourceLocal) {
 					return false, nil
 				}
-				if err := refresh(); err != nil {
-					fa.mgr.Warn("fileaccess: failed to refresh daemon profile", "err", err)
+				if id == profile.PortmasterProfileID {
+					if err := refresh(); err != nil {
+						fa.mgr.Warn("fileaccess: failed to refresh daemon profile", "err", err)
+					}
+					return false, nil
 				}
+				p, err := profile.GetLocalProfile(id, nil, nil)
+				if err != nil {
+					fa.mgr.Warn("fileaccess: failed to refresh decision snapshot", "profile", scopedID, "err", err)
+					return false, nil
+				}
+				fa.profileHandler.PublishProfileSnapshot(p)
 				return false, nil
 			},
 		)

@@ -75,6 +75,10 @@ type processMappingRefresher interface {
 	RefreshProcessMapping(context.Context, int32) error
 }
 
+type pendingDecisionHandler interface {
+	DecidePending(context.Context, PendingEvent) (handled, handedOff bool, verdict Verdict, afterResponse func())
+}
+
 type decisionWork struct {
 	pending PendingEvent
 }
@@ -114,6 +118,7 @@ func NewDecisionPipeline(handler Handler, config DecisionPipelineConfig) *Decisi
 	}
 	if handler, ok := pipeline.handler.(*ProfileHandler); ok {
 		handler.setPromptAdmission(pipeline.acquireAsk)
+		handler.setPromptCoordinator(NewPromptCoordinator(handler.prompter, handler.timeout, pipeline.acquireAsk, pipeline.finishPromptEvent))
 	}
 	return pipeline
 }
@@ -190,7 +195,13 @@ func (p *DecisionPipeline) Handle(_ context.Context, pending PendingEvent) error
 }
 
 func (p *DecisionPipeline) decide(ctx context.Context, pending PendingEvent) {
-	defer p.outstanding.Add(-1)
+	releaseOutstanding := true
+	completed := false
+	defer func() {
+		if releaseOutstanding {
+			p.outstanding.Add(-1)
+		}
+	}()
 	event := pending.Event()
 	if event == nil {
 		_ = pending.Respond(VerdictDeny)
@@ -206,12 +217,29 @@ func (p *DecisionPipeline) decide(ctx context.Context, pending PendingEvent) {
 				afterResponse = nil
 			}
 		}()
+		if handler, ok := p.handler.(pendingDecisionHandler); ok {
+			var handled, handedOff bool
+			handled, handedOff, verdict, afterResponse = handler.DecidePending(ctx, pending)
+			if handled {
+				completed = true
+				if handedOff {
+					releaseOutstanding = false
+				}
+				return
+			}
+		}
 		if handler, ok := p.handler.(postResponseDecisionHandler); ok {
 			verdict, afterResponse = handler.DecideForResponse(ctx, event)
 			return
 		}
 		verdict = p.handler.Decide(ctx, event)
 	}()
+	if completed && releaseOutstanding {
+		return
+	}
+	if !releaseOutstanding {
+		return
+	}
 	if ctx.Err() != nil {
 		verdict = VerdictDeny
 		afterResponse = nil
@@ -236,6 +264,26 @@ func (p *DecisionPipeline) decide(ctx context.Context, pending PendingEvent) {
 	if p.observe != nil {
 		p.observe(event, verdict)
 	}
+}
+
+func (p *DecisionPipeline) finishPromptEvent(ctx context.Context, pending PendingEvent, verdict Verdict) {
+	err := pending.Respond(verdict)
+	accepted := err == nil
+	if owner, ok := pending.(*pendingEventOwner); ok {
+		accepted = owner.responseAccepted()
+	}
+	if accepted {
+		event := pending.Event()
+		if event != nil && verdict == VerdictAllow && event.Op == OpExec {
+			if handler, ok := p.handler.(processMappingRefresher); ok {
+				_ = handler.RefreshProcessMapping(ctx, event.PID)
+			}
+		}
+		if event != nil && p.observe != nil {
+			p.observe(event, verdict)
+		}
+	}
+	p.outstanding.Add(-1)
 }
 
 func (p *DecisionPipeline) acquireAsk(profileKey string) (func(), bool) {

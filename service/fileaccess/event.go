@@ -76,6 +76,11 @@ type FileEvent struct {
 	Path string
 	Op   FileOp
 
+	// ProcessIdentity is stable for the lifetime of a resolved process. It is
+	// used only for the unidentified prompt bucket, where there is no profile
+	// identity available to safely group requests.
+	ProcessIdentity string
+
 	ProfileID         string
 	ProfileSource     string
 	ProfileName       string
