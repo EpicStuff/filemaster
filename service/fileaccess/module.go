@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/safing/portmaster/base/config"
 	"github.com/safing/portmaster/service/mgr"
@@ -32,6 +33,8 @@ type FileAccess struct {
 
 	shutdownOnce        sync.Once
 	shutdownDone        chan struct{}
+	shutdownFinalDone   chan struct{}
+	shutdownTimeout     time.Duration
 	shutdownMu          sync.Mutex
 	shutdownResult      error
 	shutdownDiagnostics ShutdownDiagnostics
@@ -93,6 +96,9 @@ func (fa *FileAccess) hydrateSelfProfile() error {
 		profiles.Profile().EventConfigChange.AddCallback(
 			"fileaccess decision snapshot reload",
 			func(_ *mgr.WorkerCtx, scopedID string) (bool, error) {
+				if fa.lifecycle != nil && !fa.lifecycle.IsRunning() {
+					return false, nil
+				}
 				source, id, ok := strings.Cut(scopedID, "/")
 				if !ok || source != string(profile.SourceLocal) {
 					return false, nil
@@ -124,6 +130,9 @@ func (fa *FileAccess) Start() error {
 	}
 	if fa.shutdownDone == nil {
 		fa.shutdownDone = make(chan struct{})
+	}
+	if fa.shutdownFinalDone == nil {
+		fa.shutdownFinalDone = make(chan struct{})
 	}
 	if !fa.lifecycle.IsRunning() {
 		return ErrFileAccessClosing
@@ -238,11 +247,12 @@ func New(instance instance) (*FileAccess, error) {
 	}
 	m := mgr.New("FileAccess")
 	module = &FileAccess{
-		mgr:          m,
-		instance:     instance,
-		handler:      allowAll,
-		lifecycle:    NewPipelineLifecycle(),
-		shutdownDone: make(chan struct{}),
+		mgr:               m,
+		instance:          instance,
+		handler:           allowAll,
+		lifecycle:         NewPipelineLifecycle(),
+		shutdownDone:      make(chan struct{}),
+		shutdownFinalDone: make(chan struct{}),
 	}
 	return module, nil
 }

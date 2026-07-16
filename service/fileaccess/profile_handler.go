@@ -85,9 +85,11 @@ type ProfileLookup interface {
 // into the profile, which carries the existing portmaster persistence
 // + sync machinery.
 type ProfileHandler struct {
-	lookup   ProfileLookup
-	prompter Prompter
-	timeout  time.Duration
+	lookup                    ProfileLookup
+	prompter                  Prompter
+	timeout                   time.Duration
+	lifecycle                 *PipelineLifecycle
+	beforeSnapshotPublication func()
 
 	// fallback is used when ProfileLookup returns an error or no
 	// profile resolves. Without it the daemon would default-deny every
@@ -115,6 +117,10 @@ type ProfileHandler struct {
 	selfMu      sync.RWMutex
 	selfPID     int32
 	selfProfile LookupResult
+}
+
+func (h *ProfileHandler) setLifecycle(lifecycle *PipelineLifecycle) {
+	h.lifecycle = lifecycle
 }
 
 // NewProfileHandler returns a profile-backed handler. The fallback
@@ -182,6 +188,14 @@ func (h *ProfileHandler) SetSelfProfile(p *profile.Profile, pid int32) {
 	if p == nil || pid <= 0 {
 		return
 	}
+	if h.lifecycle != nil {
+		h.lifecycle.whileRunning(func() { h.setSelfProfileRunning(p, pid) })
+		return
+	}
+	h.setSelfProfileRunning(p, pid)
+}
+
+func (h *ProfileHandler) setSelfProfileRunning(p *profile.Profile, pid int32) {
 
 	p.RLock()
 	id := p.ID
@@ -198,14 +212,14 @@ func (h *ProfileHandler) SetSelfProfile(p *profile.Profile, pid int32) {
 	}
 	store := &profileRuleStore{p: p, source: profile.ProfileSource(source), id: id}
 	if coordinator := h.coordinator(); coordinator != nil {
-		coordinator.RulePersistence().BindStore(source, id, store)
+		coordinator.RulePersistence().bindStoreRunning(source, id, store)
 	}
 	snapshot := newDecisionSnapshot(id, source, defaultAction, rawRules, h.selfRevision.Add(1))
 	if coordinator := h.coordinator(); coordinator != nil {
 		snapshot = coordinator.RulePersistence().Merge(snapshot)
 	}
 	if coordinator := h.coordinator(); coordinator != nil {
-		coordinator.RulePersistence().Bind(snapshot, store)
+		coordinator.RulePersistence().bindStoreRunning(snapshot.Source, snapshot.ProfileID, store)
 	}
 	result := LookupResult{
 		Path:              path,
@@ -235,6 +249,19 @@ func (h *ProfileHandler) publishSnapshot(snapshot *DecisionSnapshot) {
 	if snapshot == nil {
 		return
 	}
+	if h.lifecycle != nil {
+		h.lifecycle.whileRunning(func() {
+			if h.beforeSnapshotPublication != nil {
+				h.beforeSnapshotPublication()
+			}
+			h.publishSnapshotRunning(snapshot)
+		})
+		return
+	}
+	h.publishSnapshotRunning(snapshot)
+}
+
+func (h *ProfileHandler) publishSnapshotRunning(snapshot *DecisionSnapshot) {
 	// The Filemaster self path is intentionally in-memory. Keep its stored
 	// snapshot in lockstep with an Always overlay without doing process lookup.
 	h.selfMu.Lock()
@@ -245,7 +272,7 @@ func (h *ProfileHandler) publishSnapshot(snapshot *DecisionSnapshot) {
 	}
 	h.selfMu.Unlock()
 	if coordinator := h.coordinator(); coordinator != nil {
-		coordinator.SnapshotReplaced(snapshot)
+		coordinator.snapshotReplacedRunning(snapshot)
 	}
 }
 

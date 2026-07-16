@@ -14,16 +14,19 @@ import (
 var ErrShortFanotifyResponse = errors.New("short fanotify response write")
 
 type fanotifyResponseWriter struct {
-	groupFD    int
-	log        logger
-	write      func(int, []byte) (int, error)
-	close      func(int) error
-	afterClose func(int32, error)
-	lifecycle  *PipelineLifecycle
+	groupFD        int
+	log            logger
+	write          func(int, []byte) (int, error)
+	close          func(int) error
+	afterClose     func(int32, error)
+	afterAdmission func(int32)
+	lifecycle      *PipelineLifecycle
 
+	admissionMu    sync.RWMutex
 	writeMu        sync.Mutex
 	sealed         atomic.Bool
 	closed         atomic.Bool
+	closeErr       error
 	currentFD      atomic.Int64
 	currentVerdict atomic.Uint32
 	changed        chan struct{}
@@ -55,6 +58,11 @@ func (writer *fanotifyResponseWriter) respond(eventFD int32, verdict Verdict) re
 	}
 	responseBytes := unsafe.Slice((*byte)(unsafe.Pointer(&response)), unsafe.Sizeof(response))
 
+	writer.admissionMu.RLock()
+	defer writer.admissionMu.RUnlock()
+	if writer.afterAdmission != nil {
+		writer.afterAdmission(eventFD)
+	}
 	writer.writeMu.Lock()
 	defer writer.writeMu.Unlock()
 	writer.currentFD.Store(int64(eventFD))
@@ -112,8 +120,7 @@ func (writer *fanotifyResponseWriter) enterFatal(err error) {
 	if first {
 		writer.log.Error("fanotify enforcement failure; entering controlled draining", "err", err)
 		if writer.lifecycle != nil {
-			ctx, _ := context.WithTimeout(context.Background(), defaultControlledShutdownTimeout)
-			writer.lifecycle.BeginClosing(ctx)
+			writer.lifecycle.BeginClosing(context.Background())
 		}
 	}
 }
@@ -144,9 +151,7 @@ func (writer *fanotifyResponseWriter) Diagnostics() ResponseWriterDiagnostics {
 	return diagnostics
 }
 
-func (writer *fanotifyResponseWriter) SealAndWait(ctx context.Context) error {
-	writer.sealed.Store(true)
-	writer.signalChanged()
+func (writer *fanotifyResponseWriter) WaitCurrentResponse(ctx context.Context) error {
 	for writer.currentFD.Load() >= 0 {
 		select {
 		case <-ctx.Done():
@@ -157,20 +162,24 @@ func (writer *fanotifyResponseWriter) SealAndWait(ctx context.Context) error {
 	return nil
 }
 
-func (writer *fanotifyResponseWriter) CloseGroup() error {
+// SealAndCloseGroup obtains exclusive response ownership, then atomically
+// prevents future writes and closes the fanotify group. Until this lock is
+// acquired, Closing events may continue to send deny responses normally.
+func (writer *fanotifyResponseWriter) SealAndCloseGroup() error {
+	writer.admissionMu.Lock()
+	defer writer.admissionMu.Unlock()
 	writer.writeMu.Lock()
 	defer writer.writeMu.Unlock()
 	if writer.closed.Load() {
-		return nil
+		return writer.closeErr
 	}
-	if writer.currentFD.Load() >= 0 {
-		return errors.New("fanotify response is still in progress")
-	}
+	writer.sealed.Store(true)
+	writer.signalChanged()
 	// Linux fanotify(7) documents that closing the group implicitly allows
 	// outstanding permission events. Callers must therefore drain or explicitly
 	// report every owner before invoking this final close.
-	err := writer.close(writer.groupFD)
+	writer.closeErr = writer.close(writer.groupFD)
 	writer.closed.Store(true)
 	writer.signalChanged()
-	return err
+	return writer.closeErr
 }

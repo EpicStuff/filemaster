@@ -57,6 +57,8 @@ type DecisionPipelineDiagnostics struct {
 	PeakQueueDepth          int64
 	Workers                 int
 	ActiveWorkers           int64
+	ExpectedWorkers         int64
+	ExitedWorkers           int64
 	ActiveDecisions         int64
 	Outstanding             int64
 	PendingAsk              int
@@ -99,6 +101,8 @@ type DecisionPipeline struct {
 
 	started         atomic.Bool
 	activeWorkers   atomic.Int64
+	expectedWorkers atomic.Int64
+	exitedWorkers   atomic.Int64
 	activeDecisions atomic.Int64
 
 	outstanding atomic.Int64
@@ -138,6 +142,7 @@ func newDecisionPipeline(handler Handler, config DecisionPipelineConfig, lifecyc
 		pipeline.observe = observer.Observe
 	}
 	if handler, ok := pipeline.handler.(*ProfileHandler); ok {
+		handler.setLifecycle(lifecycle)
 		handler.setPromptAdmission(pipeline.acquireAsk)
 		coordinator := newPromptCoordinator(handler.prompter, handler.timeout, pipeline.acquireAsk, pipeline.finishTransferredPromptEvent, lifecycle)
 		coordinator.complete = pipeline.releaseOutstanding
@@ -155,13 +160,18 @@ func (p *DecisionPipeline) Config() DecisionPipelineConfig {
 // Activate permits reader admission once production has registered its fixed
 // workers. It does not create any goroutine.
 func (p *DecisionPipeline) Activate() {
-	p.started.Store(true)
+	if p.started.CompareAndSwap(false, true) {
+		p.expectedWorkers.Store(int64(p.config.Workers))
+		p.signalChanged()
+	}
 }
 
 func (p *DecisionPipeline) Start(ctx context.Context) {
 	if !p.started.CompareAndSwap(false, true) {
 		return
 	}
+	p.expectedWorkers.Store(int64(p.config.Workers))
+	p.signalChanged()
 	for range p.config.Workers {
 		go p.Run(ctx)
 	}
@@ -175,6 +185,7 @@ func (p *DecisionPipeline) Run(ctx context.Context) error {
 	p.signalChanged()
 	defer func() {
 		p.activeWorkers.Add(-1)
+		p.exitedWorkers.Add(1)
 		p.signalChanged()
 	}()
 	for {
@@ -308,10 +319,11 @@ func (p *DecisionPipeline) decide(ctx context.Context, work *decisionWork) {
 		afterResponse = nil
 	}
 
-	err := pending.Respond(verdict)
-	accepted := err == nil
+	accepted := false
 	if owner, ok := pending.(*pendingEventOwner); ok {
-		accepted = owner.responseAccepted()
+		accepted, _ = owner.respondAttempt(verdict)
+	} else {
+		accepted = pending.Respond(verdict) == nil
 	}
 	if !accepted || !p.lifecycle.IsRunning() {
 		return
@@ -341,10 +353,11 @@ func (p *DecisionPipeline) finishTransferredPromptEvent(ctx context.Context, pen
 		event = *source
 		hasEvent = true
 	}
-	err := pending.Respond(verdict)
-	accepted := err == nil
+	accepted := false
 	if owner, ok := pending.(*pendingEventOwner); ok {
-		accepted = owner.responseAccepted()
+		accepted, _ = owner.respondAttempt(verdict)
+	} else {
+		accepted = pending.Respond(verdict) == nil
 	}
 	if accepted && hasEvent && p.lifecycle.IsRunning() {
 		if verdict == VerdictAllow && event.Op == OpExec {
@@ -436,7 +449,9 @@ func (p *DecisionPipeline) resolveActiveForShutdown() {
 	}
 	p.activeMu.Unlock()
 	for _, work := range active {
-		_ = resolvePendingCurrent(work.pending, VerdictDeny)
+		// Only resolve ownership still held by this active worker. Transferred
+		// ownership belongs to the prompt coordinator and is drained there.
+		_ = work.pending.Respond(VerdictDeny)
 	}
 }
 
@@ -458,6 +473,23 @@ func (p *DecisionPipeline) Drain(ctx context.Context) error {
 func (p *DecisionPipeline) WaitOutstanding(ctx context.Context) error {
 	for {
 		if p.outstanding.Load() == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-p.changed:
+		}
+	}
+}
+
+// WaitWorkers joins every configured decision worker. The expected count is
+// registered before launch so not-yet-scheduled workers cannot be mistaken for
+// workers that have already exited.
+func (p *DecisionPipeline) WaitWorkers(ctx context.Context) error {
+	for {
+		expected := p.expectedWorkers.Load()
+		if p.activeWorkers.Load() == 0 && p.exitedWorkers.Load() >= expected {
 			return nil
 		}
 		select {
@@ -490,6 +522,8 @@ func (p *DecisionPipeline) Diagnostics() DecisionPipelineDiagnostics {
 		PeakQueueDepth:          p.peakQueue.Load(),
 		Workers:                 p.config.Workers,
 		ActiveWorkers:           p.activeWorkers.Load(),
+		ExpectedWorkers:         p.expectedWorkers.Load(),
+		ExitedWorkers:           p.exitedWorkers.Load(),
 		ActiveDecisions:         p.activeDecisions.Load(),
 		Outstanding:             p.outstanding.Load(),
 		PendingAsk:              pendingAsk,

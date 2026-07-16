@@ -51,11 +51,13 @@ type promptGroup struct {
 // exact-match prompt is answered, timed out, overloaded, or superseded by a
 // profile snapshot.
 type PromptCoordinator struct {
-	prompter Prompter
-	timeout  time.Duration
-	admit    func(string) (func(), bool)
-	finish   func(context.Context, PendingEvent, Verdict) bool
-	complete func()
+	prompter            Prompter
+	timeout             time.Duration
+	admit               func(string) (func(), bool)
+	finish              func(context.Context, PendingEvent, Verdict) bool
+	complete            func()
+	afterAdmission      func()
+	beforePromptResolve func()
 
 	lifecycle *PipelineLifecycle
 
@@ -133,6 +135,7 @@ func (c *PromptCoordinator) Admit(ctx context.Context, pending PendingEvent, sto
 	var transferErr error
 	var immediate *Verdict
 	admitted := c.lifecycle.whileRunning(func() {
+		c.persistence.ensureStoreRunning(snapshot.Source, snapshot.ProfileID, store)
 		owner, transferErr = pending.Transfer()
 		if transferErr != nil {
 			return
@@ -188,6 +191,9 @@ func (c *PromptCoordinator) Admit(ctx context.Context, pending PendingEvent, sto
 		release()
 		return false, false, VerdictDeny, nil
 	}
+	if c.afterAdmission != nil {
+		c.afterAdmission()
+	}
 	if immediate != nil {
 		resolvedVerdict := *immediate
 		if !c.lifecycle.IsRunning() {
@@ -223,6 +229,9 @@ func (c *PromptCoordinator) waitForPrompt(ctx context.Context, group *promptGrou
 		c.resolve(group, VerdictDeny)
 		return
 	}
+	if c.beforePromptResolve != nil {
+		c.beforePromptResolve()
+	}
 	switch action {
 	case ActionAllow:
 		c.resolve(group, VerdictAllow)
@@ -246,6 +255,13 @@ func (c *PromptCoordinator) waitForPrompt(ctx context.Context, group *promptGrou
 // SnapshotReplaced reevaluates every open group for the changed profile. A
 // group is retained only when the replacement still asks for its exact path.
 func (c *PromptCoordinator) SnapshotReplaced(snapshot *DecisionSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	c.lifecycle.whileRunning(func() { c.snapshotReplacedRunning(snapshot) })
+}
+
+func (c *PromptCoordinator) snapshotReplacedRunning(snapshot *DecisionSnapshot) {
 	if snapshot == nil {
 		return
 	}

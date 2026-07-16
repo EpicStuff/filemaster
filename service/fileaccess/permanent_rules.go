@@ -141,6 +141,14 @@ func (p *RulePersistence) BindStore(source, profileID string, store RuleStore) {
 	if store == nil {
 		return
 	}
+	if p.lifecycle != nil {
+		p.lifecycle.whileRunning(func() { p.bindStoreRunning(source, profileID, store) })
+		return
+	}
+	p.bindStoreRunning(source, profileID, store)
+}
+
+func (p *RulePersistence) bindStoreRunning(source, profileID string, store RuleStore) {
 	var wake chan struct{}
 	p.mu.Lock()
 	key := source + "/" + profileID
@@ -161,6 +169,22 @@ func (p *RulePersistence) BindStore(source, profileID string, store RuleStore) {
 		default:
 		}
 	}
+}
+
+// ensureStoreRunning captures the prompt's store only when no authoritative
+// binding is known yet. It is called inside the shared lifecycle activity
+// barrier, so a prompt accepted before Closing has a stable store for the final
+// flush without allowing an older prompt to replace a newer binding.
+func (p *RulePersistence) ensureStoreRunning(source, profileID string, store RuleStore) {
+	if store == nil {
+		return
+	}
+	p.mu.Lock()
+	key := source + "/" + profileID
+	if p.bindings[key].store == nil {
+		p.bindings[key] = ruleStoreBinding{store: store, generation: 1}
+	}
+	p.mu.Unlock()
 }
 
 type ruleStoreIdentity interface{ ruleStoreIdentity() any }
@@ -188,43 +212,54 @@ func sameRuleStore(left, right RuleStore) bool {
 // Apply makes an accepted Always decision visible before storage is attempted.
 // The returned snapshot is immutable and any observer runs after unlocking.
 func (p *RulePersistence) Apply(snapshot *DecisionSnapshot, store RuleStore, pattern string, verdict Verdict) *DecisionSnapshot {
-	if !p.lifecycle.IsRunning() {
-		return snapshot
+	merged := snapshot
+	notify := false
+	if !p.lifecycle.whileRunning(func() {
+		merged, notify = p.apply(snapshot, store, pattern, verdict, true)
+	}) {
+		return merged
 	}
-	return p.apply(snapshot, store, pattern, verdict)
+	if notify && p.observe != nil {
+		p.observe(merged)
+	}
+	return merged
 }
 
 // ApplyAccepted completes an Always action which won prompt ownership before
 // Closing. Prompt shutdown waits for this call before starting the final flush.
 func (p *RulePersistence) ApplyAccepted(snapshot *DecisionSnapshot, store RuleStore, pattern string, verdict Verdict) *DecisionSnapshot {
-	return p.apply(snapshot, store, pattern, verdict)
+	merged, notify := p.apply(snapshot, store, pattern, verdict, false)
+	if notify && p.observe != nil {
+		p.observe(merged)
+	}
+	return merged
 }
 
-func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pattern string, verdict Verdict) *DecisionSnapshot {
+func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pattern string, verdict Verdict, allowBinding bool) (*DecisionSnapshot, bool) {
 	rule, ok := canonicalPermanentRule(pattern, verdict)
 	if !ok || snapshot == nil || store == nil {
-		return snapshot
+		return snapshot, false
 	}
 	key := profileSnapshotKey(snapshot)
 	p.mu.Lock()
 	state := p.profileLocked(key)
 	base := state.baseForLocked(snapshot)
-	if p.bindings[key].store == nil {
+	if allowBinding && p.bindings[key].store == nil {
 		p.bindings[key] = ruleStoreBinding{store: store, generation: 1}
 	}
 	if current, exists := state.dirty[rule.pattern]; exists && current.verdict == rule.verdict {
 		merged := state.publishLocked(base)
 		p.mu.Unlock()
-		return merged
+		return merged, false
 	}
 	if current, exists := state.applied[rule.pattern]; exists && current.verdict == rule.verdict {
 		merged := state.publishLocked(base)
 		p.mu.Unlock()
-		return merged
+		return merged, false
 	}
 	if len(state.dirty) == 0 && len(state.applied) == 0 && durableExactRuleAtPrecedence(base, rule) {
 		p.mu.Unlock()
-		return base
+		return base, false
 	}
 	state.generation++
 	rule.generation = state.generation
@@ -238,9 +273,6 @@ func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pat
 	}
 	wake := state.wake
 	p.mu.Unlock()
-	if p.observe != nil {
-		p.observe(merged)
-	}
 	if start {
 		go p.runProfile(key, state)
 	}
@@ -248,7 +280,7 @@ func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pat
 	case wake <- struct{}{}:
 	default:
 	}
-	return merged
+	return merged, true
 }
 
 // Merge reapplies local dirty intent to a replacement profile snapshot. Dirty

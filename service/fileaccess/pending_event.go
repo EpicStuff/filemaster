@@ -106,18 +106,26 @@ func (event *pendingEventOwner) Transfer() (PendingEvent, error) {
 }
 
 func (event *pendingEventOwner) Respond(verdict Verdict) error {
+	_, err := event.respondAttempt(verdict)
+	return err
+}
+
+// respondAttempt reports whether this ownership handle's response was accepted
+// by the kernel. It deliberately does not report acceptance from an earlier
+// owner or response attempt.
+func (event *pendingEventOwner) respondAttempt(verdict Verdict) (bool, error) {
 	if verdict != VerdictAllow && verdict != VerdictDeny {
-		return ErrPendingEventInvalidVerdict
+		return false, ErrPendingEventInvalidVerdict
 	}
 
 	event.state.mu.Lock()
 	if event.state.verdictSet {
 		event.state.mu.Unlock()
-		return ErrPendingEventAlreadyResolved
+		return false, ErrPendingEventAlreadyResolved
 	}
 	if event.state.currentOwner != event.owner || event.state.accepted {
 		event.state.mu.Unlock()
-		return ErrPendingEventNotOwner
+		return false, ErrPendingEventNotOwner
 	}
 	event.state.verdict = verdict
 	event.state.verdictSet = true
@@ -126,7 +134,7 @@ func (event *pendingEventOwner) Respond(verdict Verdict) error {
 	return event.state.finishResponse(event, verdict)
 }
 
-func (state *pendingEventState) finishResponse(owner PendingEvent, verdict Verdict) error {
+func (state *pendingEventState) finishResponse(owner PendingEvent, verdict Verdict) (bool, error) {
 	result := state.respond(verdict)
 	if !result.accepted && result.err == nil {
 		result.err = ErrPendingEventResponseNotAccepted
@@ -136,13 +144,13 @@ func (state *pendingEventState) finishResponse(owner PendingEvent, verdict Verdi
 		state.accepted = true
 		state.currentOwner = 0
 		state.mu.Unlock()
-		return result.err
+		return true, result.err
 	}
 
 	if state.onUnacceptedResponse != nil {
 		state.onUnacceptedResponse(owner)
 	}
-	return result.err
+	return false, result.err
 }
 
 func (state *pendingEventState) resolveCurrent(verdict Verdict) (PendingEvent, error) {
@@ -164,7 +172,8 @@ func (state *pendingEventState) resolveCurrent(verdict Verdict) (PendingEvent, e
 	state.verdictSet = true
 	state.mu.Unlock()
 
-	return owner, state.finishResponse(owner, verdict)
+	_, err := state.finishResponse(owner, verdict)
+	return owner, err
 }
 
 func (event *pendingEventOwner) logicalVerdict() (Verdict, bool) {

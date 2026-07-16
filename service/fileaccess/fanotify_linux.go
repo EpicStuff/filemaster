@@ -71,8 +71,12 @@ type fanotifySource struct {
 	failedMu     sync.Mutex
 	failedEvents map[int32]PendingEvent
 
-	closeOnce sync.Once
-	closeErr  error
+	groupCloseOnce sync.Once
+	groupCloseErr  error
+
+	scopeCleanupOnce     sync.Once
+	scopeCleanupErr      error
+	scopeCleanupComplete atomic.Bool
 }
 
 const (
@@ -585,13 +589,6 @@ func (s *fanotifySource) WaitReaderExit(ctx context.Context) error {
 	}
 }
 
-func (s *fanotifySource) PrepareClose(ctx context.Context) error {
-	if s.responses == nil {
-		return nil
-	}
-	return s.responses.SealAndWait(ctx)
-}
-
 func (s *fanotifySource) ResponseDiagnostics() ResponseWriterDiagnostics {
 	if s.responses == nil {
 		return ResponseWriterDiagnostics{CurrentFD: -1}
@@ -599,27 +596,41 @@ func (s *fanotifySource) ResponseDiagnostics() ResponseWriterDiagnostics {
 	return s.responses.Diagnostics()
 }
 
-func (s *fanotifySource) Close() error {
-	s.closeOnce.Do(func() {
+func (s *fanotifySource) CloseGroup() error {
+	s.groupCloseOnce.Do(func() {
 		if s.responses != nil {
-			s.responses.sealed.Store(true)
-			s.closeErr = s.responses.CloseGroup()
+			_ = s.responses.WaitCurrentResponse(context.Background())
+			s.groupCloseErr = s.responses.SealAndCloseGroup()
 		} else {
-			s.closeErr = unix.Close(s.fd)
+			s.groupCloseErr = unix.Close(s.fd)
 		}
-		if !s.marksMu.TryLock() {
-			s.closeErr = errors.Join(s.closeErr, errors.New("scope reference cleanup blocked by an active mark operation"))
-			return
-		}
+	})
+	return s.groupCloseErr
+}
+
+func (s *fanotifySource) CleanupScopes() error {
+	s.scopeCleanupOnce.Do(func() {
+		s.marksMu.Lock()
+		defer s.marksMu.Unlock()
 		for _, scope := range s.scopes {
 			scope.close()
 		}
 		for _, scope := range s.retiredScopes {
 			scope.close()
 		}
-		s.marksMu.Unlock()
+		s.scopes = nil
+		s.retiredScopes = nil
+		s.scopeCleanupComplete.Store(true)
 	})
-	return s.closeErr
+	return s.scopeCleanupErr
+}
+
+func (s *fanotifySource) ScopeCleanupComplete() bool {
+	return s.scopeCleanupComplete.Load()
+}
+
+func (s *fanotifySource) Close() error {
+	return errors.Join(s.CloseGroup(), s.CleanupScopes())
 }
 
 func (s *fanotifySource) handleEvents(ctx context.Context, handler PendingHandler, buf []byte) error {

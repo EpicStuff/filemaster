@@ -147,8 +147,14 @@ func TestShutdownFailedMarkRemovalKeepsReaderServicingEvents(t *testing.T) {
 	if diagnostics.Marks.Complete || len(diagnostics.Marks.Failures) != 1 {
 		t.Fatalf("mark removal failure missing: %+v", diagnostics.Marks)
 	}
+	select {
+	case <-fileAccess.shutdownFinalDone:
+	case <-time.After(time.Second):
+		t.Fatal("final cleanup did not continue after the bounded report")
+	}
+	diagnostics = fileAccess.ShutdownDiagnostics()
 	if !diagnostics.Source.GroupClosed || !diagnostics.Source.ReaderExited {
-		t.Fatalf("deadline cleanup did not close and join reader: %+v", diagnostics.Source)
+		t.Fatalf("final cleanup did not close and join reader: %+v", diagnostics.Source)
 	}
 }
 
@@ -196,6 +202,8 @@ func TestShutdownDeadlineWithBlockedMarkOperationStillClosesGroup(t *testing.T) 
 	source := newReaderTestSource(2)
 	source.fd = 99
 	source.SetLifecycle(lifecycle)
+	source.readerDone = nil
+	source.readerExited.Store(true)
 	source.marks = map[int]mountedMark{
 		3: {mount: mountInfo{ID: 3, MountPoint: "/tmp"}, mask: unix.FAN_OPEN_PERM},
 	}
@@ -204,6 +212,11 @@ func TestShutdownDeadlineWithBlockedMarkOperationStillClosesGroup(t *testing.T) 
 	source.mark = func(uint, uint64, string) error {
 		close(started)
 		<-release
+		return nil
+	}
+	groupClosed := make(chan struct{})
+	source.responses.close = func(int) error {
+		close(groupClosed)
 		return nil
 	}
 	fileAccess := newShutdownTestFileAccess(source, lifecycle)
@@ -220,10 +233,23 @@ func TestShutdownDeadlineWithBlockedMarkOperationStillClosesGroup(t *testing.T) 
 	case <-time.After(time.Second):
 		t.Fatal("blocked mark operation prevented bounded group closure")
 	}
-	if !fileAccess.ShutdownDiagnostics().Source.GroupClosed {
-		t.Fatalf("group was not closed at deadline: %+v", fileAccess.ShutdownDiagnostics())
+	if diagnostics := fileAccess.ShutdownDiagnostics(); diagnostics.FinalCleanupCompleted || lifecycle.State() != LifecycleClosing || !diagnostics.Source.ScopeCleanupPending {
+		t.Fatalf("bounded report falsely completed cleanup: %+v", diagnostics)
+	}
+	select {
+	case <-groupClosed:
+	case <-time.After(time.Second):
+		t.Fatal("shared finalizer did not close the group while mark cleanup was blocked")
+	}
+	if lifecycle.State() != LifecycleClosing || !fileAccess.ShutdownDiagnostics().Source.ScopeCleanupPending {
+		t.Fatalf("scope cleanup was not reported as pending: %+v", fileAccess.ShutdownDiagnostics())
 	}
 	close(release)
+	select {
+	case <-lifecycle.Closed():
+	case <-time.After(time.Second):
+		t.Fatal("scope cleanup release did not publish Closed")
+	}
 }
 
 func TestShutdownResponseWriterOwnershipAndNoWriteAfterClosure(t *testing.T) {
@@ -234,40 +260,55 @@ func TestShutdownResponseWriterOwnershipAndNoWriteAfterClosure(t *testing.T) {
 	release := make(chan struct{})
 	var writes atomic.Int64
 	writer.write = func(_ int, bytes []byte) (int, error) {
-		writes.Add(1)
-		close(started)
-		<-release
+		if writes.Add(1) == 1 {
+			close(started)
+			<-release
+		}
 		return len(bytes), nil
 	}
 	writer.close = func(int) error { return nil }
-	result := make(chan responseResult, 1)
-	go func() { result <- writer.respond(42, VerdictDeny) }()
+	first := make(chan responseResult, 1)
+	go func() { first <- writer.respond(42, VerdictDeny) }()
 	<-started
 	diagnostics := writer.Diagnostics()
 	if diagnostics.CurrentFD != 42 || diagnostics.CurrentVerdict != VerdictDeny {
 		t.Fatalf("current response ownership missing: %+v", diagnostics)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	if err := writer.SealAndWait(ctx); err == nil {
-		t.Fatal("blocked response unexpectedly drained")
+	late := make(chan responseResult, 1)
+	lateAdmitted := make(chan struct{})
+	writer.afterAdmission = func(fd int32) {
+		if fd == 43 {
+			close(lateAdmitted)
+		}
 	}
-	cancel()
+	go func() { late <- writer.respond(43, VerdictDeny) }()
+	<-lateAdmitted
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- writer.SealAndCloseGroup() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("group closed while a response was active: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if writer.Diagnostics().Sealed {
+		t.Fatal("writer sealed before it acquired exclusive response ownership")
+	}
 	close(release)
-	if response := <-result; !response.accepted {
+	if response := <-first; !response.accepted {
 		t.Fatalf("response was not accepted: %+v", response)
 	}
-	if err := writer.SealAndWait(context.Background()); err != nil {
+	if response := <-late; !response.accepted {
+		t.Fatalf("late Closing response was not accepted: %+v", response)
+	}
+	if err := <-closeDone; err != nil {
 		t.Fatal(err)
 	}
-	if err := writer.CloseGroup(); err != nil {
-		t.Fatal(err)
-	}
-	second := writer.respond(43, VerdictDeny)
+	second := writer.respond(44, VerdictDeny)
 	if second.accepted || second.err == nil {
 		t.Fatalf("post-close response unexpectedly accepted: %+v", second)
 	}
-	if writes.Load() != 1 {
-		t.Fatalf("kernel writes = %d, want one before closure", writes.Load())
+	if writes.Load() != 2 {
+		t.Fatalf("kernel writes = %d, want two before closure", writes.Load())
 	}
 }
 
@@ -394,5 +435,174 @@ func TestShutdownPromptReplyRaceCompletesEveryEntryOnce(t *testing.T) {
 		if releases.Load() != 2 {
 			t.Fatalf("accounting releases = %d, want two", releases.Load())
 		}
+	}
+}
+
+func TestShutdownReportDeadlineKeepsWriterUsableUntilFinalClose(t *testing.T) {
+	lifecycle := NewPipelineLifecycle()
+	source := newReaderTestSource(4)
+	source.fd = 99
+	source.SetLifecycle(lifecycle)
+	source.readerDone = make(chan struct{})
+	source.readerIdle = make(chan struct{}, 1)
+	source.reconcileDone = nil
+	source.marks = map[int]mountedMark{
+		1: {mount: mountInfo{ID: 1, MountPoint: "/"}, mask: unix.FAN_OPEN_PERM},
+	}
+	source.mark = func(uint, uint64, string) error { return unix.EIO }
+
+	file, err := os.CreateTemp(t.TempDir(), "late-after-report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	lateFD := int32(file.Fd())
+	activeStarted := make(chan struct{})
+	activeRelease := make(chan struct{})
+	lateAdmitted := make(chan struct{})
+	lateVerdict := make(chan Verdict, 1)
+	var writes atomic.Int64
+	source.responses.afterAdmission = func(fd int32) {
+		if fd == lateFD {
+			close(lateAdmitted)
+		}
+	}
+	source.responses.write = func(_ int, bytes []byte) (int, error) {
+		if writes.Add(1) == 1 {
+			close(activeStarted)
+			<-activeRelease
+		} else {
+			lateVerdict <- responseVerdict(bytes)
+		}
+		return len(bytes), nil
+	}
+	groupClosed := make(chan struct{})
+	source.responses.close = func(fd int) error {
+		if fd == source.fd {
+			close(groupClosed)
+		}
+		return nil
+	}
+
+	emit := make(chan struct{})
+	var emitted atomic.Bool
+	source.poll = func([]unix.PollFd, int) (int, error) {
+		if source.responses.closed.Load() {
+			return 1, nil
+		}
+		<-emit
+		return 1, nil
+	}
+	eventBytes := fanotifyEventBytes(unix.FanotifyEventMetadata{
+		Vers: unix.FANOTIFY_METADATA_VERSION,
+		Fd:   lateFD,
+		Mask: unix.FAN_OPEN_PERM,
+	})
+	source.read = func(_ int, buffer []byte) (int, error) {
+		if source.responses.closed.Load() {
+			return 0, unix.EBADF
+		}
+		if emitted.CompareAndSwap(false, true) {
+			return copy(buffer, eventBytes), nil
+		}
+		return 0, unix.EAGAIN
+	}
+	go func() {
+		_ = source.Run(context.Background(), PendingHandlerFunc(func(context.Context, PendingEvent) error {
+			t.Error("late Closing event reached normal policy")
+			return nil
+		}))
+	}()
+
+	activeResult := make(chan responseResult, 1)
+	go func() { activeResult <- source.responses.respond(77, VerdictDeny) }()
+	<-activeStarted
+	fileAccess := newShutdownTestFileAccess(source, lifecycle)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	reportErr := fileAccess.Shutdown(ctx)
+	if reportErr == nil {
+		t.Fatal("active response unexpectedly completed within reporting deadline")
+	}
+	if diagnostics := fileAccess.ShutdownDiagnostics(); lifecycle.State() != LifecycleClosing || diagnostics.Source.Response.Sealed || diagnostics.Source.GroupClosed {
+		t.Fatalf("writer/group finalized at bounded report: %+v", diagnostics)
+	}
+
+	close(emit)
+	<-lateAdmitted
+	close(activeRelease)
+	if result := <-activeResult; !result.accepted {
+		t.Fatalf("active response failed: %+v", result)
+	}
+	if verdict := <-lateVerdict; verdict != VerdictDeny {
+		t.Fatalf("late Closing verdict = %v, want deny", verdict)
+	}
+	select {
+	case <-groupClosed:
+	case <-time.After(time.Second):
+		t.Fatal("finalizer did not atomically close the group")
+	}
+	select {
+	case <-lifecycle.Closed():
+	case <-time.After(time.Second):
+		t.Fatal("reader/scope cleanup did not publish Closed")
+	}
+	final := fileAccess.ShutdownDiagnostics()
+	if !final.FinalCleanupCompleted || !final.Source.ReaderExited || !final.Source.ScopeCleanupComplete || final.Decision.Outstanding != 0 {
+		t.Fatalf("final cleanup diagnostics incomplete: %+v", final)
+	}
+	if repeated := fileAccess.Shutdown(context.Background()); repeated != reportErr {
+		t.Fatalf("repeated Shutdown result = %v, want stable %v", repeated, reportErr)
+	}
+	if writes.Load() != 2 {
+		t.Fatalf("response writes = %d, want active and late deny", writes.Load())
+	}
+}
+
+func TestShutdownScopeCleanupClosesEveryReferenceExactlyOnce(t *testing.T) {
+	active, err := activateScope(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired, err := activateScope(t.TempDir())
+	if err != nil {
+		active.close()
+		t.Fatal(err)
+	}
+	activeFD := active.refFD
+	retiredFD := retired.refFD
+	source := newReaderTestSource(1)
+	source.scopes = map[string]*policyScope{active.Configured: active}
+	source.retiredScopes = []*policyScope{retired}
+	if err := source.CleanupScopes(); err != nil {
+		t.Fatal(err)
+	}
+	for _, fd := range []int{activeFD, retiredFD} {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+			t.Fatalf("scope fd %d remained open: %v", fd, err)
+		}
+	}
+
+	probe, err := unix.Open("/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe != activeFD {
+		if err := unix.Dup3(probe, activeFD, unix.O_CLOEXEC); err != nil {
+			unix.Close(probe)
+			t.Fatal(err)
+		}
+		unix.Close(probe)
+		probe = activeFD
+	}
+	defer unix.Close(probe)
+	if err := source.CleanupScopes(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unix.FcntlInt(uintptr(probe), unix.F_GETFD, 0); err != nil {
+		t.Fatalf("second cleanup closed a reused fd: %v", err)
+	}
+	if !source.ScopeCleanupComplete() {
+		t.Fatal("scope cleanup completion was not published")
 	}
 }
