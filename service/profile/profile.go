@@ -19,6 +19,7 @@ import (
 	"github.com/safing/portmaster/base/log"
 	"github.com/safing/portmaster/base/utils"
 	"github.com/safing/portmaster/service/profile/binmeta"
+	"github.com/safing/structures/dsd"
 )
 
 // ProfileSource is the source of the profile.
@@ -129,10 +130,12 @@ type Profile struct { //nolint:maligned // not worth the effort
 
 	// savedInternally is set to true for profiles that are saved internally.
 	savedInternally bool
+}
 
-	// revisionCommitTarget receives the committed revision only after the
-	// controller has completed durable storage for this detached candidate.
-	revisionCommitTarget *Profile
+type profileTransaction struct {
+	profile   *Profile
+	submitted record.Record
+	prepared  *record.Wrapper
 }
 
 func (profile *Profile) prepProfile() {
@@ -481,36 +484,60 @@ func EnsureProfile(r record.Record) (*Profile, error) {
 	return newProfile, nil
 }
 
-func (profile *Profile) transactionalCopy() (*Profile, error) {
+func newProfileTransaction(submitted record.Record, profile *Profile) (*profileTransaction, *record.Wrapper, error) {
 	data, err := json.Marshal(profile)
 	if err != nil {
-		return nil, fmt.Errorf("marshal profile transaction candidate: %w", err)
+		return nil, nil, fmt.Errorf("marshal profile transaction candidate: %w", err)
 	}
 	candidate := &Profile{}
 	if err := json.Unmarshal(data, candidate); err != nil {
-		return nil, fmt.Errorf("unmarshal profile transaction candidate: %w", err)
+		return nil, nil, fmt.Errorf("unmarshal profile transaction candidate: %w", err)
 	}
 	candidate.SetKey(profile.Key())
 	if meta := profile.Meta(); meta != nil {
 		candidate.SetMeta(meta.Duplicate())
 	}
-	candidate.revisionCommitTarget = profile
-	return candidate, nil
+	// JSON intentionally copies only durable profile data. Keep this internal
+	// marker explicit so an internal save remains internal in subscriber feeds.
+	candidate.savedInternally = profile.savedInternally
+
+	format := uint8(dsd.JSON)
+	if wrapper, ok := submitted.(*record.Wrapper); ok {
+		format = wrapper.Format
+	}
+	payload, err := candidate.MarshalDataOnly(candidate, format)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal committed profile transaction: %w", err)
+	}
+	wrapper, err := record.NewWrapper(candidate.Key(), candidate.Meta().Duplicate(), format, payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("prepare profile transaction wrapper: %w", err)
+	}
+	return &profileTransaction{profile: candidate, submitted: submitted, prepared: wrapper}, wrapper, nil
 }
 
 // CommitRecordTransaction publishes a revision only after Controller.Put has
 // committed the detached candidate. It intentionally does nothing on every
 // validation or storage failure path.
-func (profile *Profile) CommitRecordTransaction() {
-	if profile.revisionCommitTarget == nil {
+func (transaction *profileTransaction) CommitRecordTransaction() {
+	if transaction.submitted == nil {
 		return
 	}
-	target := profile.revisionCommitTarget
-	target.Revision = profile.Revision
-	target.PresentationPath = profile.PresentationPath
-	target.configPerspective = profile.configPerspective
-	target.dataParsed = profile.dataParsed
-	target.defaultAction = profile.defaultAction
+	if target, ok := transaction.submitted.(*Profile); ok {
+		target.Revision = transaction.profile.Revision
+		target.Config = transaction.profile.Config
+		target.PresentationPath = transaction.profile.PresentationPath
+		target.SetMeta(transaction.profile.Meta().Duplicate())
+		target.configPerspective = transaction.profile.configPerspective
+		target.dataParsed = transaction.profile.dataParsed
+		target.defaultAction = transaction.profile.defaultAction
+	}
+	if target, ok := transaction.submitted.(*record.Wrapper); ok {
+		target.Format = transaction.prepared.Format
+		target.Data = append(target.Data[:0], transaction.prepared.Data...)
+		target.SetMeta(transaction.prepared.Meta().Duplicate())
+	}
+	transaction.submitted = nil
 }
 
 // updateMetadata updates meta data fields on the profile and returns whether

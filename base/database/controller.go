@@ -141,6 +141,8 @@ func (c *Controller) Put(r record.Record) (err error) {
 	if err != nil {
 		return err
 	}
+	transactional, _ := r.(interface{ CommitRecordTransaction() })
+	notificationRecord := r
 
 	if !c.shadowDelete && r.Meta().IsDeleted() {
 		// Immediate delete.
@@ -157,11 +159,14 @@ func (c *Controller) Put(r record.Record) (err error) {
 	if r == nil {
 		return errors.New("storage returned nil record after successful put operation")
 	}
-	if transactional, ok := r.(interface{ CommitRecordTransaction() }); ok {
+	if transactional != nil {
 		transactional.CommitRecordTransaction()
+		if committed, ok := r.(interface{ CommittedRecord() record.Record }); ok {
+			notificationRecord = committed.CommittedRecord()
+		}
 	}
 
-	c.notifySubscribers(r)
+	c.notifySubscribers(notificationRecord)
 
 	return nil
 }

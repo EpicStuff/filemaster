@@ -18,6 +18,9 @@ type Wrapper struct {
 
 	Format uint8
 	Data   []byte
+
+	transactionCommit func()
+	committedRecord   Record
 }
 
 // NewRawWrapper returns a record wrapper for the given data, including metadata. This is normally only used by storage backends when loading records.
@@ -52,14 +55,14 @@ func NewRawWrapper(database, key string, data []byte) (*Wrapper, error) {
 	}
 
 	return &Wrapper{
-		Base{
-			database,
-			key,
-			newMeta,
+		Base: Base{
+			dbName: database,
+			dbKey:  key,
+			meta:   newMeta,
 		},
-		sync.Mutex{},
-		format,
-		data[offset:],
+		Mutex:  sync.Mutex{},
+		Format: format,
+		Data:   data[offset:],
 	}, nil
 }
 
@@ -68,29 +71,55 @@ func NewWrapper(key string, meta *Meta, format uint8, data []byte) (*Wrapper, er
 	dbName, dbKey := ParseKey(key)
 
 	return &Wrapper{
-		Base{
+		Base: Base{
 			dbName: dbName,
 			dbKey:  dbKey,
 			meta:   meta,
 		},
-		sync.Mutex{},
-		format,
-		data,
+		Mutex:  sync.Mutex{},
+		Format: format,
+		Data:   data,
 	}, nil
 }
 
 // NewWrapperFromDatabase returns a new record wrapper for the given data.
 func NewWrapperFromDatabase(dbName, dbKey string, meta *Meta, format uint8, data []byte) (*Wrapper, error) {
 	return &Wrapper{
-		Base{
+		Base: Base{
 			dbName: dbName,
 			dbKey:  dbKey,
 			meta:   meta,
 		},
-		sync.Mutex{},
-		format,
-		data,
+		Mutex:  sync.Mutex{},
+		Format: format,
+		Data:   data,
 	}, nil
+}
+
+// SetTransactionCommit attaches commit publication prepared before storage.
+// Controller invokes it only after the wrapper's durable write succeeds.
+func (w *Wrapper) SetTransactionCommit(commit func(), committed Record) {
+	w.transactionCommit = commit
+	w.committedRecord = committed
+}
+
+// CommitRecordTransaction publishes the prepared commit exactly once.
+func (w *Wrapper) CommitRecordTransaction() {
+	if w.transactionCommit == nil {
+		return
+	}
+	commit := w.transactionCommit
+	w.transactionCommit = nil
+	commit()
+}
+
+// CommittedRecord returns the profile record that subscribers should observe
+// after a transaction commit rather than its serialized wrapper transport.
+func (w *Wrapper) CommittedRecord() Record {
+	if w.committedRecord == nil {
+		return w
+	}
+	return w.committedRecord
 }
 
 // Marshal marshals the format and data.

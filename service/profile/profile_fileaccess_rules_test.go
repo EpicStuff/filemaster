@@ -1,12 +1,15 @@
 package profile
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
 	"sync"
 	"testing"
 
 	"github.com/safing/portmaster/base/database"
+	"github.com/safing/portmaster/base/database/record"
+	"github.com/safing/structures/dsd"
 )
 
 var phase6ProfileDatabaseOnce struct {
@@ -207,5 +210,80 @@ func TestProfileRevisionRemainsRetryableAfterValidationFailure(t *testing.T) {
 	}
 	if configProfile.Revision != 1 {
 		t.Fatalf("corrected config retry revision = %d, want 1", configProfile.Revision)
+	}
+}
+
+func TestWrappedProfileTransactionPublishesCommittedPayload(t *testing.T) {
+	setupPhase6ProfileDatabase(t)
+	profile := New(&Profile{ID: "wrapped-transaction", Source: SourceLocal, Name: "first"})
+	if err := profile.Save(); err != nil {
+		t.Fatalf("save initial profile: %v", err)
+	}
+	payload, err := profile.MarshalDataOnly(profile, dsd.JSON)
+	if err != nil {
+		t.Fatalf("marshal wrapped profile: %v", err)
+	}
+	wrapper, err := record.NewWrapper(profile.Key(), profile.Meta().Duplicate(), dsd.JSON, payload)
+	if err != nil {
+		t.Fatalf("create wrapper: %v", err)
+	}
+	if err := profileDB.Put(wrapper); err != nil {
+		t.Fatalf("save wrapped profile: %v", err)
+	}
+	committed := &Profile{}
+	if err := record.Unwrap(wrapper, committed); err != nil {
+		t.Fatalf("unwrap committed wrapper: %v", err)
+	}
+	if committed.Revision != 2 {
+		t.Fatalf("wrapped committed revision = %d, want 2", committed.Revision)
+	}
+	if wrapper.Format != dsd.JSON {
+		t.Fatalf("wrapped format = %d, want JSON", wrapper.Format)
+	}
+
+	committed.Name = "second"
+	payload, err = committed.MarshalDataOnly(committed, wrapper.Format)
+	if err != nil {
+		t.Fatalf("marshal wrapper reuse edit: %v", err)
+	}
+	wrapper.Data = payload
+	if err := profileDB.Put(wrapper); err != nil {
+		t.Fatalf("reuse committed wrapper: %v", err)
+	}
+	if err := record.Unwrap(wrapper, committed); err != nil {
+		t.Fatalf("unwrap reused wrapper: %v", err)
+	}
+	if committed.Revision != 3 || committed.Name != "second" {
+		t.Fatalf("reused wrapper = revision %d name %q, want revision 3 name second", committed.Revision, committed.Name)
+	}
+}
+
+func TestWrappedProfileValidationFailureDoesNotPublishPayload(t *testing.T) {
+	setupPhase6ProfileDatabase(t)
+	profile := New(&Profile{
+		ID:     "wrapped-validation-failure",
+		Source: SourceLocal,
+		Fingerprints: []Fingerprint{{
+			Type:      FingerprintTypePathID,
+			Operation: FingerprintOperationRegexID,
+			Value:     "[",
+		}},
+	})
+	profile.CreateMeta()
+	payload, err := profile.MarshalDataOnly(profile, dsd.JSON)
+	if err != nil {
+		t.Fatalf("marshal invalid wrapped profile: %v", err)
+	}
+	wrapper, err := record.NewWrapper(profile.Key(), profile.Meta().Duplicate(), dsd.JSON, payload)
+	if err != nil {
+		t.Fatalf("create invalid wrapper: %v", err)
+	}
+	beforeData := bytes.Clone(wrapper.Data)
+	beforeMeta := wrapper.Meta().Duplicate()
+	if err := profileDB.Put(wrapper); err == nil {
+		t.Fatal("invalid wrapped profile save unexpectedly succeeded")
+	}
+	if !bytes.Equal(wrapper.Data, beforeData) || !reflect.DeepEqual(wrapper.Meta(), beforeMeta) {
+		t.Fatal("failed wrapped profile save published payload or metadata")
 	}
 }

@@ -27,8 +27,9 @@ func (s *blockingStorage) Put(r record.Record) (record.Record, error) {
 
 type rejectingPutHook struct {
 	HookBase
-	key string
-	err error
+	key          string
+	err          error
+	observedLock bool
 }
 
 type revisionRecord struct {
@@ -114,6 +115,16 @@ func closedChannel() chan struct{} {
 func (h *rejectingPutHook) UsesPrePut() bool { return true }
 
 func (h *rejectingPutHook) PrePut(r record.Record) (record.Record, error) {
+	if locker, ok := r.(interface {
+		TryLock() bool
+		Unlock()
+	}); ok {
+		if locker.TryLock() {
+			locker.Unlock()
+		} else {
+			h.observedLock = true
+		}
+	}
 	if r.Key() == h.key {
 		return nil, h.err
 	}
@@ -196,11 +207,19 @@ func TestPutManyDrainsAfterFailure(t *testing.T) {
 	if err := put(NewExample(dbName+":first", "first", 1)); err != nil {
 		t.Fatalf("submit first record: %v", err)
 	}
-	if err := put(NewExample(dbName+":middle", "middle", 2)); err != nil && !errors.Is(err, hookErr) {
+	middle := NewExample(dbName+":middle", "middle", 2)
+	if err := put(middle); err != nil && !errors.Is(err, hookErr) {
 		t.Fatalf("submit middle record: %v", err)
 	}
+	if !middle.TryLock() {
+		t.Fatal("PutMany failure left the record locked")
+	}
+	middle.Unlock()
 	if err := put(NewExample(dbName+":after", "after", 3)); !errors.Is(err, hookErr) {
 		t.Fatalf("submission after failure = %v, want hook failure", err)
+	}
+	if !hook.h.(*rejectingPutHook).observedLock {
+		t.Fatal("PutMany hook did not receive a locked record")
 	}
 
 	finished := make(chan error, 1)

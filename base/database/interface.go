@@ -285,6 +285,10 @@ func (i *Interface) Put(r record.Record) (err error) {
 	}
 
 	r.Lock()
+	previousMeta := r.Meta()
+	if previousMeta != nil {
+		previousMeta = previousMeta.Duplicate()
+	}
 	i.options.Apply(r)
 	remove := r.Meta().IsDeleted()
 	ttl := r.Meta().GetRelativeExpiry()
@@ -297,8 +301,12 @@ func (i *Interface) Put(r record.Record) (err error) {
 	}
 
 	r.Lock()
-	defer r.Unlock()
-	return db.Put(r)
+	err = db.Put(r)
+	if err != nil {
+		r.SetMeta(previousMeta)
+	}
+	r.Unlock()
+	return err
 }
 
 // PutNew saves a record to the database as a new record (ie. with new timestamps).
@@ -342,13 +350,11 @@ func (i *Interface) PutNew(r record.Record) (err error) {
 	return db.Put(r)
 }
 
-// PutMany stores many records in the database.
-// Warning: This is nearly a direct database access and omits many things:
-// - Record locking
-// - Hooks
-// - Subscriptions
-// - Caching
-// Use with care.
+// PutMany stores many records through the ordinary Controller.Put path. Each
+// submitted record is locked while options and hooks run, receives the normal
+// transaction and subscriber behavior, and reports the first synchronous
+// failure for all remaining calls and finalization. It intentionally does not
+// use the interface write cache.
 func (i *Interface) PutMany(dbName string) (put func(record.Record) error) {
 	// permission check
 	if !i.options.HasAllPermissions() {
@@ -403,8 +409,20 @@ func (i *Interface) PutMany(dbName string) (put func(record.Record) error) {
 			return errors.New("record out of database scope")
 		}
 
+		// Hooks historically receive a locked record. Keep that contract for the
+		// synchronous transactional batch path as well.
+		r.Lock()
+		previousMeta := r.Meta()
+		if previousMeta != nil {
+			previousMeta = previousMeta.Duplicate()
+		}
 		i.options.Apply(r)
-		if err := db.Put(r); err != nil {
+		err := db.Put(r)
+		if err != nil {
+			r.SetMeta(previousMeta)
+		}
+		r.Unlock()
+		if err != nil {
 			firstErr = err
 			return err
 		}

@@ -150,10 +150,11 @@ func (h *databaseHook) PrePut(r record.Record) (record.Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	profile, err := submitted.transactionalCopy()
+	transaction, wrapper, err := newProfileTransaction(r, submitted)
 	if err != nil {
 		return nil, err
 	}
+	profile := transaction.profile
 	// Controller.Put holds this record's transaction lock while hooks run and
 	// storage commits. Compare against the durable profile revision here so all
 	// interfaces, including generic database/API writes, reject stale objects.
@@ -193,5 +194,16 @@ func (h *databaseHook) PrePut(r record.Record) (record.Record, error) {
 		return nil, err
 	}
 
-	return profile, nil
+	// Rebuild the same-format wrapper after validation and normalization, before
+	// storage starts, so publication cannot fail after a durable commit.
+	payload, err := profile.MarshalDataOnly(profile, wrapper.Format)
+	if err != nil {
+		return nil, fmt.Errorf("marshal normalized profile transaction: %w", err)
+	}
+	wrapper.Data = payload
+	wrapper.SetMeta(profile.Meta().Duplicate())
+	transaction.prepared = wrapper
+	wrapper.SetTransactionCommit(transaction.CommitRecordTransaction, profile)
+
+	return wrapper, nil
 }
