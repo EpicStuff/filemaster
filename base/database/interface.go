@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/bluele/gcache"
-	"github.com/tevino/abool"
-
 	"github.com/safing/portmaster/base/database/accessor"
 	"github.com/safing/portmaster/base/database/iterator"
 	"github.com/safing/portmaster/base/database/query"
@@ -352,8 +350,6 @@ func (i *Interface) PutNew(r record.Record) (err error) {
 // - Caching
 // Use with care.
 func (i *Interface) PutMany(dbName string) (put func(record.Record) error) {
-	interfaceBatch := make(chan record.Record, 100)
-
 	// permission check
 	if !i.options.HasAllPermissions() {
 		return func(r record.Record) error {
@@ -376,56 +372,30 @@ func (i *Interface) PutMany(dbName string) (put func(record.Record) error) {
 		}
 	}
 
-	// start database access
-	dbBatch, errs := db.PutMany()
-	finished := abool.New()
-	var internalErr error
-
-	// interface options proxy
-	go func() {
-		defer close(dbBatch) // signify that we are finished
-		for {
-			select {
-			case r := <-interfaceBatch:
-				// finished?
-				if r == nil {
-					return
-				}
-				// apply options
-				i.options.Apply(r)
-				// pass along
-				dbBatch <- r
-			case <-time.After(1 * time.Second):
-				// bail out
-				internalErr = errors.New("timeout: putmany unused for too long")
-				finished.Set()
-				return
-			}
-		}
-	}()
+	var mu sync.Mutex
+	var firstErr error
+	finished := false
 
 	return func(r record.Record) error {
-		// finished?
-		if finished.IsSet() {
-			// check for internal error
-			if internalErr != nil {
-				return internalErr
-			}
-			// check for previous error
-			select {
-			case err := <-errs:
-				return err
-			default:
-				return errors.New("batch is closed")
-			}
+		mu.Lock()
+		defer mu.Unlock()
+
+		// The interface preserves its streaming API, but commits each submitted
+		// record synchronously through Controller.Put. This gives every caller a
+		// definitive result and avoids a proxy goroutine outliving a failed batch.
+		if r == nil {
+			finished = true
+			return firstErr
 		}
 
-		// finish?
-		if r == nil {
-			finished.Set()
-			interfaceBatch <- nil // signify that we are finished
-			// do not close, as this fn could be called again with nil.
-			return <-errs
+		if finished {
+			if firstErr != nil {
+				return firstErr
+			}
+			return errors.New("batch is closed")
+		}
+		if firstErr != nil {
+			return firstErr
 		}
 
 		// check record scope
@@ -433,13 +403,12 @@ func (i *Interface) PutMany(dbName string) (put func(record.Record) error) {
 			return errors.New("record out of database scope")
 		}
 
-		// submit
-		select {
-		case interfaceBatch <- r:
-			return nil
-		case err := <-errs:
+		i.options.Apply(r)
+		if err := db.Put(r); err != nil {
+			firstErr = err
 			return err
 		}
+		return nil
 	}
 }
 

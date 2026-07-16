@@ -2,6 +2,7 @@ package profile
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -128,6 +129,10 @@ type Profile struct { //nolint:maligned // not worth the effort
 
 	// savedInternally is set to true for profiles that are saved internally.
 	savedInternally bool
+
+	// revisionCommitTarget receives the committed revision only after the
+	// controller has completed durable storage for this detached candidate.
+	revisionCommitTarget *Profile
 }
 
 func (profile *Profile) prepProfile() {
@@ -474,6 +479,38 @@ func EnsureProfile(r record.Record) (*Profile, error) {
 		return nil, fmt.Errorf("record not of type *Profile, but %T", r)
 	}
 	return newProfile, nil
+}
+
+func (profile *Profile) transactionalCopy() (*Profile, error) {
+	data, err := json.Marshal(profile)
+	if err != nil {
+		return nil, fmt.Errorf("marshal profile transaction candidate: %w", err)
+	}
+	candidate := &Profile{}
+	if err := json.Unmarshal(data, candidate); err != nil {
+		return nil, fmt.Errorf("unmarshal profile transaction candidate: %w", err)
+	}
+	candidate.SetKey(profile.Key())
+	if meta := profile.Meta(); meta != nil {
+		candidate.SetMeta(meta.Duplicate())
+	}
+	candidate.revisionCommitTarget = profile
+	return candidate, nil
+}
+
+// CommitRecordTransaction publishes a revision only after Controller.Put has
+// committed the detached candidate. It intentionally does nothing on every
+// validation or storage failure path.
+func (profile *Profile) CommitRecordTransaction() {
+	if profile.revisionCommitTarget == nil {
+		return
+	}
+	target := profile.revisionCommitTarget
+	target.Revision = profile.Revision
+	target.PresentationPath = profile.PresentationPath
+	target.configPerspective = profile.configPerspective
+	target.dataParsed = profile.dataParsed
+	target.defaultAction = profile.defaultAction
 }
 
 // updateMetadata updates meta data fields on the profile and returns whether

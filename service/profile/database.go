@@ -144,8 +144,13 @@ func (h *databaseHook) PrePut(r record.Record) (record.Record, error) {
 		return r, nil
 	}
 
-	// convert
-	profile, err := EnsureProfile(r)
+	// Prepare a detached candidate so neither revision publication nor config
+	// normalization can mutate the submitted profile before durable commit.
+	submitted, err := EnsureProfile(r)
+	if err != nil {
+		return nil, err
+	}
+	profile, err := submitted.transactionalCopy()
 	if err != nil {
 		return nil, err
 	}

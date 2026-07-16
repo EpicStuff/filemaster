@@ -3,10 +3,38 @@ package profile
 import (
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/safing/portmaster/base/database"
 )
+
+var phase6ProfileDatabaseOnce struct {
+	sync.Once
+	err error
+}
+
+func setupPhase6ProfileDatabase(t *testing.T) {
+	t.Helper()
+	phase6ProfileDatabaseOnce.Do(func() {
+		if err := database.Initialize(t.TempDir()); err != nil && err.Error() != "database already initialized" {
+			phase6ProfileDatabaseOnce.err = err
+			return
+		}
+		if _, err := database.Register(&database.Database{Name: "core", StorageType: "sqlite"}); err != nil {
+			phase6ProfileDatabaseOnce.err = err
+			return
+		}
+		if err := registerConfiguration(); err != nil {
+			phase6ProfileDatabaseOnce.err = err
+			return
+		}
+		phase6ProfileDatabaseOnce.err = registerValidationDBHook()
+	})
+	if phase6ProfileDatabaseOnce.err != nil {
+		t.Fatalf("set up profile database: %v", phase6ProfileDatabaseOnce.err)
+	}
+}
 
 func TestCoalesceFileAccessRuleEntriesUsesEffectivePrecedence(t *testing.T) {
 	tests := []struct {
@@ -45,18 +73,7 @@ func TestCoalesceFileAccessRuleEntriesUsesEffectivePrecedence(t *testing.T) {
 }
 
 func TestPersistCurrentFileAccessRuleUsesCurrentDurableRecord(t *testing.T) {
-	if err := database.Initialize(t.TempDir()); err != nil && err.Error() != "database already initialized" {
-		t.Fatalf("database.Initialize: %v", err)
-	}
-	if _, err := database.Register(&database.Database{Name: "core", StorageType: "sqlite"}); err != nil {
-		t.Fatalf("database.Register core: %v", err)
-	}
-	if err := registerConfiguration(); err != nil {
-		t.Fatalf("register profile configuration: %v", err)
-	}
-	if err := registerValidationDBHook(); err != nil {
-		t.Fatalf("register profile revision hook: %v", err)
-	}
+	setupPhase6ProfileDatabase(t)
 	const id = "current-file-access-rule"
 	old := New(&Profile{ID: id, Source: SourceLocal, Name: "old", Description: "old description"})
 	if err := old.Save(); err != nil {
@@ -138,5 +155,57 @@ func TestPersistCurrentFileAccessRuleUsesCurrentDurableRecord(t *testing.T) {
 	}
 	if err := old.delete(); !errors.Is(err, ErrProfileRevisionConflict) {
 		t.Fatalf("stale delete error = %v, want revision conflict", err)
+	}
+}
+
+func TestProfileRevisionRemainsRetryableAfterValidationFailure(t *testing.T) {
+	setupPhase6ProfileDatabase(t)
+	const id = "retry-after-validation-failure"
+	profile := New(&Profile{
+		ID:     id,
+		Source: SourceLocal,
+		Fingerprints: []Fingerprint{{
+			Type:      FingerprintTypePathID,
+			Operation: FingerprintOperationRegexID,
+			Value:     "[",
+		}},
+	})
+	if err := profile.Save(); err == nil {
+		t.Fatal("invalid fingerprint save unexpectedly succeeded")
+	}
+	if profile.Revision != 0 {
+		t.Fatalf("failed validation changed revision to %d, want 0", profile.Revision)
+	}
+	profile.Fingerprints = nil
+	if err := profile.Save(); err != nil {
+		t.Fatalf("retry corrected profile: %v", err)
+	}
+	if profile.Revision != 1 {
+		t.Fatalf("corrected retry revision = %d, want 1", profile.Revision)
+	}
+	loaded, err := getProfile(MakeScopedID(SourceLocal, id))
+	if err != nil {
+		t.Fatalf("load corrected profile: %v", err)
+	}
+	if loaded.Revision != profile.Revision {
+		t.Fatalf("durable revision = %d, want %d", loaded.Revision, profile.Revision)
+	}
+
+	configProfile := New(&Profile{ID: "retry-after-config-failure", Source: SourceLocal})
+	configProfile.Config = map[string]interface{}{
+		"filter": map[string]interface{}{"defaultAction": "invalid"},
+	}
+	if err := configProfile.Save(); err == nil {
+		t.Fatal("invalid config save unexpectedly succeeded")
+	}
+	if configProfile.Revision != 0 {
+		t.Fatalf("failed config validation changed revision to %d, want 0", configProfile.Revision)
+	}
+	configProfile.Config["filter"].(map[string]interface{})["defaultAction"] = DefaultActionPermitValue
+	if err := configProfile.Save(); err != nil {
+		t.Fatalf("retry corrected config: %v", err)
+	}
+	if configProfile.Revision != 1 {
+		t.Fatalf("corrected config retry revision = %d, want 1", configProfile.Revision)
 	}
 }

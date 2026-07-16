@@ -12,6 +12,8 @@ import (
 	"github.com/safing/portmaster/base/database/storage"
 )
 
+const recordWriteLockStripes = 257
+
 // A Controller takes care of all the extra database logic.
 type Controller struct {
 	database     *Database
@@ -19,9 +21,9 @@ type Controller struct {
 	shadowDelete bool
 
 	// recordWriteLocks cover validation hooks and the storage commit together.
-	// Every Interface reaches Controller.Put, so database-specific optimistic
-	// concurrency hooks can compare a durable record and commit atomically.
-	recordWriteLocks sync.Map // map[string]*sync.Mutex
+	// Fixed stripes keep this transaction boundary bounded even for databases
+	// with an unbounded number of historical keys.
+	recordWriteLocks [recordWriteLockStripes]sync.Mutex
 
 	hooksLock sync.RWMutex
 	hooks     []*RegisteredHook
@@ -131,8 +133,7 @@ func (c *Controller) Put(r record.Record) (err error) {
 	if c.ReadOnly() {
 		return ErrReadOnly
 	}
-	lock, _ := c.recordWriteLocks.LoadOrStore(r.DatabaseKey(), &sync.Mutex{})
-	mu := lock.(*sync.Mutex)
+	mu := c.recordWriteLock(r.DatabaseKey())
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -156,14 +157,28 @@ func (c *Controller) Put(r record.Record) (err error) {
 	if r == nil {
 		return errors.New("storage returned nil record after successful put operation")
 	}
+	if transactional, ok := r.(interface{ CommitRecordTransaction() }); ok {
+		transactional.CommitRecordTransaction()
+	}
 
 	c.notifySubscribers(r)
 
 	return nil
 }
 
-// PutMany stores many records in the database. It does not
-// process any hooks or update subscriptions. Use with care!
+func (c *Controller) recordWriteLock(key string) *sync.Mutex {
+	// FNV-1a provides a stable distribution without retaining a mutex per key.
+	hash := uint64(14695981039346656037)
+	for i := 0; i < len(key); i++ {
+		hash ^= uint64(key[i])
+		hash *= 1099511628211
+	}
+	return &c.recordWriteLocks[hash%recordWriteLockStripes]
+}
+
+// PutMany stores many records through the same hooks, record transaction, and
+// subscriber notification path as Put. After its first failure it drains the
+// remaining input until the caller closes the batch and reports that error.
 func (c *Controller) PutMany() (chan<- record.Record, <-chan error) {
 	if shuttingDown.IsSet() {
 		errs := make(chan error, 1)
@@ -185,10 +200,16 @@ func (c *Controller) PutMany() (chan<- record.Record, <-chan error) {
 	errs := make(chan error, 1)
 	go func() {
 		defer close(errs)
+		var firstErr error
 		for r := range batch {
+			if firstErr != nil {
+				// Continue draining submissions so a producer can always finish the
+				// batch after an earlier failure.
+				continue
+			}
 			if err := c.Put(r); err != nil {
+				firstErr = err
 				errs <- err
-				return
 			}
 		}
 	}()
