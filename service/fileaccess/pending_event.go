@@ -74,6 +74,14 @@ func newPendingEventWithFailureSink(event *FileEvent, respond func(Verdict) resp
 	return &pendingEventOwner{state: state, owner: 1}
 }
 
+func resolvePendingCurrent(pending PendingEvent, verdict Verdict) error {
+	if owner, ok := pending.(*pendingEventOwner); ok {
+		_, err := owner.state.resolveCurrent(verdict)
+		return err
+	}
+	return pending.Respond(verdict)
+}
+
 func (event *pendingEventOwner) Event() *FileEvent {
 	event.state.mu.Lock()
 	defer event.state.mu.Unlock()

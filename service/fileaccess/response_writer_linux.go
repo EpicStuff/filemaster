@@ -1,6 +1,7 @@
 package fileaccess
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -18,21 +19,31 @@ type fanotifyResponseWriter struct {
 	write      func(int, []byte) (int, error)
 	close      func(int) error
 	afterClose func(int32, error)
+	lifecycle  *PipelineLifecycle
 
-	writeMu  sync.Mutex
+	writeMu        sync.Mutex
+	sealed         atomic.Bool
+	closed         atomic.Bool
+	currentFD      atomic.Int64
+	currentVerdict atomic.Uint32
+	changed        chan struct{}
+
 	fatalMu  sync.Mutex
 	fatal    error
 	draining atomic.Bool
 }
 
 func newFanotifyResponseWriter(groupFD int, log logger, afterClose func(int32, error)) *fanotifyResponseWriter {
-	return &fanotifyResponseWriter{
+	writer := &fanotifyResponseWriter{
 		groupFD:    groupFD,
 		log:        log,
 		write:      unix.Write,
 		close:      unix.Close,
 		afterClose: afterClose,
+		changed:    make(chan struct{}, 1),
 	}
+	writer.currentFD.Store(-1)
+	return writer
 }
 
 func (writer *fanotifyResponseWriter) respond(eventFD int32, verdict Verdict) responseResult {
@@ -46,6 +57,19 @@ func (writer *fanotifyResponseWriter) respond(eventFD int32, verdict Verdict) re
 
 	writer.writeMu.Lock()
 	defer writer.writeMu.Unlock()
+	writer.currentFD.Store(int64(eventFD))
+	writer.currentVerdict.Store(uint32(verdict))
+	writer.signalChanged()
+	defer func() {
+		writer.currentFD.Store(-1)
+		writer.currentVerdict.Store(0)
+		writer.signalChanged()
+	}()
+	if writer.sealed.Load() {
+		err := fmt.Errorf("fanotify response writer is sealed")
+		writer.enterFatal(err)
+		return responseResult{err: err}
+	}
 	for {
 		written, err := writer.write(writer.groupFD, responseBytes)
 		if errors.Is(err, unix.EINTR) && written == 0 {
@@ -87,6 +111,10 @@ func (writer *fanotifyResponseWriter) enterFatal(err error) {
 	writer.fatalMu.Unlock()
 	if first {
 		writer.log.Error("fanotify enforcement failure; entering controlled draining", "err", err)
+		if writer.lifecycle != nil {
+			ctx, _ := context.WithTimeout(context.Background(), defaultControlledShutdownTimeout)
+			writer.lifecycle.BeginClosing(ctx)
+		}
 	}
 }
 
@@ -94,4 +122,55 @@ func (writer *fanotifyResponseWriter) fatalError() error {
 	writer.fatalMu.Lock()
 	defer writer.fatalMu.Unlock()
 	return writer.fatal
+}
+
+func (writer *fanotifyResponseWriter) signalChanged() {
+	select {
+	case writer.changed <- struct{}{}:
+	default:
+	}
+}
+
+func (writer *fanotifyResponseWriter) Diagnostics() ResponseWriterDiagnostics {
+	diagnostics := ResponseWriterDiagnostics{
+		Sealed:         writer.sealed.Load(),
+		Closed:         writer.closed.Load(),
+		CurrentFD:      int32(writer.currentFD.Load()),
+		CurrentVerdict: Verdict(writer.currentVerdict.Load()),
+	}
+	if err := writer.fatalError(); err != nil {
+		diagnostics.FatalError = err.Error()
+	}
+	return diagnostics
+}
+
+func (writer *fanotifyResponseWriter) SealAndWait(ctx context.Context) error {
+	writer.sealed.Store(true)
+	writer.signalChanged()
+	for writer.currentFD.Load() >= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-writer.changed:
+		}
+	}
+	return nil
+}
+
+func (writer *fanotifyResponseWriter) CloseGroup() error {
+	writer.writeMu.Lock()
+	defer writer.writeMu.Unlock()
+	if writer.closed.Load() {
+		return nil
+	}
+	if writer.currentFD.Load() >= 0 {
+		return errors.New("fanotify response is still in progress")
+	}
+	// Linux fanotify(7) documents that closing the group implicitly allows
+	// outstanding permission events. Callers must therefore drain or explicitly
+	// report every owner before invoking this final close.
+	err := writer.close(writer.groupFD)
+	writer.closed.Store(true)
+	writer.signalChanged()
+	return err
 }

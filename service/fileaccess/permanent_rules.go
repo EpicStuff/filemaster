@@ -27,6 +27,8 @@ type RulePersistenceOptions struct {
 // decision workers wait for storage I/O.
 type RulePersistenceDiagnostics struct {
 	DirtyCount        int
+	Generation        uint64
+	DirtyGenerations  []uint64
 	RetryCount        uint64
 	PersistentFailure bool
 	LastError         error
@@ -66,16 +68,21 @@ type ruleStoreBinding struct {
 // RulePersistence owns the durable, per-profile permanent-rule overlay. Its
 // mutex protects bookkeeping only: storage and observers always run unlocked.
 type RulePersistence struct {
-	mu       sync.Mutex
-	profiles map[string]*dirtyRuleProfile
-	bindings map[string]ruleStoreBinding
-	observe  func(*DecisionSnapshot)
-	min      time.Duration
-	max      time.Duration
-	after    func(time.Duration) <-chan time.Time
+	mu        sync.Mutex
+	profiles  map[string]*dirtyRuleProfile
+	bindings  map[string]ruleStoreBinding
+	observe   func(*DecisionSnapshot)
+	min       time.Duration
+	max       time.Duration
+	after     func(time.Duration) <-chan time.Time
+	lifecycle *PipelineLifecycle
 }
 
 func NewRulePersistence(observe func(*DecisionSnapshot), options RulePersistenceOptions) *RulePersistence {
+	return newRulePersistence(observe, options, NewPipelineLifecycle())
+}
+
+func newRulePersistence(observe func(*DecisionSnapshot), options RulePersistenceOptions, lifecycle *PipelineLifecycle) *RulePersistence {
 	if options.MinBackoff <= 0 {
 		options.MinBackoff = defaultRuleRetryMin
 	}
@@ -88,13 +95,17 @@ func NewRulePersistence(observe func(*DecisionSnapshot), options RulePersistence
 	if options.After == nil {
 		options.After = time.After
 	}
+	if lifecycle == nil {
+		lifecycle = NewPipelineLifecycle()
+	}
 	return &RulePersistence{
-		profiles: make(map[string]*dirtyRuleProfile),
-		bindings: make(map[string]ruleStoreBinding),
-		observe:  observe,
-		min:      options.MinBackoff,
-		max:      options.MaxBackoff,
-		after:    options.After,
+		profiles:  make(map[string]*dirtyRuleProfile),
+		bindings:  make(map[string]ruleStoreBinding),
+		observe:   observe,
+		min:       options.MinBackoff,
+		max:       options.MaxBackoff,
+		after:     options.After,
+		lifecycle: lifecycle,
 	}
 }
 
@@ -177,6 +188,19 @@ func sameRuleStore(left, right RuleStore) bool {
 // Apply makes an accepted Always decision visible before storage is attempted.
 // The returned snapshot is immutable and any observer runs after unlocking.
 func (p *RulePersistence) Apply(snapshot *DecisionSnapshot, store RuleStore, pattern string, verdict Verdict) *DecisionSnapshot {
+	if !p.lifecycle.IsRunning() {
+		return snapshot
+	}
+	return p.apply(snapshot, store, pattern, verdict)
+}
+
+// ApplyAccepted completes an Always action which won prompt ownership before
+// Closing. Prompt shutdown waits for this call before starting the final flush.
+func (p *RulePersistence) ApplyAccepted(snapshot *DecisionSnapshot, store RuleStore, pattern string, verdict Verdict) *DecisionSnapshot {
+	return p.apply(snapshot, store, pattern, verdict)
+}
+
+func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pattern string, verdict Verdict) *DecisionSnapshot {
 	rule, ok := canonicalPermanentRule(pattern, verdict)
 	if !ok || snapshot == nil || store == nil {
 		return snapshot
@@ -467,7 +491,19 @@ func (p *RulePersistence) Diagnostics() map[string]RulePersistenceDiagnostics {
 	defer p.mu.Unlock()
 	diagnostics := make(map[string]RulePersistenceDiagnostics, len(p.profiles))
 	for key, state := range p.profiles {
-		diagnostics[key] = RulePersistenceDiagnostics{DirtyCount: len(state.dirty), RetryCount: state.retries, PersistentFailure: state.failure, LastError: state.lastErr}
+		dirtyGenerations := make([]uint64, 0, len(state.dirty))
+		for _, rule := range state.dirty {
+			dirtyGenerations = append(dirtyGenerations, rule.generation)
+		}
+		sort.Slice(dirtyGenerations, func(i, j int) bool { return dirtyGenerations[i] < dirtyGenerations[j] })
+		diagnostics[key] = RulePersistenceDiagnostics{
+			DirtyCount:        len(state.dirty),
+			Generation:        state.generation,
+			DirtyGenerations:  dirtyGenerations,
+			RetryCount:        state.retries,
+			PersistentFailure: state.failure,
+			LastError:         state.lastErr,
+		}
 	}
 	return diagnostics
 }

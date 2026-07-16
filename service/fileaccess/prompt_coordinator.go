@@ -55,27 +55,40 @@ type PromptCoordinator struct {
 	timeout  time.Duration
 	admit    func(string) (func(), bool)
 	finish   func(context.Context, PendingEvent, Verdict) bool
+	complete func()
+
+	lifecycle *PipelineLifecycle
 
 	mu                    sync.Mutex
 	groups                map[promptKey]*promptGroup
 	profiles              map[string]map[*promptGroup]struct{}
 	latestProfileSnapshot map[string]*DecisionSnapshot
-	closing               bool
 	unidentifiedSequence  atomic.Uint64
+	activePrompts         atomic.Int64
+	promptChanged         chan struct{}
 	persistence           *RulePersistence
 }
 
 func NewPromptCoordinator(prompter Prompter, timeout time.Duration, admit func(string) (func(), bool), finish func(context.Context, PendingEvent, Verdict) bool) *PromptCoordinator {
+	return newPromptCoordinator(prompter, timeout, admit, finish, NewPipelineLifecycle())
+}
+
+func newPromptCoordinator(prompter Prompter, timeout time.Duration, admit func(string) (func(), bool), finish func(context.Context, PendingEvent, Verdict) bool, lifecycle *PipelineLifecycle) *PromptCoordinator {
+	if lifecycle == nil {
+		lifecycle = NewPipelineLifecycle()
+	}
 	coordinator := &PromptCoordinator{
 		prompter:              prompter,
 		timeout:               timeout,
 		admit:                 admit,
 		finish:                finish,
+		lifecycle:             lifecycle,
 		groups:                make(map[promptKey]*promptGroup),
 		profiles:              make(map[string]map[*promptGroup]struct{}),
 		latestProfileSnapshot: make(map[string]*DecisionSnapshot),
+		promptChanged:         make(chan struct{}, 1),
 	}
-	coordinator.persistence = NewRulePersistence(coordinator.SnapshotReplaced, RulePersistenceOptions{})
+	coordinator.persistence = newRulePersistence(coordinator.SnapshotReplaced, RulePersistenceOptions{}, lifecycle)
 	return coordinator
 }
 
@@ -105,80 +118,92 @@ func (c *PromptCoordinator) Admit(ctx context.Context, pending PendingEvent, sto
 	if err != nil {
 		return false, false, VerdictDeny, nil
 	}
-	c.mu.Lock()
-	if c.closing {
-		c.mu.Unlock()
+	if !c.lifecycle.IsRunning() {
 		_ = pending.Respond(VerdictDeny)
 		return true, false, VerdictDeny, nil
 	}
-	snapshot = c.latestSnapshotLocked(snapshot)
-	if verdict, ask := decisionFromSnapshot(snapshot, path); !ask {
-		c.mu.Unlock()
-		if c.finish != nil {
-			c.finish(context.Background(), pending, verdict)
-		} else {
-			_ = pending.Respond(verdict)
-		}
-		return true, true, VerdictDeny, nil
-	}
-	c.mu.Unlock()
 
 	release, ok := c.admit(snapshot.Source + "/" + snapshot.ProfileID)
 	if !ok {
 		_ = pending.Respond(VerdictDeny)
 		return true, false, VerdictDeny, nil
 	}
-	owner, err := pending.Transfer()
-	if err != nil {
+
+	var owner PendingEvent
+	var transferErr error
+	var immediate *Verdict
+	admitted := c.lifecycle.whileRunning(func() {
+		owner, transferErr = pending.Transfer()
+		if transferErr != nil {
+			return
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		snapshot = c.latestSnapshotLocked(snapshot)
+		if currentVerdict, ask := decisionFromSnapshot(snapshot, path); !ask {
+			immediate = &currentVerdict
+			return
+		}
+		key := c.newPromptKey(event, snapshot, path)
+		if existing := c.groups[key]; existing != nil {
+			existing.entries = append(existing.entries, promptEntry{pending: owner, release: release})
+			return
+		}
+		promptCtx, cancel := context.WithCancel(ctx)
+		promptEvent := *event
+		promptEvent.Path = path
+		group := &promptGroup{
+			key:      key,
+			snapshot: snapshot,
+			store:    store,
+			event:    promptEvent,
+			entries:  []promptEntry{{pending: owner, release: release}},
+			cancel:   cancel,
+		}
+		c.groups[key] = group
+		profileGroups := c.profiles[key.profile]
+		if profileGroups == nil {
+			profileGroups = make(map[*promptGroup]struct{})
+			c.profiles[key.profile] = profileGroups
+		}
+		profileGroups[group] = struct{}{}
+		c.activePrompts.Add(1)
+		go func() {
+			defer func() {
+				c.activePrompts.Add(-1)
+				select {
+				case c.promptChanged <- struct{}{}:
+				default:
+				}
+			}()
+			c.waitForPrompt(promptCtx, group)
+		}()
+	})
+	if !admitted {
+		release()
+		_ = pending.Respond(VerdictDeny)
+		return true, false, VerdictDeny, nil
+	}
+	if transferErr != nil {
 		release()
 		return false, false, VerdictDeny, nil
 	}
-
-	c.mu.Lock()
-	if c.closing {
-		c.mu.Unlock()
-		release()
-		_ = owner.Respond(VerdictDeny)
-		return true, false, VerdictDeny, nil
-	}
-	snapshot = c.latestSnapshotLocked(snapshot)
-	if verdict, ask := decisionFromSnapshot(snapshot, path); !ask {
-		c.mu.Unlock()
+	if immediate != nil {
+		resolvedVerdict := *immediate
+		if !c.lifecycle.IsRunning() {
+			resolvedVerdict = VerdictDeny
+		}
 		if c.finish != nil {
-			c.finish(context.Background(), owner, verdict)
+			c.finish(context.Background(), owner, resolvedVerdict)
 		} else {
-			_ = owner.Respond(verdict)
+			_ = owner.Respond(resolvedVerdict)
 		}
 		release()
+		if c.complete != nil {
+			c.complete()
+		}
 		return true, true, VerdictDeny, nil
 	}
-	key := c.newPromptKey(event, snapshot, path)
-	if group := c.groups[key]; group != nil {
-		group.entries = append(group.entries, promptEntry{pending: owner, release: release})
-		c.mu.Unlock()
-		return true, true, VerdictDeny, nil
-	}
-	promptCtx, cancel := context.WithCancel(ctx)
-	promptEvent := *event
-	promptEvent.Path = path
-	group := &promptGroup{
-		key:      key,
-		snapshot: snapshot,
-		store:    store,
-		event:    promptEvent,
-		entries:  []promptEntry{{pending: owner, release: release}},
-		cancel:   cancel,
-	}
-	c.groups[key] = group
-	profileGroups := c.profiles[key.profile]
-	if profileGroups == nil {
-		profileGroups = make(map[*promptGroup]struct{})
-		c.profiles[key.profile] = profileGroups
-	}
-	profileGroups[group] = struct{}{}
-	c.mu.Unlock()
-
-	go c.waitForPrompt(promptCtx, group)
 	return true, true, VerdictDeny, nil
 }
 
@@ -206,12 +231,12 @@ func (c *PromptCoordinator) waitForPrompt(ctx context.Context, group *promptGrou
 	case ActionAllowAlways:
 		won, accepted := c.resolve(group, VerdictAllow)
 		if won && accepted && c.persistence != nil {
-			c.persistence.Apply(group.snapshot, group.store, group.key.path, VerdictAllow)
+			c.persistence.ApplyAccepted(group.snapshot, group.store, group.key.path, VerdictAllow)
 		}
 	case ActionDenyAlways:
 		won, accepted := c.resolve(group, VerdictDeny)
 		if won && accepted && c.persistence != nil {
-			c.persistence.Apply(group.snapshot, group.store, group.key.path, VerdictDeny)
+			c.persistence.ApplyAccepted(group.snapshot, group.store, group.key.path, VerdictDeny)
 		}
 	default:
 		c.resolve(group, VerdictDeny)
@@ -256,21 +281,72 @@ func (c *PromptCoordinator) SnapshotReplaced(snapshot *DecisionSnapshot) {
 	}
 }
 
-// Close denies pending groups and rejects all future ownership transfers.
-func (c *PromptCoordinator) Close() {
+type PromptCoordinatorDiagnostics struct {
+	Groups        int
+	Events        int
+	ActivePrompts int64
+}
+
+func (c *PromptCoordinator) Diagnostics() PromptCoordinatorDiagnostics {
 	c.mu.Lock()
-	if c.closing {
-		c.mu.Unlock()
-		return
+	defer c.mu.Unlock()
+	diagnostics := PromptCoordinatorDiagnostics{
+		Groups:        len(c.groups),
+		ActivePrompts: c.activePrompts.Load(),
 	}
-	c.closing = true
-	groups := make([]*promptGroup, 0, len(c.groups))
 	for _, group := range c.groups {
-		groups = append(groups, group)
+		diagnostics.Events += len(group.entries)
+	}
+	return diagnostics
+}
+
+func (c *PromptCoordinator) Drain(ctx context.Context) error {
+	type detachedGroup struct {
+		group   *promptGroup
+		entries []promptEntry
+	}
+	c.mu.Lock()
+	detached := make([]detachedGroup, 0, len(c.groups))
+	for _, group := range c.groups {
+		entries, won := c.claimGroupLocked(group)
+		if won {
+			detached = append(detached, detachedGroup{group: group, entries: entries})
+		}
 	}
 	c.mu.Unlock()
-	for _, group := range groups {
-		c.resolve(group, VerdictDeny)
+
+	for _, group := range detached {
+		c.completeGroup(group.group, group.entries, VerdictDeny)
+	}
+
+	for c.activePrompts.Load() > 0 {
+		select {
+		case <-c.promptChanged:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// Close denies pending groups and rejects all future ownership transfers.
+func (c *PromptCoordinator) Close() {
+	c.lifecycle.BeginClosing(context.Background())
+	c.mu.Lock()
+	type detachedGroup struct {
+		group   *promptGroup
+		entries []promptEntry
+	}
+	detached := make([]detachedGroup, 0, len(c.groups))
+	for _, group := range c.groups {
+		entries, won := c.claimGroupLocked(group)
+		if won {
+			detached = append(detached, detachedGroup{group: group, entries: entries})
+		}
+	}
+	c.mu.Unlock()
+	for _, group := range detached {
+		c.completeGroup(group.group, group.entries, VerdictDeny)
 	}
 }
 
@@ -311,6 +387,12 @@ func (c *PromptCoordinator) completeGroup(group *promptGroup, entries []promptEn
 			defer func() { _ = recover() }()
 			if entry.release != nil {
 				entry.release()
+			}
+		}()
+		func() {
+			defer func() { _ = recover() }()
+			if c.complete != nil {
+				c.complete()
 			}
 		}()
 	}

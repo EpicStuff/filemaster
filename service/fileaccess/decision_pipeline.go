@@ -56,7 +56,11 @@ type DecisionPipelineDiagnostics struct {
 	QueueDepth              int
 	PeakQueueDepth          int64
 	Workers                 int
+	ActiveWorkers           int64
+	ActiveDecisions         int64
 	Outstanding             int64
+	PendingAsk              int
+	Closing                 bool
 	QueueSaturationDenies   uint64
 	OutstandingBudgetDenies uint64
 	ProfileAskBudgetDenies  uint64
@@ -87,12 +91,15 @@ type decisionWork struct {
 // reader transfers ownership into the queue and never waits for profile lookup,
 // prompting, persistence, or observation work.
 type DecisionPipeline struct {
-	config  DecisionPipelineConfig
-	handler Handler
-	observe func(*FileEvent, Verdict)
-	queue   chan decisionWork
+	config    DecisionPipelineConfig
+	handler   Handler
+	observe   func(*FileEvent, Verdict)
+	queue     chan *decisionWork
+	lifecycle *PipelineLifecycle
 
-	started atomic.Bool
+	started         atomic.Bool
+	activeWorkers   atomic.Int64
+	activeDecisions atomic.Int64
 
 	outstanding atomic.Int64
 	peakQueue   atomic.Int64
@@ -100,16 +107,30 @@ type DecisionPipeline struct {
 	limitDenied atomic.Uint64
 	askDenied   atomic.Uint64
 
+	activeMu sync.Mutex
+	active   map[*decisionWork]struct{}
+	changed  chan struct{}
+
 	askMu      sync.Mutex
 	pendingAsk map[string]int
 }
 
 func NewDecisionPipeline(handler Handler, config DecisionPipelineConfig) *DecisionPipeline {
+	return newDecisionPipeline(handler, config, NewPipelineLifecycle())
+}
+
+func newDecisionPipeline(handler Handler, config DecisionPipelineConfig, lifecycle *PipelineLifecycle) *DecisionPipeline {
 	config = config.normalized()
+	if lifecycle == nil {
+		lifecycle = NewPipelineLifecycle()
+	}
 	pipeline := &DecisionPipeline{
 		config:     config,
 		handler:    handler,
-		queue:      make(chan decisionWork, config.QueueCapacity),
+		queue:      make(chan *decisionWork, config.QueueCapacity),
+		lifecycle:  lifecycle,
+		active:     make(map[*decisionWork]struct{}),
+		changed:    make(chan struct{}, 1),
 		pendingAsk: make(map[string]int),
 	}
 	if observer, ok := handler.(responseObserver); ok {
@@ -118,7 +139,9 @@ func NewDecisionPipeline(handler Handler, config DecisionPipelineConfig) *Decisi
 	}
 	if handler, ok := pipeline.handler.(*ProfileHandler); ok {
 		handler.setPromptAdmission(pipeline.acquireAsk)
-		handler.setPromptCoordinator(NewPromptCoordinator(handler.prompter, handler.timeout, pipeline.acquireAsk, pipeline.finishPromptEvent))
+		coordinator := newPromptCoordinator(handler.prompter, handler.timeout, pipeline.acquireAsk, pipeline.finishTransferredPromptEvent, lifecycle)
+		coordinator.complete = pipeline.releaseOutstanding
+		handler.setPromptCoordinator(coordinator)
 	}
 	return pipeline
 }
@@ -148,12 +171,28 @@ func (p *DecisionPipeline) Start(ctx context.Context) {
 // per configured worker by production wiring.
 func (p *DecisionPipeline) Run(ctx context.Context) error {
 	p.started.Store(true)
+	p.activeWorkers.Add(1)
+	p.signalChanged()
+	defer func() {
+		p.activeWorkers.Add(-1)
+		p.signalChanged()
+	}()
 	for {
+		if !p.lifecycle.IsRunning() {
+			p.drainQueued()
+			return nil
+		}
 		select {
 		case <-ctx.Done():
+			p.drainQueued()
+			return nil
+		case <-p.lifecycle.Closing():
+			p.drainQueued()
 			return nil
 		case work := <-p.queue:
-			p.decide(ctx, work.pending)
+			if work != nil {
+				p.decide(ctx, work)
+			}
 		}
 	}
 }
@@ -164,47 +203,74 @@ func (p *DecisionPipeline) Handle(_ context.Context, pending PendingEvent) error
 	if pending == nil || pending.Event() == nil {
 		return ErrPendingEventNotOwner
 	}
-	if !p.started.Load() {
+	if !p.started.Load() || !p.lifecycle.IsRunning() {
 		return pending.Respond(VerdictDeny)
 	}
-	for {
-		outstanding := p.outstanding.Load()
-		if outstanding >= p.config.OutstandingLimit {
-			p.limitDenied.Add(1)
-			return pending.Respond(VerdictDeny)
-		}
-		if p.outstanding.CompareAndSwap(outstanding, outstanding+1) {
-			break
-		}
-	}
 
-	owner, err := pending.Transfer()
-	if err != nil {
-		p.outstanding.Add(-1)
-		return fmt.Errorf("transfer event to decision queue: %w", err)
+	var result error
+	var denyOwner PendingEvent
+	admitted := p.lifecycle.whileRunning(func() {
+		for {
+			outstanding := p.outstanding.Load()
+			if outstanding >= p.config.OutstandingLimit {
+				p.limitDenied.Add(1)
+				denyOwner = pending
+				return
+			}
+			if p.outstanding.CompareAndSwap(outstanding, outstanding+1) {
+				break
+			}
+		}
+
+		owner, err := pending.Transfer()
+		if err != nil {
+			p.outstanding.Add(-1)
+			result = fmt.Errorf("transfer event to decision queue: %w", err)
+			return
+		}
+		select {
+		case p.queue <- &decisionWork{pending: owner}:
+			p.recordQueueDepth()
+			p.signalChanged()
+		default:
+			p.outstanding.Add(-1)
+			p.queueDenied.Add(1)
+			denyOwner = owner
+		}
+	})
+	if !admitted {
+		return pending.Respond(VerdictDeny)
 	}
-	select {
-	case p.queue <- decisionWork{pending: owner}:
-		p.recordQueueDepth()
-		return nil
-	default:
-		p.outstanding.Add(-1)
-		p.queueDenied.Add(1)
-		return owner.Respond(VerdictDeny)
+	if denyOwner != nil {
+		return denyOwner.Respond(VerdictDeny)
 	}
+	return result
 }
 
-func (p *DecisionPipeline) decide(ctx context.Context, pending PendingEvent) {
+func (p *DecisionPipeline) decide(ctx context.Context, work *decisionWork) {
+	p.activeMu.Lock()
+	p.active[work] = struct{}{}
+	p.activeMu.Unlock()
+	p.activeDecisions.Add(1)
+	p.signalChanged()
+
 	releaseOutstanding := true
 	completed := false
 	defer func() {
+		p.activeMu.Lock()
+		delete(p.active, work)
+		p.activeMu.Unlock()
+		p.activeDecisions.Add(-1)
 		if releaseOutstanding {
 			p.outstanding.Add(-1)
 		}
+		p.signalChanged()
 	}()
+
+	pending := work.pending
 	event := pending.Event()
-	if event == nil {
-		_ = pending.Respond(VerdictDeny)
+	if event == nil || !p.lifecycle.IsRunning() {
+		_ = resolvePendingCurrent(pending, VerdictDeny)
 		return
 	}
 
@@ -234,13 +300,10 @@ func (p *DecisionPipeline) decide(ctx context.Context, pending PendingEvent) {
 		}
 		verdict = p.handler.Decide(ctx, event)
 	}()
-	if completed && releaseOutstanding {
+	if completed || !releaseOutstanding {
 		return
 	}
-	if !releaseOutstanding {
-		return
-	}
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || !p.lifecycle.IsRunning() {
 		verdict = VerdictDeny
 		afterResponse = nil
 	}
@@ -250,7 +313,7 @@ func (p *DecisionPipeline) decide(ctx context.Context, pending PendingEvent) {
 	if owner, ok := pending.(*pendingEventOwner); ok {
 		accepted = owner.responseAccepted()
 	}
-	if !accepted {
+	if !accepted || !p.lifecycle.IsRunning() {
 		return
 	}
 	if verdict == VerdictAllow && event.Op == OpExec {
@@ -267,8 +330,11 @@ func (p *DecisionPipeline) decide(ctx context.Context, pending PendingEvent) {
 }
 
 func (p *DecisionPipeline) finishPromptEvent(ctx context.Context, pending PendingEvent, verdict Verdict) bool {
-	defer p.outstanding.Add(-1)
+	defer p.releaseOutstanding()
+	return p.finishTransferredPromptEvent(ctx, pending, verdict)
+}
 
+func (p *DecisionPipeline) finishTransferredPromptEvent(ctx context.Context, pending PendingEvent, verdict Verdict) bool {
 	var event FileEvent
 	hasEvent := false
 	if source := pending.Event(); source != nil {
@@ -280,7 +346,7 @@ func (p *DecisionPipeline) finishPromptEvent(ctx context.Context, pending Pendin
 	if owner, ok := pending.(*pendingEventOwner); ok {
 		accepted = owner.responseAccepted()
 	}
-	if accepted && hasEvent {
+	if accepted && hasEvent && p.lifecycle.IsRunning() {
 		if verdict == VerdictAllow && event.Op == OpExec {
 			func() {
 				defer func() { _ = recover() }()
@@ -299,30 +365,107 @@ func (p *DecisionPipeline) finishPromptEvent(ctx context.Context, pending Pendin
 	return accepted
 }
 
+func (p *DecisionPipeline) releaseOutstanding() {
+	p.outstanding.Add(-1)
+	p.signalChanged()
+}
+
 func (p *DecisionPipeline) acquireAsk(profileKey string) (func(), bool) {
-	if profileKey == "" {
-		return func() {}, true
-	}
-	p.askMu.Lock()
-	if p.pendingAsk[profileKey] >= p.config.PerProfileAskLimit {
+	var release func()
+	admitted := p.lifecycle.whileRunning(func() {
+		if profileKey == "" {
+			release = func() {}
+			return
+		}
+		p.askMu.Lock()
+		if p.pendingAsk[profileKey] >= p.config.PerProfileAskLimit {
+			p.askMu.Unlock()
+			p.askDenied.Add(1)
+			return
+		}
+		p.pendingAsk[profileKey]++
 		p.askMu.Unlock()
-		p.askDenied.Add(1)
+
+		var once sync.Once
+		release = func() {
+			once.Do(func() {
+				p.askMu.Lock()
+				p.pendingAsk[profileKey]--
+				if p.pendingAsk[profileKey] == 0 {
+					delete(p.pendingAsk, profileKey)
+				}
+				p.askMu.Unlock()
+				p.signalChanged()
+			})
+		}
+	})
+	if !admitted || release == nil {
 		return nil, false
 	}
-	p.pendingAsk[profileKey]++
-	p.askMu.Unlock()
+	return release, true
+}
 
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			p.askMu.Lock()
-			p.pendingAsk[profileKey]--
-			if p.pendingAsk[profileKey] == 0 {
-				delete(p.pendingAsk, profileKey)
+func (p *DecisionPipeline) signalChanged() {
+	select {
+	case p.changed <- struct{}{}:
+	default:
+	}
+}
+
+func (p *DecisionPipeline) drainQueued() {
+	for {
+		select {
+		case work := <-p.queue:
+			if work == nil {
+				continue
 			}
-			p.askMu.Unlock()
-		})
-	}, true
+			_ = resolvePendingCurrent(work.pending, VerdictDeny)
+			p.outstanding.Add(-1)
+			p.signalChanged()
+		default:
+			return
+		}
+	}
+}
+
+func (p *DecisionPipeline) resolveActiveForShutdown() {
+	p.activeMu.Lock()
+	active := make([]*decisionWork, 0, len(p.active))
+	for work := range p.active {
+		active = append(active, work)
+	}
+	p.activeMu.Unlock()
+	for _, work := range active {
+		_ = resolvePendingCurrent(work.pending, VerdictDeny)
+	}
+}
+
+func (p *DecisionPipeline) Drain(ctx context.Context) error {
+	for {
+		p.drainQueued()
+		p.resolveActiveForShutdown()
+		if len(p.queue) == 0 && p.activeDecisions.Load() == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-p.changed:
+		}
+	}
+}
+
+func (p *DecisionPipeline) WaitOutstanding(ctx context.Context) error {
+	for {
+		if p.outstanding.Load() == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-p.changed:
+		}
+	}
 }
 
 func (p *DecisionPipeline) recordQueueDepth() {
@@ -336,11 +479,21 @@ func (p *DecisionPipeline) recordQueueDepth() {
 }
 
 func (p *DecisionPipeline) Diagnostics() DecisionPipelineDiagnostics {
+	p.askMu.Lock()
+	pendingAsk := 0
+	for _, count := range p.pendingAsk {
+		pendingAsk += count
+	}
+	p.askMu.Unlock()
 	return DecisionPipelineDiagnostics{
 		QueueDepth:              len(p.queue),
 		PeakQueueDepth:          p.peakQueue.Load(),
 		Workers:                 p.config.Workers,
+		ActiveWorkers:           p.activeWorkers.Load(),
+		ActiveDecisions:         p.activeDecisions.Load(),
 		Outstanding:             p.outstanding.Load(),
+		PendingAsk:              pendingAsk,
+		Closing:                 !p.lifecycle.IsRunning(),
 		QueueSaturationDenies:   p.queueDenied.Load(),
 		OutstandingBudgetDenies: p.limitDenied.Load(),
 		ProfileAskBudgetDenies:  p.askDenied.Load(),

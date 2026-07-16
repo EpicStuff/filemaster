@@ -284,17 +284,26 @@ func closeNewScopes(scopes, existing map[string]*policyScope) {
 func (s *fanotifySource) reconcile() {
 	s.marksMu.Lock()
 	defer s.marksMu.Unlock()
+	if !s.lifecycle.IsRunning() {
+		return
+	}
 	s.reconcileLocked()
 }
 
 // RunReconciliation is a dedicated managed loop so mount discovery and mark
 // syscalls never pause the fanotify event reader.
 func (s *fanotifySource) RunReconciliation(ctx context.Context) error {
+	if s.reconcileDone == nil {
+		s.reconcileDone = make(chan struct{})
+	}
+	defer s.reconcileDoneOnce.Do(func() { close(s.reconcileDone) })
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			return nil
+		case <-s.lifecycle.Closing():
 			return nil
 		case <-ticker.C:
 			s.reconcile()
@@ -314,10 +323,14 @@ func (s *fanotifySource) reconcileLocked() {
 		return
 	}
 	desiredSnapshot := snapshotFromScopes(s.scopes)
-	if s.pending {
-		s.activeScopes.Store(unionScopes(s.activeScopes.Load(), desiredSnapshot))
-	} else {
-		s.activeScopes.Store(desiredSnapshot)
+	if !s.lifecycle.whileRunning(func() {
+		if s.pending {
+			s.activeScopes.Store(unionScopes(s.activeScopes.Load(), desiredSnapshot))
+		} else {
+			s.activeScopes.Store(desiredSnapshot)
+		}
+	}) {
+		return
 	}
 
 	newMask := resolveMarkMask()
@@ -325,18 +338,31 @@ func (s *fanotifySource) reconcileLocked() {
 	for id, mount := range required {
 		current, marked := s.marks[id]
 		if !marked {
+			if !s.lifecycle.IsRunning() {
+				return
+			}
 			if err := s.mark(uint(unix.FAN_MARK_ADD|unix.FAN_MARK_MOUNT), newMask, mount.MountPoint); err != nil {
 				errs = append(errs, fmt.Errorf("add mount %d at %s: %w", id, mount.MountPoint, err))
 				continue
 			}
 			s.marks[id] = mountedMark{mount: mount, mask: newMask}
+			if !s.lifecycle.IsRunning() {
+				return
+			}
 			continue
 		}
 		if added := newMask &^ current.mask; added != 0 {
+			if !s.lifecycle.IsRunning() {
+				return
+			}
 			if err := s.mark(uint(unix.FAN_MARK_ADD|unix.FAN_MARK_MOUNT), added, mount.MountPoint); err != nil {
 				errs = append(errs, fmt.Errorf("add mask bits for mount %d: %w", id, err))
 			} else {
 				current.mask |= added
+				s.marks[id] = current
+				if !s.lifecycle.IsRunning() {
+					return
+				}
 			}
 		}
 		if removed := current.mask &^ newMask; removed != 0 {
@@ -358,9 +384,13 @@ func (s *fanotifySource) reconcileLocked() {
 		}
 	}
 	if complete && s.pending {
-		s.activeScopes.Store(desiredSnapshot)
-		s.pending = false
-		s.closeRetiredScopes()
+		if !s.lifecycle.whileRunning(func() {
+			s.activeScopes.Store(desiredSnapshot)
+			s.pending = false
+			s.closeRetiredScopes()
+		}) {
+			return
+		}
 	}
 	if complete {
 		for id, mark := range s.marks {
@@ -430,6 +460,44 @@ func (s *fanotifySource) MountDiagnostics() MountDiagnostics {
 	diagnostics.ActiveMountIDs = append([]int(nil), diagnostics.ActiveMountIDs...)
 	diagnostics.MissingMountIDs = append([]int(nil), diagnostics.MissingMountIDs...)
 	return diagnostics
+}
+
+func (s *fanotifySource) RemoveAllMarks() MarkRemovalResult {
+	s.marksMu.Lock()
+	defer s.marksMu.Unlock()
+	result := MarkRemovalResult{Complete: true}
+	for id, mark := range s.marks {
+		err := s.mark(uint(unix.FAN_MARK_REMOVE|unix.FAN_MARK_MOUNT), mark.mask, mark.mount.MountPoint)
+		if err == nil || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.EINVAL) {
+			delete(s.marks, id)
+			continue
+		}
+		result.Complete = false
+		result.Failures = append(result.Failures, MarkRemovalFailure{
+			MountID:   id,
+			MountPath: mark.mount.MountPoint,
+			Mask:      mark.mask,
+			Error:     err.Error(),
+		})
+	}
+	s.marksRemoved.Store(result.Complete)
+	s.updateDiagnostics(nil, nil)
+	sort.Slice(result.Failures, func(i, j int) bool {
+		return result.Failures[i].MountID < result.Failures[j].MountID
+	})
+	return result
+}
+
+func (s *fanotifySource) WaitReconciliation(ctx context.Context) error {
+	if s.reconcileDone == nil {
+		return nil
+	}
+	select {
+	case <-s.reconcileDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *fanotifySource) pathInActiveScope(path string) bool {

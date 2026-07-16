@@ -4,10 +4,12 @@
 package fileaccess
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/safing/portmaster/base/config"
@@ -26,6 +28,13 @@ type FileAccess struct {
 
 	pipelineConfig DecisionPipelineConfig
 	profileHandler *ProfileHandler
+	lifecycle      *PipelineLifecycle
+
+	shutdownOnce        sync.Once
+	shutdownDone        chan struct{}
+	shutdownMu          sync.Mutex
+	shutdownResult      error
+	shutdownDiagnostics ShutdownDiagnostics
 }
 
 // Manager returns the module manager.
@@ -110,6 +119,15 @@ func (fa *FileAccess) hydrateSelfProfile() error {
 // Start starts the module: build the platform source and run it under a
 // worker. The phase-1 default handler logs and allows every event.
 func (fa *FileAccess) Start() error {
+	if fa.lifecycle == nil {
+		fa.lifecycle = NewPipelineLifecycle()
+	}
+	if fa.shutdownDone == nil {
+		fa.shutdownDone = make(chan struct{})
+	}
+	if !fa.lifecycle.IsRunning() {
+		return ErrFileAccessClosing
+	}
 	if err := fa.hydrateSelfProfile(); err != nil {
 		return err
 	}
@@ -117,6 +135,9 @@ func (fa *FileAccess) Start() error {
 	src, err := newPlatformSource(fa.mgr)
 	if err != nil {
 		return err
+	}
+	if source, ok := src.(lifecycleSource); ok {
+		source.SetLifecycle(fa.lifecycle)
 	}
 
 	if _, ok := fa.instance.(configAccessor); !ok {
@@ -129,7 +150,7 @@ func (fa *FileAccess) Start() error {
 	}
 
 	config := fa.pipelineConfig.normalized()
-	fa.pipeline = NewDecisionPipeline(fa.handler, config)
+	fa.pipeline = newDecisionPipeline(fa.handler, config, fa.lifecycle)
 	fa.pipeline.Activate()
 	if source, ok := src.(descriptorBudgetSource); ok {
 		source.SetDescriptorBudget(config.OutstandingLimit)
@@ -154,17 +175,22 @@ func (fa *FileAccess) Start() error {
 		cfg.Config().EventConfigChange.AddCallback(
 			"fileaccess watchPaths reload",
 			func(_ *mgr.WorkerCtx, _ struct{}) (bool, error) {
-				if fa.source == nil {
+				if fa.source == nil || !fa.lifecycle.IsRunning() {
 					return false, nil
 				}
 				paths := resolveWatchPaths()
-				if err := fa.source.SetWatchPaths(paths); err != nil {
+				if err := fa.source.SetWatchPaths(paths); err != nil && !errors.Is(err, ErrFileAccessClosing) {
 					fa.mgr.Warn("fileaccess: live reload had errors", "err", err)
 				}
 				return false, nil
 			},
 		)
 	}
+
+	go func() {
+		<-fa.lifecycle.Closing()
+		_ = fa.Shutdown(fa.lifecycle.ClosingContext())
+	}()
 	return nil
 }
 
@@ -179,12 +205,15 @@ type configAccessor interface {
 // unwinds via either ctx.Done (from the worker manager) or EBADF
 // (from the closed fd), whichever lands first.
 func (fa *FileAccess) Stop() error {
-	if fa.source == nil {
-		return nil
+	if fa.lifecycle == nil {
+		if fa.source == nil {
+			return nil
+		}
+		return fa.source.Close()
 	}
-	err := fa.source.Close()
-	fa.source = nil
-	return err
+	ctx, cancel := context.WithTimeout(context.Background(), defaultControlledShutdownTimeout)
+	defer cancel()
+	return fa.Shutdown(ctx)
 }
 
 // SetHandler swaps the verdict handler. Intended for tests and for the
@@ -209,9 +238,11 @@ func New(instance instance) (*FileAccess, error) {
 	}
 	m := mgr.New("FileAccess")
 	module = &FileAccess{
-		mgr:      m,
-		instance: instance,
-		handler:  allowAll,
+		mgr:          m,
+		instance:     instance,
+		handler:      allowAll,
+		lifecycle:    NewPipelineLifecycle(),
+		shutdownDone: make(chan struct{}),
 	}
 	return module, nil
 }

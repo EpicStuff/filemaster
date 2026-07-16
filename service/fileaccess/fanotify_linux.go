@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,8 +21,9 @@ import (
 // fanotifySource is a Linux fanotify-backed Source. Mount marks collect
 // kernel events while the immutable scope snapshot determines policy scope.
 type fanotifySource struct {
-	log logger
-	fd  int
+	log       logger
+	fd        int
+	lifecycle *PipelineLifecycle
 
 	marksMu       sync.Mutex
 	scopes        map[string]*policyScope
@@ -29,6 +31,7 @@ type fanotifySource struct {
 	marks         map[int]mountedMark
 	markMask      uint64
 	pending       bool
+	marksRemoved  atomic.Bool
 
 	activeScopes atomic.Pointer[scopeSnapshot]
 	diagnostics  MountDiagnostics
@@ -53,13 +56,23 @@ type fanotifySource struct {
 	descriptorPressure   atomic.Bool
 	readerDegraded       atomic.Bool
 	readerFatal          atomic.Bool
+	readerRunning        atomic.Bool
+	readerExited         atomic.Bool
 	readerDiagMu         sync.Mutex
 	readerLastError      string
 	readerFatalError     string
+	readerDone           chan struct{}
+	readerIdle           chan struct{}
+	readerDoneOnce       sync.Once
+	reconcileDone        chan struct{}
+	reconcileDoneOnce    sync.Once
 
 	responses    *fanotifyResponseWriter
 	failedMu     sync.Mutex
 	failedEvents map[int32]PendingEvent
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 const (
@@ -71,20 +84,6 @@ const (
 
 // ReaderDiagnostics is a race-safe snapshot of fanotify reader capacity and
 // enforcement failures.
-type ReaderDiagnostics struct {
-	DescriptorLimit            int64
-	OutstandingDescriptors     int64
-	PeakOutstandingDescriptors int64
-	DescriptorPressure         bool
-	EMFILECount                uint64
-	QueueOverflowCount         uint64
-	UnresolvedPathDenyCount    uint64
-	Degraded                   bool
-	Fatal                      bool
-	LastError                  string
-	FatalError                 string
-}
-
 func calculateDescriptorLimit(softLimit, reserve uint64) int64 {
 	if softLimit <= reserve {
 		return 0
@@ -283,14 +282,32 @@ func (s *fanotifySource) ReaderDiagnostics() ReaderDiagnostics {
 	lastError := s.readerLastError
 	fatalError := s.readerFatalError
 	s.readerDiagMu.Unlock()
+	s.accountedMu.Lock()
+	accounted := make([]int32, 0, len(s.accounted))
+	for fd := range s.accounted {
+		accounted = append(accounted, fd)
+	}
+	s.accountedMu.Unlock()
+	s.failedMu.Lock()
+	failed := make([]int32, 0, len(s.failedEvents))
+	for fd := range s.failedEvents {
+		failed = append(failed, fd)
+	}
+	s.failedMu.Unlock()
+	sort.Slice(accounted, func(i, j int) bool { return accounted[i] < accounted[j] })
+	sort.Slice(failed, func(i, j int) bool { return failed[i] < failed[j] })
 	return ReaderDiagnostics{
 		DescriptorLimit:            s.descriptorLimit,
 		OutstandingDescriptors:     s.outstanding.Load(),
 		PeakOutstandingDescriptors: s.peakOutstanding.Load(),
+		AccountedDescriptors:       accounted,
+		FailedResponseDescriptors:  failed,
 		DescriptorPressure:         s.descriptorPressure.Load(),
 		EMFILECount:                s.readEMFILEs.Load(),
 		QueueOverflowCount:         s.queueOverflows.Load(),
 		UnresolvedPathDenyCount:    s.unresolvedPathDenies.Load(),
+		Running:                    s.readerRunning.Load(),
+		Exited:                     s.readerExited.Load(),
 		Degraded:                   s.readerDegraded.Load(),
 		Fatal:                      s.readerFatal.Load(),
 		LastError:                  lastError,
@@ -353,9 +370,11 @@ func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
 		return nil, fmt.Errorf("fanotify_init: %w", err)
 	}
 
+	lifecycle := NewPipelineLifecycle()
 	s := &fanotifySource{
 		log:                log,
 		fd:                 fd,
+		lifecycle:          lifecycle,
 		scopes:             make(map[string]*policyScope),
 		marks:              make(map[int]mountedMark),
 		markMask:           resolveMarkMask(),
@@ -367,11 +386,15 @@ func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
 		descriptorLimit:    descriptorLimit,
 		accounted:          make(map[int32]struct{}),
 		descriptorReleased: make(chan struct{}, 1),
+		readerDone:         make(chan struct{}),
+		readerIdle:         make(chan struct{}, 1),
+		reconcileDone:      make(chan struct{}),
 		mark: func(flags uint, mask uint64, path string) error {
 			return unix.FanotifyMark(fd, flags, mask, unix.AT_FDCWD, path)
 		},
 	}
 	s.responses = newFanotifyResponseWriter(fd, log, s.finishEventFDClose)
+	s.responses.lifecycle = lifecycle
 
 	if err := s.SetWatchPaths(paths); err != nil {
 		_ = unix.Close(fd)
@@ -382,23 +405,42 @@ func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
 	return s, nil
 }
 
+func (s *fanotifySource) SetLifecycle(lifecycle *PipelineLifecycle) {
+	if lifecycle == nil {
+		return
+	}
+	s.lifecycle = lifecycle
+	if s.responses != nil {
+		s.responses.lifecycle = lifecycle
+	}
+}
+
 func (s *fanotifySource) SetWatchPaths(paths []string) error {
 	s.marksMu.Lock()
 	defer s.marksMu.Unlock()
+	if !s.lifecycle.IsRunning() {
+		return ErrFileAccessClosing
+	}
 
 	next, err := s.prepareScopes(paths)
 	if err != nil {
 		return err
 	}
-	previous := s.scopes
-	s.scopes = next
-	for configured, scope := range previous {
-		if next[configured] != scope {
-			s.retiredScopes = append(s.retiredScopes, scope)
+	published := s.lifecycle.whileRunning(func() {
+		previous := s.scopes
+		s.scopes = next
+		for configured, scope := range previous {
+			if next[configured] != scope {
+				s.retiredScopes = append(s.retiredScopes, scope)
+			}
 		}
+		s.pending = true
+		s.activeScopes.Store(unionScopes(s.activeScopes.Load(), snapshotFromScopes(next)))
+	})
+	if !published {
+		closeNewScopes(next, s.scopes)
+		return ErrFileAccessClosing
 	}
-	s.pending = true
-	s.activeScopes.Store(unionScopes(s.activeScopes.Load(), snapshotFromScopes(next)))
 	s.reconcileLocked()
 	return nil
 }
@@ -415,9 +457,22 @@ func (s *fanotifySource) Run(ctx context.Context, handler PendingHandler) error 
 	if s.descriptorReleased == nil {
 		s.descriptorReleased = make(chan struct{}, 1)
 	}
+	if s.readerDone == nil {
+		s.readerDone = make(chan struct{})
+	}
+	if s.readerIdle == nil {
+		s.readerIdle = make(chan struct{}, 1)
+	}
 	if s.emfileRetry <= 0 {
 		s.emfileRetry = defaultEMFILERetry
 	}
+	s.readerRunning.Store(true)
+	s.readerExited.Store(false)
+	defer func() {
+		s.readerRunning.Store(false)
+		s.readerExited.Store(true)
+		s.readerDoneOnce.Do(func() { close(s.readerDone) })
+	}()
 	buf := make([]byte, readBufferCapacity(math.MaxInt64))
 	pollFds := []unix.PollFd{{Fd: int32(s.fd), Events: unix.POLLIN}}
 
@@ -438,8 +493,6 @@ func (s *fanotifySource) Run(ctx context.Context, handler PendingHandler) error 
 			}
 		}
 
-		// Short poll keeps cancellation responsive without reading more event
-		// descriptors than the currently available headroom.
 		n, err := s.poll(pollFds, 500)
 		if err != nil {
 			if errors.Is(err, unix.EINTR) {
@@ -448,6 +501,12 @@ func (s *fanotifySource) Run(ctx context.Context, handler PendingHandler) error 
 			return fmt.Errorf("poll: %w", err)
 		}
 		if n == 0 {
+			if !s.lifecycle.IsRunning() && s.marksRemoved.Load() && s.outstanding.Load() == 0 {
+				select {
+				case s.readerIdle <- struct{}{}:
+				default:
+				}
+			}
 			continue
 		}
 
@@ -467,7 +526,6 @@ func (s *fanotifySource) Run(ctx context.Context, handler PendingHandler) error 
 				continue
 			}
 			if errors.Is(err, unix.EBADF) {
-				// fd closed by Close().
 				return nil
 			}
 			return fmt.Errorf("read: %w", err)
@@ -485,16 +543,83 @@ func (s *fanotifySource) Run(ctx context.Context, handler PendingHandler) error 
 
 // Close releases the fanotify fd. Safe to call from any goroutine; the
 // blocking Read in Run will unwind with EBADF.
+func (s *fanotifySource) WaitReaderDrained(ctx context.Context) error {
+	if !s.marksRemoved.Load() {
+		return errors.New("fanotify marks remain active")
+	}
+	if !s.readerRunning.Load() {
+		if s.outstanding.Load() == 0 {
+			return nil
+		}
+		return errors.New("fanotify reader is not running with outstanding descriptors")
+	}
+	for {
+		if s.outstanding.Load() == 0 {
+			select {
+			case <-s.readerIdle:
+				return nil
+			default:
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.readerIdle:
+			if s.outstanding.Load() == 0 {
+				return nil
+			}
+		case <-s.descriptorReleased:
+		}
+	}
+}
+
+func (s *fanotifySource) WaitReaderExit(ctx context.Context) error {
+	if s.readerDone == nil {
+		return nil
+	}
+	select {
+	case <-s.readerDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *fanotifySource) PrepareClose(ctx context.Context) error {
+	if s.responses == nil {
+		return nil
+	}
+	return s.responses.SealAndWait(ctx)
+}
+
+func (s *fanotifySource) ResponseDiagnostics() ResponseWriterDiagnostics {
+	if s.responses == nil {
+		return ResponseWriterDiagnostics{CurrentFD: -1}
+	}
+	return s.responses.Diagnostics()
+}
+
 func (s *fanotifySource) Close() error {
-	s.marksMu.Lock()
-	for _, scope := range s.scopes {
-		scope.close()
-	}
-	for _, scope := range s.retiredScopes {
-		scope.close()
-	}
-	s.marksMu.Unlock()
-	return unix.Close(s.fd)
+	s.closeOnce.Do(func() {
+		if s.responses != nil {
+			s.responses.sealed.Store(true)
+			s.closeErr = s.responses.CloseGroup()
+		} else {
+			s.closeErr = unix.Close(s.fd)
+		}
+		if !s.marksMu.TryLock() {
+			s.closeErr = errors.Join(s.closeErr, errors.New("scope reference cleanup blocked by an active mark operation"))
+			return
+		}
+		for _, scope := range s.scopes {
+			scope.close()
+		}
+		for _, scope := range s.retiredScopes {
+			scope.close()
+		}
+		s.marksMu.Unlock()
+	})
+	return s.closeErr
 }
 
 func (s *fanotifySource) handleEvents(ctx context.Context, handler PendingHandler, buf []byte) error {
@@ -604,6 +729,8 @@ func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler
 	pending := s.newFanotifyPendingEvent(&event, meta.Fd)
 	var responseErr error
 	switch {
+	case !s.lifecycle.IsRunning():
+		responseErr = pending.Respond(VerdictDeny)
 	case s.responses.draining.Load():
 		responseErr = pending.Respond(VerdictDeny)
 	case !resolved:
