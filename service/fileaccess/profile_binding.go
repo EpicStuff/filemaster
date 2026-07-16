@@ -112,8 +112,11 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	if defaultAction == profile.DefaultActionNotSet {
 		defaultAction = profile.DefaultActionAsk
 	}
+	store := &profileRuleStore{p: local, id: id}
+	l.bindPersistentStoreFor(source, id, store)
 	snapshot := l.snapshotFor(id, source, defaultAction, rawRules)
-	res.Store = &profileRuleStore{p: local, id: id}
+	l.bindPersistentStore(snapshot, store)
+	res.Store = store
 	res.Snapshot = snapshot
 	res.ParsedRules = snapshot.Rules
 	res.DefaultAction = snapshot.DefaultAction
@@ -178,6 +181,24 @@ func (l *processProfileLookup) mergePersistentRules(snapshot *DecisionSnapshot) 
 		return snapshot
 	}
 	return overlay.Merge(snapshot)
+}
+
+func (l *processProfileLookup) bindPersistentStore(snapshot *DecisionSnapshot, store RuleStore) {
+	l.overlayMu.RLock()
+	overlay := l.overlay
+	l.overlayMu.RUnlock()
+	if overlay != nil {
+		overlay.Bind(snapshot, store)
+	}
+}
+
+func (l *processProfileLookup) bindPersistentStoreFor(source, id string, store RuleStore) {
+	l.overlayMu.RLock()
+	overlay := l.overlay
+	l.overlayMu.RUnlock()
+	if overlay != nil {
+		overlay.BindStore(source, id, store)
+	}
 }
 
 func sameRuleEntries(left, right []string) bool {

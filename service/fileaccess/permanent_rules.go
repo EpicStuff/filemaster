@@ -39,23 +39,32 @@ type permanentRule struct {
 }
 
 type dirtyRuleProfile struct {
-	store      RuleStore
+	store RuleStore
+
+	// writeMu serializes storage calls and rebinding. The RulePersistence mutex
+	// is never held while this lock protects a storage call.
+	writeMu sync.Mutex
+
 	generation uint64
 	dirty      map[string]permanentRule
-	applied    map[string]permanentRule
-	merged     *DecisionSnapshot
-	mergedBase uint64
-	mergedGen  uint64
-	wake       chan struct{}
-	started    bool
-	retries    uint64
-	lastErr    error
-	failure    bool
+	applied    map[string]permanentRule // writes known to have succeeded
+
+	base           *DecisionSnapshot
+	published      *DecisionSnapshot
+	publishedBase  *DecisionSnapshot
+	publishedEpoch uint64
+	publishedRev   uint64
+	policyEpoch    uint64
+
+	wake    chan struct{}
+	started bool
+	retries uint64
+	lastErr error
+	failure bool
 }
 
 // RulePersistence owns the durable, per-profile permanent-rule overlay. Its
-// mutex protects only bookkeeping: profile storage and snapshot observers are
-// always called after releasing it.
+// mutex protects bookkeeping only: storage and observers always run unlocked.
 type RulePersistence struct {
 	mu       sync.Mutex
 	profiles map[string]*dirtyRuleProfile
@@ -102,9 +111,41 @@ func canonicalPermanentRule(pattern string, verdict Verdict) (permanentRule, boo
 	return permanentRule{pattern: pattern, verdict: verdict, entry: FormatRule(pattern, verdict)}, true
 }
 
+// Bind attaches the current writable profile object without changing any dirty
+// generation. A rebinding waits for an old storage call to finish, so every
+// later retry uses the replacement profile object.
+func (p *RulePersistence) Bind(snapshot *DecisionSnapshot, store RuleStore) {
+	if snapshot == nil || store == nil {
+		return
+	}
+	p.BindStore(snapshot.Source, snapshot.ProfileID, store)
+}
+
+// BindStore updates an existing profile's current writer before a reload
+// snapshot is constructed. It intentionally does not create overlay state for
+// clean profiles.
+func (p *RulePersistence) BindStore(source, profileID string, store RuleStore) {
+	if store == nil {
+		return
+	}
+	key := source + "/" + profileID
+	p.mu.Lock()
+	state := p.profiles[key]
+	p.mu.Unlock()
+	if state == nil {
+		return
+	}
+	state.writeMu.Lock()
+	p.mu.Lock()
+	if current := p.profiles[key]; current == state {
+		state.store = store
+	}
+	p.mu.Unlock()
+	state.writeMu.Unlock()
+}
+
 // Apply makes an accepted Always decision visible before storage is attempted.
-// It returns the newly immutable merged snapshot and notifies observers only
-// after all overlay locks have been released.
+// The returned snapshot is immutable and any observer runs after unlocking.
 func (p *RulePersistence) Apply(snapshot *DecisionSnapshot, store RuleStore, pattern string, verdict Verdict) *DecisionSnapshot {
 	rule, ok := canonicalPermanentRule(pattern, verdict)
 	if !ok || snapshot == nil || store == nil {
@@ -113,27 +154,28 @@ func (p *RulePersistence) Apply(snapshot *DecisionSnapshot, store RuleStore, pat
 	key := profileSnapshotKey(snapshot)
 	p.mu.Lock()
 	state := p.profileLocked(key)
+	base := state.baseForLocked(snapshot)
 	state.store = store
 	if current, exists := state.dirty[rule.pattern]; exists && current.verdict == rule.verdict {
-		merged := p.mergeLocked(snapshot, state)
+		merged := state.publishLocked(base)
 		p.mu.Unlock()
 		return merged
 	}
 	if current, exists := state.applied[rule.pattern]; exists && current.verdict == rule.verdict {
-		merged := p.mergeLocked(snapshot, state)
+		merged := state.publishLocked(base)
 		p.mu.Unlock()
 		return merged
 	}
-	if rulePresent(snapshot, rule) && state.dirty[rule.pattern].generation == 0 && state.applied[rule.pattern].generation == 0 {
+	if len(state.dirty) == 0 && len(state.applied) == 0 && durableExactRuleAtPrecedence(base, rule) {
 		p.mu.Unlock()
-		return snapshot
+		return base
 	}
 	state.generation++
 	rule.generation = state.generation
 	state.dirty[rule.pattern] = rule
 	delete(state.applied, rule.pattern)
-	state.merged = nil
-	merged := p.mergeLocked(snapshot, state)
+	state.policyEpoch++
+	merged := state.publishLocked(base)
 	start := !state.started
 	if start {
 		state.started = true
@@ -153,8 +195,10 @@ func (p *RulePersistence) Apply(snapshot *DecisionSnapshot, store RuleStore, pat
 	return merged
 }
 
-// Merge reapplies outstanding local intent to a replacement profile snapshot.
-// It is used during reload before that snapshot reaches workers or prompts.
+// Merge reapplies local dirty intent to a replacement profile snapshot. Dirty
+// entries never become durable merely because an unsaved in-memory profile
+// happened to expose the same rule; only an AppendRule success moves them out
+// of dirty state.
 func (p *RulePersistence) Merge(snapshot *DecisionSnapshot) *DecisionSnapshot {
 	if snapshot == nil {
 		return nil
@@ -165,7 +209,14 @@ func (p *RulePersistence) Merge(snapshot *DecisionSnapshot) *DecisionSnapshot {
 		p.mu.Unlock()
 		return snapshot
 	}
-	merged := p.mergeLocked(snapshot, state)
+	base := state.baseForLocked(snapshot)
+	for pattern, rule := range state.applied {
+		if durableExactRuleAtPrecedence(base, rule) {
+			delete(state.applied, pattern)
+			state.policyEpoch++
+		}
+	}
+	merged := state.publishLocked(base)
 	p.mu.Unlock()
 	return merged
 }
@@ -184,46 +235,34 @@ func (p *RulePersistence) profileLocked(key string) *dirtyRuleProfile {
 	return state
 }
 
-func rulePresent(snapshot *DecisionSnapshot, rule permanentRule) bool {
+func (state *dirtyRuleProfile) baseForLocked(snapshot *DecisionSnapshot) *DecisionSnapshot {
+	if snapshot == state.published && state.base != nil {
+		return state.base
+	}
+	state.base = snapshot
+	return snapshot
+}
+
+// durableExactRuleAtPrecedence confirms that the profile itself currently
+// decides the exact canonical path with this exact canonical rule. Merely
+// finding a matching rule below an opposite or broader first match is not
+// durable confirmation.
+func durableExactRuleAtPrecedence(snapshot *DecisionSnapshot, rule permanentRule) bool {
+	if snapshot == nil {
+		return false
+	}
 	for _, existing := range snapshot.Rules.Rules {
-		if existing.Pattern == rule.pattern && existing.Verdict == rule.verdict {
-			return true
+		if !existing.Matches(rule.pattern) {
+			continue
 		}
+		return existing.Pattern == rule.pattern && existing.Verdict == rule.verdict
 	}
 	return false
 }
 
-func (p *RulePersistence) mergeLocked(snapshot *DecisionSnapshot, state *dirtyRuleProfile) *DecisionSnapshot {
-	// A reload that already contains the canonical local rule is durable
-	// confirmation of that intent. Coalesce it instead of publishing or
-	// writing a duplicate. A conflicting rule deliberately stays overlaid.
-	coalesced := false
-	if state.merged != snapshot {
-		for pattern, rule := range state.dirty {
-			if rulePresent(snapshot, rule) {
-				delete(state.dirty, pattern)
-				coalesced = true
-			}
-		}
-		for pattern, rule := range state.applied {
-			if rulePresent(snapshot, rule) {
-				delete(state.applied, pattern)
-				coalesced = true
-			}
-		}
-	}
-	if coalesced {
-		state.merged = nil
-		if len(state.dirty) == 0 {
-			state.failure = false
-			state.lastErr = nil
-		}
-	}
-	if len(state.dirty) == 0 && len(state.applied) == 0 {
-		return snapshot
-	}
-	if state.merged != nil && state.mergedBase == snapshot.Revision && state.mergedGen == state.generation {
-		return state.merged
+func (state *dirtyRuleProfile) publishLocked(base *DecisionSnapshot) *DecisionSnapshot {
+	if state.published != nil && state.publishedBase == base && state.publishedEpoch == state.policyEpoch {
+		return state.published
 	}
 	rules := make([]permanentRule, 0, len(state.dirty)+len(state.applied))
 	for _, rule := range state.dirty {
@@ -237,25 +276,29 @@ func (p *RulePersistence) mergeLocked(snapshot *DecisionSnapshot, state *dirtyRu
 	for _, rule := range rules {
 		overlay[rule.pattern] = rule
 	}
-	mergedRules := make([]PathRule, 0, len(snapshot.Rules.Rules)+len(rules))
+	mergedRules := make([]PathRule, 0, len(base.Rules.Rules)+len(rules))
 	for _, rule := range rules {
 		mergedRules = append(mergedRules, PathRule{Pattern: rule.pattern, Verdict: rule.verdict})
 	}
-	for _, rule := range snapshot.Rules.Rules {
+	for _, rule := range base.Rules.Rules {
 		if _, covered := overlay[rule.Pattern]; !covered {
 			mergedRules = append(mergedRules, rule)
 		}
 	}
-	state.merged = &DecisionSnapshot{
-		ProfileID:     snapshot.ProfileID,
-		Source:        snapshot.Source,
-		DefaultAction: snapshot.DefaultAction,
-		Rules:         PathRules{Rules: mergedRules, Default: snapshot.Rules.Default},
-		Revision:      snapshot.Revision + state.generation,
+	if state.publishedRev < base.Revision {
+		state.publishedRev = base.Revision
 	}
-	state.mergedBase = snapshot.Revision
-	state.mergedGen = state.generation
-	return state.merged
+	state.publishedRev++
+	state.published = &DecisionSnapshot{
+		ProfileID:     base.ProfileID,
+		Source:        base.Source,
+		DefaultAction: base.DefaultAction,
+		Rules:         PathRules{Rules: mergedRules, Default: base.Rules.Default},
+		Revision:      state.publishedRev,
+	}
+	state.publishedEpoch = state.policyEpoch
+	state.publishedBase = base
+	return state.published
 }
 
 func (p *RulePersistence) runProfile(key string, state *dirtyRuleProfile) {
@@ -277,10 +320,12 @@ func (p *RulePersistence) runProfile(key string, state *dirtyRuleProfile) {
 }
 
 func (p *RulePersistence) nextRule(key string, expected *dirtyRuleProfile) (permanentRule, RuleStore, bool) {
+	expected.writeMu.Lock()
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	state := p.profiles[key]
 	if state != expected || state == nil || state.store == nil || len(state.dirty) == 0 {
+		p.mu.Unlock()
+		expected.writeMu.Unlock()
 		return permanentRule{}, nil, false
 	}
 	var selected permanentRule
@@ -289,7 +334,23 @@ func (p *RulePersistence) nextRule(key string, expected *dirtyRuleProfile) (perm
 			selected = rule
 		}
 	}
-	return selected, state.store, true
+	store := state.store
+	p.mu.Unlock()
+	return selected, &lockedRuleStore{store: store, unlock: expected.writeMu.Unlock}, true
+}
+
+// lockedRuleStore keeps the per-profile write/rebind lock until the storage
+// call ends without exposing that detail to RuleStore implementations.
+type lockedRuleStore struct {
+	store  RuleStore
+	unlock func()
+}
+
+func (s *lockedRuleStore) ID() string { return s.store.ID() }
+
+func (s *lockedRuleStore) AppendRule(entry string) error {
+	defer s.unlock()
+	return s.store.AppendRule(entry)
 }
 
 func (p *RulePersistence) persisted(key string, expected *dirtyRuleProfile, rule permanentRule) {
@@ -302,7 +363,7 @@ func (p *RulePersistence) persisted(key string, expected *dirtyRuleProfile, rule
 	if current, ok := state.dirty[rule.pattern]; ok && current.generation == rule.generation {
 		delete(state.dirty, rule.pattern)
 		state.applied[rule.pattern] = rule
-		state.merged = nil
+		state.policyEpoch++
 	}
 	if len(state.dirty) == 0 {
 		state.failure = false

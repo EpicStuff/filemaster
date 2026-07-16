@@ -330,9 +330,12 @@ func (profile *Profile) addStringArrayEntry(cfgKey, newEntry string) error {
 				break
 			}
 			if entry == newEntry {
-				log.Debugf("profile: ignoring new rule for %s, identical already present: %s", profile, newEntry)
+				// The identical in-memory entry may be the result of a previous
+				// failed Save. Keep the current profile state intact, but still
+				// attempt real storage so Filemaster's retry worker can distinguish
+				// durable success from that failed mutation.
 				profile.Unlock()
-				return nil
+				return profile.Save()
 			}
 		}
 		list = append([]string{newEntry}, list...)

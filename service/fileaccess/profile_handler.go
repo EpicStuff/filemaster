@@ -194,13 +194,20 @@ func (h *ProfileHandler) SetSelfProfile(p *profile.Profile, pid int32) {
 	if defaultAction == profile.DefaultActionNotSet {
 		defaultAction = profile.DefaultActionAsk
 	}
+	store := &profileRuleStore{p: p, id: id}
+	if coordinator := h.coordinator(); coordinator != nil {
+		coordinator.RulePersistence().BindStore(source, id, store)
+	}
 	snapshot := newDecisionSnapshot(id, source, defaultAction, rawRules, h.selfRevision.Add(1))
 	if coordinator := h.coordinator(); coordinator != nil {
 		snapshot = coordinator.RulePersistence().Merge(snapshot)
 	}
+	if coordinator := h.coordinator(); coordinator != nil {
+		coordinator.RulePersistence().Bind(snapshot, store)
+	}
 	result := LookupResult{
 		Path:              path,
-		Store:             &profileRuleStore{p: p, id: id},
+		Store:             store,
 		Snapshot:          snapshot,
 		ParsedRules:       snapshot.Rules,
 		DefaultAction:     snapshot.DefaultAction,
@@ -256,13 +263,23 @@ func (h *ProfileHandler) PublishProfileSnapshot(p *profile.Profile) {
 	if defaultAction == profile.DefaultActionNotSet {
 		defaultAction = profile.DefaultActionAsk
 	}
+	store := &profileRuleStore{p: p, id: id}
+	if coordinator := h.coordinator(); coordinator != nil {
+		coordinator.RulePersistence().BindStore(source, id, store)
+	}
 
 	var snapshot *DecisionSnapshot
 	if lookup, ok := h.lookup.(*processProfileLookup); ok {
 		snapshot = lookup.snapshotFor(id, source, defaultAction, rawRules)
 	} else {
 		snapshot = newDecisionSnapshot(id, source, defaultAction, rawRules, h.selfRevision.Add(1))
+		if coordinator := h.coordinator(); coordinator != nil {
+			snapshot = coordinator.RulePersistence().Merge(snapshot)
+		}
 		h.publishSnapshot(snapshot)
+	}
+	if coordinator := h.coordinator(); coordinator != nil && snapshot != nil {
+		coordinator.RulePersistence().Bind(snapshot, store)
 	}
 }
 

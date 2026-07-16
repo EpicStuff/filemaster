@@ -207,3 +207,95 @@ func TestPermanentRulesObserverAndFlush(t *testing.T) {
 		t.Fatal("flush timeout changed active dirty policy")
 	}
 }
+
+func TestPermanentRulesFailedMemoryMutationRemainsDirtyUntilRealSave(t *testing.T) {
+	wait := make(chan time.Time, 1)
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond, After: func(time.Duration) <-chan time.Time { return wait }})
+	store := &persistenceTestStore{errs: []error{errors.New("save after memory mutation failed")}}
+	persistence.Apply(persistenceSnapshot(), store, "/tmp/memory", VerdictAllow)
+	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 1 })
+
+	// This is the snapshot a profile lookup would build from the failed
+	// in-memory mutation. It must not be treated as durable confirmation.
+	persistence.Merge(persistenceSnapshot("+ /tmp/memory"))
+	if diagnostics := persistence.Diagnostics()["local/profile"]; diagnostics.DirtyCount != 1 {
+		t.Fatalf("failed in-memory mutation cleared dirty state: %+v", diagnostics)
+	}
+
+	wait <- time.Now()
+	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
+	entries, _ := store.snapshot()
+	if len(entries) != 2 {
+		t.Fatalf("storage attempts = %v, want failed save plus real retry", entries)
+	}
+}
+
+func TestPermanentRulesRequireEffectiveExactDurablePrecedence(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	store := &persistenceTestStore{release: make(chan struct{}, 2)}
+
+	hidden := persistence.Apply(persistenceSnapshot("- /tmp/file", "+ /tmp/file"), store, "/tmp/file", VerdictAllow)
+	if diagnostics := persistence.Diagnostics()["local/profile"]; diagnostics.DirtyCount != 1 {
+		t.Fatalf("hidden lower allow was treated as durable: %+v", diagnostics)
+	}
+	if got := hidden.Rules.Rules[0]; got.Pattern != "/tmp/file" || got.Verdict != VerdictAllow {
+		t.Fatalf("exact allow was not placed at effective precedence: %+v", got)
+	}
+
+	broader := NewRulePersistence(nil, RulePersistenceOptions{})
+	broaderStore := &persistenceTestStore{release: make(chan struct{}, 1)}
+	merged := broader.Apply(persistenceSnapshot("+ /tmp/*"), broaderStore, "/tmp/file", VerdictAllow)
+	if diagnostics := broader.Diagnostics()["local/profile"]; diagnostics.DirtyCount != 1 {
+		t.Fatalf("broader rule was treated as exact durable confirmation: %+v", diagnostics)
+	}
+	if got := merged.Rules.Rules[0]; got.Pattern != "/tmp/file" || got.Verdict != VerdictAllow {
+		t.Fatalf("exact rule was not placed before broader rule: %+v", got)
+	}
+}
+
+func TestPermanentRulesPublishMonotonicRevisionsAcrossOverlayLifecycle(t *testing.T) {
+	store := &persistenceTestStore{started: make(chan struct{}, 2), release: make(chan struct{}, 2)}
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	base := persistenceSnapshot()
+	first := persistence.Apply(base, store, "/tmp/one", VerdictAllow)
+	second := persistence.Apply(first, store, "/tmp/two", VerdictDeny)
+	if second.Revision <= first.Revision {
+		t.Fatalf("overlay revisions did not increase: %d then %d", first.Revision, second.Revision)
+	}
+
+	// Complete both writes, then present a newer external profile revision.
+	<-store.started
+	store.release <- struct{}{}
+	<-store.started
+	store.release <- struct{}{}
+	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
+	external := newDecisionSnapshot("profile", "local", 2, []string{"+ /tmp/one", "- /tmp/two", "+ /tmp/external"}, 2)
+	clean := persistence.Merge(external)
+	if clean.Revision <= second.Revision {
+		t.Fatalf("clean durable snapshot revision %d did not exceed overlay %d", clean.Revision, second.Revision)
+	}
+	newer := persistence.Merge(newDecisionSnapshot("profile", "local", 2, []string{"+ /tmp/one", "- /tmp/two", "- /tmp/external"}, 3))
+	if newer.Revision <= clean.Revision {
+		t.Fatalf("new external revision %d was rejected after overlay %d", newer.Revision, clean.Revision)
+	}
+	if again := persistence.Merge(newer); again != newer {
+		t.Fatalf("unchanged merged lookup rebuilt a revision: %d then %d", newer.Revision, again.Revision)
+	}
+}
+
+func TestPermanentRulesRetryUsesReboundStore(t *testing.T) {
+	wait := make(chan time.Time, 1)
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond, After: func(time.Duration) <-chan time.Time { return wait }})
+	oldStore := &persistenceTestStore{errs: []error{errors.New("old profile save failed")}}
+	newStore := &persistenceTestStore{}
+	snapshot := persistence.Apply(persistenceSnapshot(), oldStore, "/tmp/rebind", VerdictAllow)
+	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].RetryCount == 1 })
+	persistence.Bind(snapshot, newStore)
+	wait <- time.Now()
+	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
+	oldEntries, _ := oldStore.snapshot()
+	newEntries, _ := newStore.snapshot()
+	if len(oldEntries) != 1 || len(newEntries) != 1 {
+		t.Fatalf("retry stores old=%v new=%v, want old failed once and new saved once", oldEntries, newEntries)
+	}
+}
