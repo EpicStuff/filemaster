@@ -15,12 +15,23 @@ Host-dependent verification is deliberately not inferred from unit tests.
 | Controlled shutdown | `lifecycle.go`, `shutdown.go` | `shutdown_test.go`, `fanotify_shutdown_linux_test.go` | `go test -race ./service/fileaccess -run TestShutdown` | None for deterministic shutdown paths. |
 | Settings and effective limits | `config.go`, `module.go` | `phase8_test.go` | `go test ./service/fileaccess -run 'TestConfiguredDecision\|TestPipelineSettings'` | Restart is required for queue/worker/budget changes by design. |
 | Diagnostics and degraded warnings | `diagnostics_linux.go` | `phase8_test.go` | `go test -race ./service/fileaccess -run TestDiagnostics` | UI presentation is config/status driven; detailed descriptor IDs remain privileged-only. |
-| Matching settings UI | Existing dynamic settings renderer and `fileaccess` subsystem registration | Angular config component suite | `cd desktop/angular && npx ng test --watch=false` | Requires installed ChromeHeadless environment. |
+| Matching settings UI | Existing dynamic settings renderer and `fileaccess` subsystem registration | Angular config component suite | `cd desktop/angular && npx ng test --watch=false` — **passed** (`13 SUCCESS`, auxiliary projects `0 SUCCESS`/`1 SUCCESS`) | Dedicated diagnostics panel remains incomplete; settings controls are rendered from registered backend options. |
 | Fake-source ownership parity | `socket_source.go` uses `PendingEvent`/`deliverPendingEvent` | socket and pipeline tests | `go test -tags filemaster_test ./service/fileaccess -count=1` | Socket transport lacks kernel-only mount/FD behavior; confined source covers that. |
-| Confined fanotify integration | Linux-only opt-in harness below | Unit tests plus host harness | `FM_FANOTIFY_INTEGRATION=1 go test -tags fanotify_integration ./service/fileaccess -run TestConfinedFanotifyIntegration -count=1 -timeout=90s` | Must have Linux fanotify, mount namespace and `CAP_SYS_ADMIN`; never marks host `/`. |
+| Confined fanotify integration | Not yet implemented | Unit tests cover deterministic source behavior | Planned opt-in command: `FM_FANOTIFY_INTEGRATION=1 go test -tags fanotify_integration ./service/fileaccess -run TestConfinedFanotifyIntegration -count=1 -timeout=90s` | **Incomplete:** requires a private-mount-namespace harness; it must never mark host `/`. |
 | Real PID 1 systemd safety | `docs/fanotify-systemd-host-verification.md` | Manual host runbook | `sudo ./scripts/verify-fanotify-systemd-host.sh` | Current PID 1 is `fish`, not systemd; result is incomplete. |
 | Root pipeline benchmark | Existing `cmds/fanotify-root-bench` measures transport only | Harness emits JSON transport measurements | `go build -o /tmp/fanotify-root-bench-bin ./cmds/fanotify-root-bench` followed by the commands in its README | **Incomplete:** the existing harness does not exercise the complete Filemaster profile, prompt, persistence, and observation pipeline. Root Ask evidence cannot be recorded from it. |
 | Root scope Ask gate | `rollout_gate_linux.go`, `profile_handler.go` | `phase8_test.go` | `go test ./service/fileaccess -run TestRootAskGate` | Closed: systemd host and root benchmark evidence are absent. |
+
+The exact Playwright command, `cd desktop/angular && npx playwright test`,
+was run during this pass. The app-shell test passed; the file-access test did
+not start its fake fanotify source and failed with
+`connect ENOENT .../fake-fanotify.sock`. This is an environment/fixture
+failure and is not counted as a successful file-access UI verification.
+
+The exact `go test ./... -count=1` command was also run. Fileaccess passed,
+but the overall suite did not: `base/database` stalled in an existing SQLite
+cleanup path, and `service/core/base` could not find its expected UI
+`DEFAULT_PORT` constant. Neither path is modified by this Phase 8 work.
 
 The Phase 8 root Ask gate defaults closed. Its browser-visible request switch
 does not supply verification evidence; trusted host verification must provide
