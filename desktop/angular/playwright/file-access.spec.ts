@@ -211,20 +211,7 @@ async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Prom
 	child.stdout.on('data', chunk => output.push(String(chunk)));
 	child.stderr.on('data', chunk => output.push(String(chunk)));
 
-	await waitFor(async () => {
-		if (child.exitCode !== null) {
-			throw new Error(`portmaster-core exited early with ${child.exitCode}\n${output.join('')}`);
-		}
-		await connectAndClose(apiPort);
-	}, 120_000);
-
-	if (mode === 'fake') {
-		await waitFor(async () => {
-			await connectUnixAndClose(socketPath);
-		}, 30_000);
-	}
-
-	return {
+	const core: TestCore = {
 		apiPort,
 		sourceMode: mode,
 		socketPath: mode === 'fake' ? socketPath : undefined,
@@ -233,6 +220,29 @@ async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Prom
 		process: child,
 		output,
 	};
+
+	try {
+		await waitFor(async () => {
+			if (child.exitCode !== null) {
+				throw new Error(`portmaster-core exited early with ${child.exitCode}`);
+			}
+			await connectAndClose(apiPort);
+		}, 120_000);
+
+		if (mode === 'fake') {
+			await waitFor(async () => {
+				await connectUnixAndClose(socketPath);
+			}, 30_000);
+		}
+		return core;
+	} catch (err) {
+		await stopFilemaster(core);
+		const cause = err instanceof Error ? err.message : String(err);
+		throw new Error(
+			`fake fanotify source did not become ready at ${socketPath}: ${cause}\n` +
+				`portmaster-core output:\n${output.join('').slice(-12_000)}`,
+		);
+	}
 }
 
 async function stopFilemaster(core: TestCore) {

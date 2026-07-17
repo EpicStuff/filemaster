@@ -83,6 +83,9 @@ func TestDiagnosticsCopiesSensitiveDescriptorIdentitiesAndCreatesWarnings(t *tes
 		effectivePipelineConfig: DefaultDecisionPipelineConfig(),
 	}
 	diagnostics := fa.Diagnostics()
+	if diagnostics.LifecycleState != "running" {
+		t.Fatalf("lifecycle state = %q, want running", diagnostics.LifecycleState)
+	}
 	if len(diagnostics.Reader.AccountedDescriptors) != 0 || len(diagnostics.Reader.FailedResponseDescriptors) != 0 {
 		t.Fatalf("public diagnostics leaked descriptor identities: %+v", diagnostics.Reader)
 	}

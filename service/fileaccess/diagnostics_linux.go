@@ -39,6 +39,7 @@ type FileAccessDiagnostics struct {
 	Prompt              PromptCoordinatorDiagnostics
 	PermanentRules      map[string]RulePersistenceDiagnostics
 	Shutdown            ShutdownDiagnostics
+	LifecycleState      string
 	RootAskGate         RootAskGateStatus
 	Warnings            []DegradedWarning
 }
@@ -92,6 +93,7 @@ func (fa *FileAccess) Diagnostics() FileAccessDiagnostics {
 	if diagnostics.PermanentRules == nil {
 		diagnostics.PermanentRules = make(map[string]RulePersistenceDiagnostics)
 	}
+	diagnostics.LifecycleState = diagnostics.Shutdown.State.String()
 	diagnostics.RootAskGate = fa.rootAskGateStatus(diagnostics)
 	diagnostics.Warnings = diagnosticsWarnings(diagnostics)
 	return diagnostics

@@ -1,0 +1,80 @@
+.fileaccess-diagnostics {
+	@apply mx-12 my-4 rounded border border-gray-300 bg-gray-100 p-4;
+
+	header {
+		@apply flex items-start justify-between gap-4;
+
+		h2 {
+			@apply mb-1 text-lg font-medium;
+		}
+
+		p {
+			@apply m-0 text-sm text-secondary;
+		}
+	}
+
+	.state {
+		@apply rounded bg-gray-300 px-2 py-1 text-sm font-medium capitalize text-green-300;
+
+		&.degraded, &.closing {
+			@apply bg-gray-300 text-yellow-300;
+		}
+	}
+
+	.warning, .unavailable {
+		@apply mt-3 rounded border border-yellow-300 bg-gray-300 p-3 text-sm text-yellow-300;
+	}
+
+	.metrics {
+		@apply mt-3 grid gap-3;
+		grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+
+		article, .rollout {
+			@apply rounded bg-gray-200 p-3;
+		}
+	}
+
+	h3 {
+		@apply mb-2 text-sm font-medium;
+	}
+
+	dl {
+		@apply m-0;
+	}
+
+	dl div {
+		@apply flex justify-between gap-2 text-sm;
+	}
+
+	dt {
+		@apply text-secondary;
+	}
+
+	dd {
+		@apply m-0 text-right;
+	}
+
+	.rollout {
+		@apply mt-3;
+
+		&.blocked {
+			@apply border border-yellow-300 bg-gray-300;
+		}
+
+		p, ul {
+			@apply mb-0 text-sm;
+		}
+	}
+
+	.warnings {
+		@apply mt-3 mb-0 list-none space-y-1 p-0 text-sm text-yellow-300;
+
+		li {
+			@apply rounded bg-gray-300 p-2;
+		}
+
+		li.fatal {
+			@apply bg-gray-300 text-red-300;
+		}
+	}
+}
