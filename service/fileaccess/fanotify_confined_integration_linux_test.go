@@ -134,19 +134,42 @@ func testConfinedFanotifyIntegrationChild(t *testing.T) {
 	readerDone := make(chan error, 1)
 	go func() { readerDone <- source.Run(ctx, pipeline) }()
 
-	openAndRead(t, filePath)
-	openAndRead(t, nestedPath)
-	openAndReadDirectory(t, root)
-	openAndRead(t, promptPath)
-
-	select {
-	case event := <-prompted:
-		if event.Path != promptPath || event.Op != OpOpen {
-			t.Fatalf("prompt event = %+v, want %s open", event, promptPath)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("prompt coordinator did not receive the real fanotify event")
+	if err := openAndRead(filePath); err != nil {
+		t.Fatal(err)
 	}
+	if err := openAndRead(nestedPath); err != nil {
+		t.Fatal(err)
+	}
+	openAndReadDirectory(t, root)
+
+	promptResult := make(chan error, 1)
+	go func() {
+		promptResult <- openAndRead(promptPath)
+	}()
+	promptDeadline := time.NewTimer(5 * time.Second)
+	defer promptDeadline.Stop()
+	sawPromptOpen := false
+	for {
+		select {
+		case event := <-prompted:
+			if event.Path != promptPath {
+				t.Fatalf("prompt event = %+v, want path %s", event, promptPath)
+			}
+			sawPromptOpen = sawPromptOpen || event.Op == OpOpen
+		case err := <-promptResult:
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !sawPromptOpen {
+				t.Fatal("prompt coordinator did not receive an open event")
+			}
+			goto promptCompleted
+		case <-promptDeadline.C:
+			t.Fatal("prompt coordinator did not resolve the real fanotify event")
+		}
+	}
+
+promptCompleted:
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer drainCancel()
@@ -203,20 +226,16 @@ func newConfinedFanotifySource(t *testing.T, root string) *fanotifySource {
 	return source
 }
 
-func openAndRead(t *testing.T, path string) {
-	t.Helper()
+func openAndRead(path string) error {
 	file, err := os.Open(path)
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}()
 	if _, err := file.Read(make([]byte, 1)); err != nil {
-		t.Fatal(err)
+		_ = file.Close()
+		return err
 	}
+	return file.Close()
 }
 
 func openAndReadDirectory(t *testing.T, path string) {
