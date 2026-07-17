@@ -138,6 +138,13 @@ func (h *PromptHandler) lookup(exe, path string) (Verdict, bool) {
 }
 
 func (h *PromptHandler) appendRule(exe, pattern string, v Verdict) {
+	_ = h.appendRuleEntry(exe, PathRule{Pattern: pattern, Verdict: v, Exact: true})
+}
+
+// appendRuleEntry makes a permanent fallback rule effective before saving it.
+// A failed save deliberately leaves the exact in-memory rule present; the
+// RuleStore adapter returns that error so Phase 6 retry ownership is retained.
+func (h *PromptHandler) appendRuleEntry(exe string, rule PathRule) error {
 	h.rulesMu.Lock()
 	rs, ok := h.rules[exe]
 	if !ok {
@@ -148,17 +155,22 @@ func (h *PromptHandler) appendRule(exe, pattern string, v Verdict) {
 		}
 		h.rules[exe] = rs
 	}
-	rs.Rules = append(rs.Rules, PathRule{Pattern: pattern, Verdict: v})
+	rules := make([]PathRule, 0, len(rs.Rules)+1)
+	rules = append(rules, rule)
+	for _, existing := range rs.Rules {
+		if existing.Pattern == rule.Pattern && existing.Verdict == rule.Verdict && existing.Exact == rule.Exact {
+			continue
+		}
+		rules = append(rules, existing)
+	}
+	rs.Rules = rules
 	persistPath := h.persistPath
 	h.rulesMu.Unlock()
 
 	if persistPath != "" {
-		// Save errors are non-fatal: log somewhere visible eventually,
-		// but for now don't trip the syscall on a transient disk issue.
-		// The in-memory rule is still applied this run; we just lose it
-		// across a restart.
-		_ = h.Save(persistPath)
+		return h.Save(persistPath)
 	}
+	return nil
 }
 
 func (h *PromptHandler) apply(e FileEvent, action string) Verdict {

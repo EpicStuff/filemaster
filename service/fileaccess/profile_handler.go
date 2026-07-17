@@ -28,6 +28,24 @@ type RuleStore interface {
 	AppendRule(entry string) error
 }
 
+// fallbackRuleStore keeps an accepted Always rule durable when process profile
+// lookup is temporarily unavailable. It is deliberately scoped to the
+// executable bucket used by PromptHandler, never a mutable profile object.
+type fallbackRuleStore struct {
+	handler *PromptHandler
+	exe     string
+}
+
+func (s fallbackRuleStore) ID() string { return "fallback:" + s.exe }
+
+func (s fallbackRuleStore) AppendRule(entry string) error {
+	rule, ok := ParseRule(entry)
+	if !ok {
+		return errors.New("invalid fallback file access rule")
+	}
+	return s.handler.appendRuleEntry(s.exe, rule)
+}
+
 // LookupResult is everything a single ProfileLookup pass yields: the
 // resolved exe path (for the fallback handler + audit logging), the
 // rule store (nil if no profile resolved), the pre-parsed per-profile
@@ -493,7 +511,8 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 				if !h.rootAskAllowed() {
 					return false, false, VerdictDeny, nil
 				}
-				return coordinator.Admit(ctx, pending, nil, &DecisionSnapshot{DefaultAction: profile.DefaultActionAsk})
+				store, snapshot := h.fallbackSnapshot(e)
+				return coordinator.Admit(ctx, pending, store, snapshot)
 			}
 			verdict, afterResponse = h.fallbackDecision(ctx, e)
 			return false, false, verdict, afterResponse
@@ -511,7 +530,8 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 			if !h.rootAskAllowed() {
 				return false, false, VerdictDeny, nil
 			}
-			return coordinator.Admit(ctx, pending, nil, &DecisionSnapshot{DefaultAction: profile.DefaultActionAsk})
+			store, snapshot := h.fallbackSnapshot(e)
+			return coordinator.Admit(ctx, pending, store, snapshot)
 		}
 		verdict, afterResponse = h.fallbackDecision(ctx, e)
 		return false, false, verdict, afterResponse
@@ -544,6 +564,26 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 		return false, false, verdict, afterResponse
 	}
 	return coordinator.Admit(ctx, pending, res.Store, snapshot)
+}
+
+func (h *ProfileHandler) fallbackSnapshot(event *FileEvent) (RuleStore, *DecisionSnapshot) {
+	if fallback, ok := h.fallback.(*PromptHandler); ok {
+		exe := event.Exe
+		if exe == "" {
+			exe = unknownExe
+		}
+		event.Exe = exe
+		store := fallbackRuleStore{handler: fallback, exe: exe}
+		event.ProfileID = store.ID()
+		event.ProfileSource = "fallback"
+		return store, &DecisionSnapshot{
+			ProfileID:     event.ProfileID,
+			Source:        event.ProfileSource,
+			DefaultAction: profile.DefaultActionAsk,
+			Rules:         PathRules{Rules: fallback.RulesFor(exe), Default: VerdictDeny},
+		}
+	}
+	return nil, &DecisionSnapshot{DefaultAction: profile.DefaultActionAsk}
 }
 
 func (h *ProfileHandler) fallbackDecision(ctx context.Context, e *FileEvent) (Verdict, func()) {

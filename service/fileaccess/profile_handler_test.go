@@ -355,3 +355,49 @@ func TestProfileHandlerSelfProfileUsesInMemorySnapshot(t *testing.T) {
 		t.Fatalf("self default verdict = %s, want deny", got)
 	}
 }
+
+func TestProfileHandlerFallbackAlwaysPersistsThroughCoordinator(t *testing.T) {
+	path := "/tmp/fallback-coordinator-rule"
+	prompter := &scriptedPrompter{responses: map[string]string{path: ActionAllowAlways}}
+	fallback := NewPromptHandler(prompter, nil, time.Second)
+	persistPath := t.TempDir() + "/fallback-rules.json"
+	if err := fallback.SetPersistPath(persistPath); err != nil {
+		t.Fatalf("SetPersistPath: %v", err)
+	}
+	handler := NewProfileHandler(&fakeLookup{err: ErrNoProfile}, prompter, fallback, time.Second, nopLogger{})
+	pipeline := NewDecisionPipeline(handler, DecisionPipelineConfig{Workers: 1, QueueCapacity: 1, OutstandingLimit: 1, PerProfileAskLimit: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pipeline.Start(ctx)
+
+	first, firstResponses := pipelinePending(FileEvent{PID: 91, Exe: "/usr/bin/fallback-app", Path: path, Op: OpOpen})
+	if err := pipeline.Handle(ctx, first); err != nil {
+		t.Fatalf("first Handle: %v", err)
+	}
+	if got := waitPipelineVerdict(t, firstResponses); got != VerdictAllow {
+		t.Fatalf("first verdict = %s, want allow", got)
+	}
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), time.Second)
+	defer flushCancel()
+	if err := handler.coordinator().FlushPermanentRules(flushCtx); err != nil {
+		t.Fatalf("FlushPermanentRules: %v", err)
+	}
+
+	reloaded := NewPromptHandler(&scriptedPrompter{responses: map[string]string{path: ActionDeny}}, nil, time.Second)
+	if err := reloaded.SetPersistPath(persistPath); err != nil {
+		t.Fatalf("reload SetPersistPath: %v", err)
+	}
+	reloadedHandler := NewProfileHandler(&fakeLookup{err: ErrNoProfile}, reloaded.prompter, reloaded, time.Second, nopLogger{})
+	reloadedPipeline := NewDecisionPipeline(reloadedHandler, DecisionPipelineConfig{Workers: 1, QueueCapacity: 1, OutstandingLimit: 1, PerProfileAskLimit: 1})
+	reloadedPipeline.Start(ctx)
+	second, secondResponses := pipelinePending(FileEvent{PID: 92, Exe: "/usr/bin/fallback-app", Path: path, Op: OpOpen})
+	if err := reloadedPipeline.Handle(ctx, second); err != nil {
+		t.Fatalf("second Handle: %v", err)
+	}
+	if got := waitPipelineVerdict(t, secondResponses); got != VerdictAllow {
+		t.Fatalf("reloaded fallback verdict = %s, want persisted allow", got)
+	}
+	if reloaded.prompter.(*scriptedPrompter).called != 0 {
+		t.Fatal("reloaded fallback prompted despite the persisted exact rule")
+	}
+}

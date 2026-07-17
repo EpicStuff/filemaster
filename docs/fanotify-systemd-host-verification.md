@@ -51,3 +51,11 @@ controlled shutdown completed in about 660 ms. It intentionally did not record
 trusted evidence because there was no interactive approved prompt, audit, or
 profile-UI confirmation. Complete those remaining runbook steps before calling
 `RecordRootAskRolloutEvidence`.
+
+The backend-only verifier now performs the interactive notification exchange
+without a browser. Its first temporary-scope helper access received an approved
+`Allow always` response and produced a matching filequery observation. Its
+restart check then received a second prompt instead of reusing the durable
+rule. This is a real failed persistence/identity verification, not a host
+capability skip: do not record trusted evidence or open root Ask mode until the
+same systemd helper resolves to a durable profile identity after restart.
