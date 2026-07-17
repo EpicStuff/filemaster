@@ -2,6 +2,8 @@
 
 package fileaccess
 
+import "errors"
+
 type RootAskRolloutEvidence struct{}
 
 type RootAskGateStatus struct {
@@ -12,6 +14,12 @@ type RootAskGateStatus struct {
 }
 
 func SetRootAskRolloutEvidence(RootAskRolloutEvidence) {}
+
+func (fa *FileAccess) configureRootAskRolloutEvidence() {}
+
+func (fa *FileAccess) RecordRootAskRolloutEvidence(RootAskRolloutEvidence) error {
+	return errors.New("fanotify is not supported on this platform")
+}
 
 func rootScopeConfigured() bool { return false }
 

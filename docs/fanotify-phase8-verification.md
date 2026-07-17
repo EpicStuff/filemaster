@@ -20,7 +20,7 @@ Host-dependent verification is deliberately not inferred from unit tests.
 | Confined fanotify integration | Not yet implemented | Unit tests cover deterministic source behavior | Planned opt-in command: `FM_FANOTIFY_INTEGRATION=1 go test -tags fanotify_integration ./service/fileaccess -run TestConfinedFanotifyIntegration -count=1 -timeout=90s` | **Incomplete:** requires a private-mount-namespace harness; it must never mark host `/`. |
 | Real PID 1 systemd safety | `docs/fanotify-systemd-host-verification.md` | Manual host runbook | `sudo ./scripts/verify-fanotify-systemd-host.sh` | Current PID 1 is `fish`, not systemd; result is incomplete. |
 | Root pipeline benchmark | Existing `cmds/fanotify-root-bench` measures transport only | Harness emits JSON transport measurements | `go build -o /tmp/fanotify-root-bench-bin ./cmds/fanotify-root-bench` followed by the commands in its README | **Incomplete:** the existing harness does not exercise the complete Filemaster profile, prompt, persistence, and observation pipeline. Root Ask evidence cannot be recorded from it. |
-| Root scope Ask gate | `rollout_gate_linux.go`, `profile_handler.go` | `phase8_test.go` | `go test ./service/fileaccess -run TestRootAskGate` | Closed: systemd host and root benchmark evidence are absent. |
+| Root scope Ask gate | `rollout_gate_linux.go`, `profile_handler.go` | `phase8_test.go` | `go test ./service/fileaccess -run TestRootAskGate` | Closed: systemd host and root benchmark evidence are absent. Evidence is a private 0600 data-dir record, never a browser setting. |
 
 The exact Playwright command, `cd desktop/angular && npx playwright test`,
 was run during this pass. The app-shell test passed; the file-access test did
@@ -34,6 +34,13 @@ cleanup path, and `service/core/base` could not find its expected UI
 `DEFAULT_PORT` constant. Neither path is modified by this Phase 8 work.
 
 The Phase 8 root Ask gate defaults closed. Its browser-visible request switch
-does not supply verification evidence; trusted host verification must provide
-current implementation and settings fingerprints, confined integration,
-systemd PID 1, benchmark, shutdown, persistence, and prompt grouping evidence.
+does not supply verification evidence. A trusted backend host-verification
+recorder calls `FileAccess.RecordRootAskRolloutEvidence`, which atomically
+writes `<data-dir>/fileaccess-root-ask-rollout-evidence.json` with mode 0600;
+there is deliberately no API endpoint or configuration option that can write
+this record. The recorder derives the implementation version, effective worker
+and descriptor settings, and current Linux kernel environment itself. A missing
+record, write/read error, implementation change, settings change, or kernel
+environment change closes the gate again. Trusted verification must provide
+confined integration, systemd PID 1, benchmark, shutdown, persistence, and
+prompt grouping evidence.

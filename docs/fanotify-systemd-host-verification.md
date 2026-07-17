@@ -37,6 +37,11 @@ whose PID 1 is a shell.
 
 Record the host kernel, Filemaster build commit, descriptor limit, worker and
 queue settings, exact observed prompts, and shutdown diagnostics. A successful
-result must be supplied to the trusted rollout-evidence recorder before root
-scope Ask mode can open. This repository checkout has **not** completed this
-verification: its PID 1 is `fish`, not `systemd`.
+trusted backend verifier must then call
+`FileAccess.RecordRootAskRolloutEvidence`; it persists the evidence atomically
+in the Filemaster data directory with mode 0600. The browser request switch and
+the diagnostics API cannot write this record. The recorder refreshes the
+implementation, effective-settings, and kernel-environment fingerprints, so
+changing any of them closes root Ask mode until the host is verified again.
+This repository checkout has **not** completed this verification: its PID 1 is
+`fish`, not `systemd`.

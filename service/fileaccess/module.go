@@ -295,6 +295,7 @@ func New(instance instance) (*FileAccess, error) {
 		states:            m.NewStateMgr(),
 		warningStates:     make(map[string]DegradedWarning),
 	}
+	module.configureRootAskRolloutEvidence()
 	if err := registerFileAccessAPI(); err != nil {
 		return nil, fmt.Errorf("register fileaccess API: %w", err)
 	}
