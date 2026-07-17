@@ -4,10 +4,12 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/safing/portmaster/base/database"
 	"github.com/safing/portmaster/base/database/query"
 	"github.com/safing/portmaster/base/database/record"
 )
@@ -153,5 +155,35 @@ func TestRegistryRegister(t *testing.T) {
 		} else {
 			assert.NoError(t, err, c.inp)
 		}
+	}
+}
+
+func TestRegistryPushUsesCallerRecordLock(t *testing.T) {
+	r := NewRegistry()
+	_, err := database.Register(&database.Database{
+		Name:        "runtime-push-lock-contract",
+		StorageType: database.StorageTypeInjected,
+	})
+	require.NoError(t, err)
+	require.NoError(t, r.InjectAsDatabase("runtime-push-lock-contract"))
+	t.Cleanup(r.dbController.Withdraw)
+
+	push, err := r.Register("runtime/push-lock-contract", nil)
+	require.NoError(t, err)
+
+	rec := makeTestRecord("runtime/push-lock-contract", "value")
+	rec.Lock()
+	defer rec.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		push(rec)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runtime PushFunc attempted to re-lock its caller-locked record")
 	}
 }

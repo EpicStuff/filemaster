@@ -75,5 +75,7 @@ func pushModuleEvent(moduleName, eventName string, internal bool, data interface
 	}
 
 	// Push event to database subscriptions.
+	eventRecord.Lock()
+	defer eventRecord.Unlock()
 	modulesIntegrationUpdatePusher(eventRecord)
 }

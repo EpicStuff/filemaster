@@ -138,9 +138,7 @@ func (r *Registry) Register(keyOrPrefix string, p ValueProvider) (PushFunc, erro
 		}
 
 		for _, rec := range records {
-			rec.Lock()
 			r.dbController.PushUpdate(rec)
-			rec.Unlock()
 		}
 	}, nil
 }
