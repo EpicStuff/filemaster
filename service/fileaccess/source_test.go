@@ -11,12 +11,25 @@ import (
 type fakeSource struct {
 	events []FileEvent
 
-	mu         sync.Mutex
-	decided    []decision
-	closeErr   error
-	closed     chan struct{}
-	pathsAsked [][]string
-	pathsErr   error
+	mu                sync.Mutex
+	decided           []decision
+	closeErr          error
+	closed            chan struct{}
+	pathsAsked        [][]string
+	pathsErr          error
+	response          func(FileEvent, Verdict) responseResult
+	outstanding       int64
+	peakOutstanding   int64
+	failedResponses   []int32
+	marks             MarkRemovalResult
+	reconciliationErr error
+	readerDrainErr    error
+	readerExitErr     error
+	groupCloseErr     error
+	scopeCleanupErr   error
+	scopesCleaned     bool
+	groupClosed       bool
+	lifecycle         *PipelineLifecycle
 }
 
 type decision struct {
@@ -41,11 +54,29 @@ func (s *fakeSource) Run(ctx context.Context, handler PendingHandler) error {
 		default:
 		}
 		event := sourceEvent
+		s.mu.Lock()
+		s.outstanding++
+		if s.outstanding > s.peakOutstanding {
+			s.peakOutstanding = s.outstanding
+		}
+		s.mu.Unlock()
 		pending := newPendingEvent(&event, func(verdict Verdict) responseResult {
 			s.mu.Lock()
 			s.decided = append(s.decided, decision{Event: event, Verdict: verdict})
+			response := s.response
 			s.mu.Unlock()
-			return responseResult{accepted: true}
+			result := responseResult{accepted: true}
+			if response != nil {
+				result = response(event, verdict)
+			}
+			s.mu.Lock()
+			if result.accepted {
+				s.outstanding--
+			} else {
+				s.failedResponses = append(s.failedResponses, int32(len(s.failedResponses)+1))
+			}
+			s.mu.Unlock()
+			return result
 		})
 		if _, err := deliverPendingEvent(ctx, handler, pending); err != nil {
 			return err
@@ -95,4 +126,54 @@ func (s *fakeSource) Decisions() []decision {
 	out := make([]decision, len(s.decided))
 	copy(out, s.decided)
 	return out
+}
+
+func (s *fakeSource) SetLifecycle(lifecycle *PipelineLifecycle) { s.lifecycle = lifecycle }
+
+func (s *fakeSource) RemoveAllMarks() MarkRemovalResult { return s.marks }
+
+func (s *fakeSource) WaitReconciliation(context.Context) error { return s.reconciliationErr }
+
+func (s *fakeSource) WaitReaderDrained(context.Context) error { return s.readerDrainErr }
+
+func (s *fakeSource) CloseGroup() error {
+	s.mu.Lock()
+	s.groupClosed = true
+	err := s.groupCloseErr
+	s.mu.Unlock()
+	return err
+}
+
+func (s *fakeSource) CleanupScopes() error {
+	s.mu.Lock()
+	if s.scopeCleanupErr == nil {
+		s.scopesCleaned = true
+	}
+	err := s.scopeCleanupErr
+	s.mu.Unlock()
+	return err
+}
+
+func (s *fakeSource) ScopeCleanupComplete() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.scopesCleaned
+}
+
+func (s *fakeSource) WaitReaderExit(context.Context) error { return s.readerExitErr }
+
+func (s *fakeSource) ReaderDiagnostics() ReaderDiagnostics {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return ReaderDiagnostics{
+		OutstandingDescriptors:     s.outstanding,
+		PeakOutstandingDescriptors: s.peakOutstanding,
+		FailedResponseDescriptors:  append([]int32(nil), s.failedResponses...),
+	}
+}
+
+func (s *fakeSource) ResponseDiagnostics() ResponseWriterDiagnostics {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return ResponseWriterDiagnostics{Closed: s.groupClosed, CurrentFD: -1}
 }
