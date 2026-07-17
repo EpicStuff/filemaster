@@ -107,6 +107,7 @@ type ProfileHandler struct {
 
 	promptAdmissionMu sync.RWMutex
 	promptAdmission   func(string) (func(), bool)
+	rootAskGate       func() RootAskGateStatus
 
 	promptCoordinatorMu sync.RWMutex
 	promptCoordinator   *PromptCoordinator
@@ -158,6 +159,22 @@ func (h *ProfileHandler) setPromptAdmission(admission func(string) (func(), bool
 	h.promptAdmissionMu.Lock()
 	h.promptAdmission = admission
 	h.promptAdmissionMu.Unlock()
+}
+
+func (h *ProfileHandler) setRootAskGate(gate func() RootAskGateStatus) {
+	h.promptAdmissionMu.Lock()
+	h.rootAskGate = gate
+	h.promptAdmissionMu.Unlock()
+}
+
+func (h *ProfileHandler) rootAskAllowed() bool {
+	if !rootScopeConfigured() {
+		return true
+	}
+	h.promptAdmissionMu.RLock()
+	gate := h.rootAskGate
+	h.promptAdmissionMu.RUnlock()
+	return gate != nil && gate().Open
 }
 
 func (h *ProfileHandler) setPromptCoordinator(coordinator *PromptCoordinator) {
@@ -473,6 +490,9 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 				e.ProcessIdentity = res.ProcessIdentity
 			}
 			if coordinator := h.coordinator(); coordinator != nil {
+				if !h.rootAskAllowed() {
+					return false, false, VerdictDeny, nil
+				}
 				return coordinator.Admit(ctx, pending, nil, &DecisionSnapshot{DefaultAction: profile.DefaultActionAsk})
 			}
 			verdict, afterResponse = h.fallbackDecision(ctx, e)
@@ -488,6 +508,9 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 	}
 	if res.Store == nil {
 		if coordinator := h.coordinator(); coordinator != nil {
+			if !h.rootAskAllowed() {
+				return false, false, VerdictDeny, nil
+			}
 			return coordinator.Admit(ctx, pending, nil, &DecisionSnapshot{DefaultAction: profile.DefaultActionAsk})
 		}
 		verdict, afterResponse = h.fallbackDecision(ctx, e)
@@ -510,6 +533,9 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 	}
 	if decision, ask := decisionFromSnapshot(snapshot, e.Path); !ask {
 		return false, false, decision, nil
+	}
+	if !h.rootAskAllowed() {
+		return false, false, VerdictDeny, nil
 	}
 
 	coordinator := h.coordinator()

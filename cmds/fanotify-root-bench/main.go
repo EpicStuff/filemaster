@@ -329,6 +329,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "fanotify mount benchmark needs root")
 		os.Exit(2)
 	}
+	if *runMode != "baseline" && os.Getenv("FM_ROOT_BENCHMARK_ACK") != "I_UNDERSTAND_ROOT_MARKING" {
+		fmt.Fprintln(os.Stderr, "refusing to mark / without FM_ROOT_BENCHMARK_ACK=I_UNDERSTAND_ROOT_MARKING")
+		os.Exit(2)
+	}
 
 	var res result
 	if *runMode == "baseline" {

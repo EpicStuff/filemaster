@@ -11,13 +11,13 @@ go build -o /tmp/fanotify-root-bench-bin ./cmds/fanotify-root-bench
 ```
 
 Run a baseline without fanotify, then a watched run. The benchmark requires
-root and automatically removes its mount mark when the command ends or times
-out.
+root, an explicit acknowledgement before it marks `/`, and automatically
+removes its mount mark when the command ends or times out.
 
 ```bash
 /tmp/fanotify-root-bench-bin --mode baseline -- go build ./cmds/portmaster-core
-/tmp/fanotify-root-bench-bin --mode raw --workers 8 --timeout 5m -- go build ./cmds/portmaster-core
-/tmp/fanotify-root-bench-bin --mode classified --workers 4 --scope /root/filemaster --timeout 5m -- go build ./cmds/portmaster-core
+FM_ROOT_BENCHMARK_ACK=I_UNDERSTAND_ROOT_MARKING /tmp/fanotify-root-bench-bin --mode raw --workers 8 --timeout 5m -- go build ./cmds/portmaster-core
+FM_ROOT_BENCHMARK_ACK=I_UNDERSTAND_ROOT_MARKING /tmp/fanotify-root-bench-bin --mode classified --workers 4 --scope /root/filemaster --timeout 5m -- go build ./cmds/portmaster-core
 ```
 
 `raw` reads each permission event and immediately allows it. `classified` also

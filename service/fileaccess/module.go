@@ -27,9 +27,10 @@ type FileAccess struct {
 	handler  Handler
 	pipeline *DecisionPipeline
 
-	pipelineConfig DecisionPipelineConfig
-	profileHandler *ProfileHandler
-	lifecycle      *PipelineLifecycle
+	pipelineConfig          DecisionPipelineConfig
+	effectivePipelineConfig DecisionPipelineConfig
+	profileHandler          *ProfileHandler
+	lifecycle               *PipelineLifecycle
 
 	shutdownOnce        sync.Once
 	shutdownDone        chan struct{}
@@ -158,7 +159,23 @@ func (fa *FileAccess) Start() error {
 		}
 	}
 
-	config := fa.pipelineConfig.normalized()
+	config := configuredDecisionPipelineConfig()
+	if fa.pipelineConfig != (DecisionPipelineConfig{}) {
+		config = fa.pipelineConfig.normalized()
+	}
+	if source, ok := src.(interface{ ReaderDiagnostics() ReaderDiagnostics }); ok {
+		if limit := source.ReaderDiagnostics().DescriptorLimit; limit >= 0 && config.OutstandingLimit > limit {
+			config.OutstandingLimit = limit
+		}
+	}
+	if config.OutstandingLimit < minimumOutstandingLimit {
+		_ = src.Close()
+		return fmt.Errorf("fileaccess outstanding event limit has no descriptor headroom")
+	}
+	fa.effectivePipelineConfig = config
+	if fa.profileHandler != nil {
+		fa.profileHandler.setRootAskGate(fa.RootAskGateStatus)
+	}
 	fa.pipeline = newDecisionPipeline(fa.handler, config, fa.lifecycle)
 	fa.pipeline.Activate()
 	if source, ok := src.(descriptorBudgetSource); ok {
@@ -253,6 +270,9 @@ func New(instance instance) (*FileAccess, error) {
 		lifecycle:         NewPipelineLifecycle(),
 		shutdownDone:      make(chan struct{}),
 		shutdownFinalDone: make(chan struct{}),
+	}
+	if err := registerFileAccessAPI(); err != nil {
+		return nil, fmt.Errorf("register fileaccess API: %w", err)
 	}
 	return module, nil
 }
