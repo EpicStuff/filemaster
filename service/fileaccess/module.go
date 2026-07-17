@@ -31,6 +31,9 @@ type FileAccess struct {
 	effectivePipelineConfig DecisionPipelineConfig
 	profileHandler          *ProfileHandler
 	lifecycle               *PipelineLifecycle
+	states                  *mgr.StateMgr
+	warningMu               sync.Mutex
+	warningStates           map[string]DegradedWarning
 
 	shutdownOnce        sync.Once
 	shutdownDone        chan struct{}
@@ -44,6 +47,12 @@ type FileAccess struct {
 // Manager returns the module manager.
 func (fa *FileAccess) Manager() *mgr.Manager {
 	return fa.mgr
+}
+
+// States exposes durable file-access enforcement warnings to the shared
+// status and notification systems.
+func (fa *FileAccess) States() *mgr.StateMgr {
+	return fa.states
 }
 
 type profileAccessor interface {
@@ -196,6 +205,19 @@ func (fa *FileAccess) Start() error {
 			return reconciler.RunReconciliation(w.Ctx())
 		})
 	}
+	fa.refreshWarningStates()
+	fa.mgr.Go("file-access diagnostics", func(w *mgr.WorkerCtx) error {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-w.Ctx().Done():
+				return nil
+			case <-ticker.C:
+				fa.refreshWarningStates()
+			}
+		}
+	})
 
 	if cfg, ok := fa.instance.(configAccessor); ok {
 		cfg.Config().EventConfigChange.AddCallback(
@@ -270,6 +292,8 @@ func New(instance instance) (*FileAccess, error) {
 		lifecycle:         NewPipelineLifecycle(),
 		shutdownDone:      make(chan struct{}),
 		shutdownFinalDone: make(chan struct{}),
+		states:            m.NewStateMgr(),
+		warningStates:     make(map[string]DegradedWarning),
 	}
 	if err := registerFileAccessAPI(); err != nil {
 		return nil, fmt.Errorf("register fileaccess API: %w", err)

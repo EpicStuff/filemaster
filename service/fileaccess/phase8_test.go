@@ -5,6 +5,8 @@ package fileaccess
 import (
 	"context"
 	"testing"
+
+	"github.com/safing/portmaster/service/mgr"
 )
 
 type phase8DiagnosticSource struct {
@@ -126,5 +128,29 @@ func TestRootAskGateBlocksPromptAdmissionWhenClosed(t *testing.T) {
 	handler.setRootAskGate(func() RootAskGateStatus { return RootAskGateStatus{} })
 	if handler.rootAskAllowed() {
 		t.Fatal("closed root Ask gate allowed prompt admission")
+	}
+}
+
+func TestWarningStatesCoalesceUpdateAndClear(t *testing.T) {
+	source := &phase8DiagnosticSource{mount: MountDiagnostics{PartialCoverage: true}}
+	fa := &FileAccess{
+		source:                  source,
+		effectivePipelineConfig: DefaultDecisionPipelineConfig(),
+		states:                  mgr.New("fileaccess phase8 warning states").NewStateMgr(),
+		warningStates:           make(map[string]DegradedWarning),
+	}
+	fa.refreshWarningStates()
+	states := fa.States().Export().States
+	if len(states) != 1 || states[0].ID != "fileaccess/partial-mount-coverage" {
+		t.Fatalf("unexpected active warning states: %+v", states)
+	}
+	fa.refreshWarningStates()
+	if got := fa.States().Export().States; len(got) != 1 || got[0].ID != states[0].ID {
+		t.Fatalf("identical warning did not coalesce: %+v", got)
+	}
+	source.mount.PartialCoverage = false
+	fa.refreshWarningStates()
+	if got := fa.States().Export().States; len(got) != 0 {
+		t.Fatalf("recovered warning was not cleared: %+v", got)
 	}
 }

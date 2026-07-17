@@ -2,7 +2,11 @@
 
 package fileaccess
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/safing/portmaster/service/mgr"
+)
 
 // FileAccessSettingsDiagnostics separates requested settings from the active
 // pipeline. Restart-required settings remain visible as requested values while
@@ -133,4 +137,46 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 	}
 	sort.Slice(warnings, func(i, j int) bool { return warnings[i].ID < warnings[j].ID })
 	return warnings
+}
+
+func (fa *FileAccess) refreshWarningStates() {
+	if fa.states == nil {
+		return
+	}
+	warnings := fa.Diagnostics().Warnings
+	next := make(map[string]DegradedWarning, len(warnings))
+	for _, warning := range warnings {
+		next[warning.ID] = warning
+	}
+
+	fa.warningMu.Lock()
+	previous := fa.warningStates
+	if previous == nil {
+		previous = make(map[string]DegradedWarning)
+	}
+	for id, warning := range next {
+		if prior, ok := previous[id]; ok && prior == warning {
+			continue
+		}
+		fa.states.Add(mgr.State{
+			ID:      "fileaccess/" + id,
+			Name:    "File Access Enforcement",
+			Message: warning.Message,
+			Type:    warningStateType(warning.Severity),
+		})
+	}
+	for id := range previous {
+		if _, ok := next[id]; !ok {
+			fa.states.Remove("fileaccess/" + id)
+		}
+	}
+	fa.warningStates = next
+	fa.warningMu.Unlock()
+}
+
+func warningStateType(severity string) mgr.StateType {
+	if severity == "error" {
+		return mgr.StateTypeError
+	}
+	return mgr.StateTypeWarning
 }
