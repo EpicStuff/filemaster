@@ -15,28 +15,23 @@ Host-dependent verification is deliberately not inferred from unit tests.
 | Controlled shutdown | `lifecycle.go`, `shutdown.go` | `shutdown_test.go`, `fanotify_shutdown_linux_test.go` | `go test -race ./service/fileaccess -run TestShutdown` | None for deterministic shutdown paths. |
 | Settings and effective limits | `config.go`, `module.go` | `phase8_test.go` | `go test ./service/fileaccess -run 'TestConfiguredDecision\|TestPipelineSettings'` | Restart is required for queue/worker/budget changes by design. |
 | Diagnostics and degraded warnings | `diagnostics_linux.go` | `phase8_test.go` | `go test -race ./service/fileaccess -run TestDiagnostics` | UI presentation is config/status driven; detailed descriptor IDs remain privileged-only. |
-| Matching settings UI | Existing dynamic settings renderer, `fileaccess` subsystem registration, and the settings diagnostics panel | `fileaccess-diagnostics.component.spec.ts` (6 cases) | `cd desktop/angular && npx ng test --watch=false --include src/app/pages/settings/fileaccess-diagnostics.component.spec.ts` — **passed** | The panel is implemented but remains uncommitted until the required real-app E2E startup blocker is repaired and its screenshot is inspected. |
+| Matching settings UI | Existing dynamic settings renderer, `fileaccess` subsystem registration, and the settings diagnostics panel | component and HTTP endpoint service specs | Focused Karma specs and `npx playwright test playwright/file-access.spec.ts --project=chromium --workers=1 --reporter=line` — **passed** | Dev server compiled successfully; inspected `tmp/fileaccess-settings-live.png` shows live running diagnostics. |
 | Fake-source ownership parity | `socket_source.go` uses `PendingEvent`/`deliverPendingEvent` | socket and pipeline tests | `go test -tags filemaster_test ./service/fileaccess -count=1` | Socket transport lacks kernel-only mount/FD behavior; confined source covers that. |
-| Confined fanotify integration | `fanotify_confined_integration_linux_test.go` | `TestConfinedFanotifyIntegration` | `FM_FANOTIFY_INTEGRATION=1 go test -tags fanotify_integration ./service/fileaccess -run TestConfinedFanotifyIntegration -count=1 -timeout=90s` | Harness is complete and never marks `/`; this container cannot execute it because `CLONE_NEWNS` is denied. |
-| Real PID 1 systemd safety | `docs/fanotify-systemd-host-verification.md` | Manual host runbook | `sudo ./scripts/verify-fanotify-systemd-host.sh` | Current PID 1 is `fish`, not systemd; result is incomplete. |
+| Confined fanotify integration | `fanotify_confined_integration_linux_test.go` | `TestConfinedFanotifyIntegration` | `FM_FANOTIFY_INTEGRATION=1 go test ./service/fileaccess -run '^TestConfinedFanotifyIntegration$' -count=1 -v -timeout=45s` — **passed** | Private mount namespace and temporary bind mount only; `/` is never marked. |
+| Real PID 1 systemd safety | `docs/fanotify-systemd-host-verification.md` | Manual host runbook and systemd-managed helper probe | Temporary-scope `systemd-run` probe — partial **passed** | Startup, real helper fanotify receipt, accounting, and shutdown passed; interactive prompt approval, audit, and profile UI evidence remain incomplete. |
 | Root pipeline benchmark | Existing `cmds/fanotify-root-bench` measures transport only | Harness emits JSON transport measurements | `go build -o /tmp/fanotify-root-bench-bin ./cmds/fanotify-root-bench` followed by the commands in its README | **Incomplete:** the existing harness does not exercise the complete Filemaster profile, prompt, persistence, and observation pipeline. Root Ask evidence cannot be recorded from it. |
 | Root scope Ask gate | `rollout_gate_linux.go`, `profile_handler.go` | `phase8_test.go` | `go test ./service/fileaccess -run TestRootAskGate` | Closed: systemd host and root benchmark evidence are absent. Evidence is a private 0600 data-dir record, never a browser setting. |
 
 The exact file-access Playwright command,
 `cd desktop/angular && npx playwright test playwright/file-access.spec.ts --project=chromium --workers=1 --reporter=line`,
-was run during this pass. The test starts the fake source itself, but the
-FileAccess manager deadlocks during startup before it binds the requested
-socket: `Registry.Register` is reached through `hydrateSelfProfile`.
-The deterministic SIGQUIT stack is retained at
-`/tmp/fm-fileaccess-start-stack.V1AzWm/core.log:225-273`. This is a
-Phase 7 lifecycle/concurrency correctness blocker requiring Codex Sol review,
-not a missing Playwright fixture. The file-access E2E result remains
-unverified; no diagnostics UI screenshot was claimed or committed.
+now passes. The prior startup deadlock was corrected by restoring the
+documented caller-owned record lock contract for runtime push functions.
 
-The exact `go test ./... -count=1` command was also run. Fileaccess passed,
-but the overall suite did not: `base/database` stalled in an existing SQLite
-cleanup path, and `service/core/base` could not find its expected UI
-`DEFAULT_PORT` constant. Neither path is modified by this Phase 8 work.
+The exact `go test ./... -count=1` command was also run. All relevant Phase 8
+packages passed; the overall suite remains blocked only by
+`service/core/base`, whose `TestDefaultAPIPortMatchesUIConstants` cannot find
+its expected UI `DEFAULT_PORT` constant. That path is not modified by this
+Phase 8 work.
 
 The Phase 8 root Ask gate defaults closed. Its browser-visible request switch
 does not supply verification evidence. A trusted backend host-verification

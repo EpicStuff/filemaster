@@ -43,5 +43,11 @@ in the Filemaster data directory with mode 0600. The browser request switch and
 the diagnostics API cannot write this record. The recorder refreshes the
 implementation, effective-settings, and kernel-environment fingerprints, so
 changing any of them closes root Ask mode until the host is verified again.
-This repository checkout has **not** completed this verification: its PID 1 is
-`fish`, not `systemd`.
+The recreated verification host has PID 1 `systemd`, a private mount namespace,
+and effective `CAP_SYS_ADMIN`. Its confined run used a distinct temporary bind
+target, reported complete coverage, and observed exactly one real permission
+event from a `systemd-run` helper; peak descriptor accounting was one and
+controlled shutdown completed in about 660 ms. It intentionally did not record
+trusted evidence because there was no interactive approved prompt, audit, or
+profile-UI confirmation. Complete those remaining runbook steps before calling
+`RecordRootAskRolloutEvidence`.
