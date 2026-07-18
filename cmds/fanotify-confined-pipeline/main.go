@@ -14,11 +14,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	apiclient "github.com/safing/portmaster/base/api/client"
 	"github.com/safing/portmaster/base/database/query"
+	"github.com/safing/structures/dsd"
 	"golang.org/x/sys/unix"
 )
 
@@ -32,6 +34,20 @@ type latencySummary struct {
 	P50MS float64 `json:"p50_ms"`
 	P95MS float64 `json:"p95_ms"`
 	MaxMS float64 `json:"max_ms"`
+}
+
+type helperIdentity struct {
+	ProfileSource string `json:"profile_source"`
+	ProfileID     string `json:"profile_id"`
+	ProfileName   string `json:"profile_name"`
+	ProfilePath   string `json:"profile_linked_path"`
+	Executable    string `json:"executable"`
+	Operation     string `json:"operation"`
+}
+
+type promptIdentity struct {
+	Key      string
+	Identity helperIdentity
 }
 
 type result struct {
@@ -50,11 +66,15 @@ type result struct {
 	UnresolvedOwnership    int            `json:"unresolved_ownership"`
 	DirtyPermanentRules    int            `json:"dirty_permanent_rules"`
 	ResponseLatency        latencySummary `json:"response_latency"`
+	FirstHelper            helperIdentity `json:"first_helper"`
+	SecondHelper           helperIdentity `json:"second_helper,omitempty"`
 	ObservationVerified    bool           `json:"observation_verified"`
 	PersistenceReloaded    bool           `json:"persistence_reloaded"`
 	ControlledShutdown     bool           `json:"controlled_shutdown"`
 	Kernel                 string         `json:"kernel"`
 	CPUCount               int            `json:"cpu_count"`
+	ContainerID            string         `json:"container_id"`
+	MountNamespace         string         `json:"mount_namespace"`
 	Failure                string         `json:"failure,omitempty"`
 }
 
@@ -89,13 +109,24 @@ type diagnostics struct {
 func main() {
 	flags := flag.NewFlagSet("fanotify-confined-pipeline", flag.ExitOnError)
 	core := flags.String("core", "", "path to a freshly built portmaster-core executable")
+	probeHelper := flags.Bool("probe-helper", false, "run one stable systemd helper file-open probe")
+	probePath := flags.String("probe", "", "probe path for --probe-helper")
+	notifyAddress := flags.String("notify", "", "optional loopback timing address for --probe-helper")
 	mode := flags.String("mode", modeVerify, "verify or benchmark")
 	events := flags.Int("events", 25, "additional allowed events for benchmark mode")
+	rootScope := flags.Bool("root-scope", false, "mark container / after explicit root benchmark acknowledgement")
 	output := flags.String("json", "", "optional private JSON result path")
 	timeout := flags.Duration("timeout", 90*time.Second, "whole verifier timeout")
 	_ = flags.Parse(os.Args[1:])
+	if *probeHelper {
+		if err := runProbeHelper(*probePath, *notifyAddress); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
-	res, err := run(*core, *mode, *events, *timeout)
+	res, err := run(*core, *mode, *events, *timeout, *rootScope)
 	if err != nil {
 		res.Failure = err.Error()
 	}
@@ -117,8 +148,8 @@ func main() {
 	}
 }
 
-func run(core, mode string, events int, timeout time.Duration) (result, error) { //nolint:gocognit
-	res := result{Mode: mode, CPUCount: runtimeCPUCount(), Kernel: kernelRelease()}
+func run(core, mode string, events int, timeout time.Duration, rootScope bool) (result, error) { //nolint:gocognit
+	res := result{Mode: mode, CPUCount: runtimeCPUCount(), Kernel: kernelRelease(), ContainerID: containerID(), MountNamespace: mountNamespace()}
 	if core == "" {
 		return res, errors.New("--core is required")
 	}
@@ -128,11 +159,28 @@ func run(core, mode string, events int, timeout time.Duration) (result, error) {
 	if events < 0 {
 		return res, errors.New("events must not be negative")
 	}
+	if mode == modeVerify {
+		events = 0
+	}
 	if os.Geteuid() != 0 {
 		return res, errors.New("confined pipeline verifier requires effective UID 0")
 	}
 	if pidOne, err := os.ReadFile("/proc/1/comm"); err != nil || strings.TrimSpace(string(pidOne)) != "systemd" {
 		return res, errors.New("confined pipeline verifier requires PID 1 to be systemd")
+	}
+	if rootScope {
+		if os.Getenv("FM_ROOT_BENCHMARK_ACK") != "I_UNDERSTAND_ROOT_MARKING" {
+			return res, errors.New("refusing to mark / without FM_ROOT_BENCHMARK_ACK=I_UNDERSTAND_ROOT_MARKING")
+		}
+		if res.ContainerID == "" {
+			return res, errors.New("refusing to mark / outside a Podman container")
+		}
+		if !isolatedMountNamespace() {
+			return res, errors.New("refusing to mark / from a shared mount namespace")
+		}
+		if !hasCapability(21) {
+			return res, errors.New("root benchmark requires effective CAP_SYS_ADMIN")
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -141,18 +189,23 @@ func run(core, mode string, events int, timeout time.Duration) (result, error) {
 		return res, err
 	}
 	defer os.RemoveAll(root)
-	source := filepath.Join(root, "source")
 	scope := filepath.Join(root, "scope")
-	if err := os.Mkdir(source, 0o700); err != nil {
-		return res, err
+	if rootScope {
+		scope = "/"
+		fmt.Fprintf(os.Stderr, "root benchmark preflight: container=%s mount_namespace=%s scope=/ timeout=%s cleanup=installed\n", res.ContainerID, res.MountNamespace, timeout)
+	} else {
+		source := filepath.Join(root, "source")
+		if err := os.Mkdir(source, 0o700); err != nil {
+			return res, err
+		}
+		if err := os.Mkdir(scope, 0o700); err != nil {
+			return res, err
+		}
+		if err := unix.Mount(source, scope, "", unix.MS_BIND, ""); err != nil {
+			return res, fmt.Errorf("bind temporary scope: %w", err)
+		}
+		defer func() { _ = unix.Unmount(scope, unix.MNT_DETACH) }()
 	}
-	if err := os.Mkdir(scope, 0o700); err != nil {
-		return res, err
-	}
-	if err := unix.Mount(source, scope, "", unix.MS_BIND, ""); err != nil {
-		return res, fmt.Errorf("bind temporary scope: %w", err)
-	}
-	defer func() { _ = unix.Unmount(scope, unix.MNT_DETACH) }()
 	res.Scope = scope
 
 	dataDir := filepath.Join(root, "data")
@@ -171,7 +224,10 @@ func run(core, mode string, events int, timeout time.Duration) (result, error) {
 	if err := os.WriteFile(filepath.Join(dataDir, "config.json"), encoded, 0o600); err != nil {
 		return res, err
 	}
-	probe := filepath.Join(scope, "probe")
+	probe := filepath.Join(root, "probe")
+	if !rootScope {
+		probe = filepath.Join(scope, "probe")
+	}
 	if err := os.WriteFile(probe, []byte("confined pipeline\n"), 0o600); err != nil {
 		return res, err
 	}
@@ -191,7 +247,9 @@ func run(core, mode string, events int, timeout time.Duration) (result, error) {
 	stopped := false
 	defer func() {
 		if !stopped {
-			_ = stopUnit(context.Background(), unit)
+			cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			_ = stopUnit(cleanup, unit)
 		}
 	}()
 	if err := waitForAPI(ctx, address); err != nil {
@@ -212,14 +270,20 @@ func run(core, mode string, events int, timeout time.Duration) (result, error) {
 		return res, err
 	}
 
+	helperExecutable, err := os.Executable()
+	if err != nil {
+		return res, fmt.Errorf("resolve stable helper executable: %w", err)
+	}
+	helperUnit := unit + "-helper"
 	helperDone := make(chan error, 1)
-	go func() { helperDone <- runHelper(ctx, unit+"-prompt", probe) }()
-	promptKey, err := waitForPrompt(ctx, promptMessages, probe)
+	go func() { helperDone <- runHelper(ctx, helperUnit, helperExecutable, probe, "") }()
+	prompt, err := waitForPrompt(ctx, promptMessages, probe)
 	if err != nil {
 		return res, err
 	}
+	res.FirstHelper = prompt.Identity
 	res.Prompts++
-	if err := approveAlways(ctx, client, promptKey); err != nil {
+	if err := approveAlways(ctx, client, prompt.Key); err != nil {
 		return res, err
 	}
 	if err := waitForHelper(ctx, helperDone); err != nil {
@@ -228,8 +292,12 @@ func run(core, mode string, events int, timeout time.Duration) (result, error) {
 	res.Allowed++
 	res.Events++
 
-	if err := waitForObservation(ctx, address, probe); err != nil {
+	firstObservation, observations, err := waitForObservation(ctx, address, probe, 1)
+	if err != nil {
 		return res, err
+	}
+	if res.FirstHelper.ProfileSource != firstObservation.ProfileSource || res.FirstHelper.ProfileID != firstObservation.ProfileID || res.FirstHelper.Executable != firstObservation.Executable {
+		return res, fmt.Errorf("prompt and observation identity differ: prompt=%+v observation=%+v", res.FirstHelper, firstObservation)
 	}
 	res.ObservationVerified = true
 	if err := waitForCleanPersistence(ctx, address); err != nil {
@@ -248,17 +316,38 @@ func run(core, mode string, events int, timeout time.Duration) (result, error) {
 		return res, err
 	}
 
+drainPromptMessages:
+	for {
+		select {
+		case <-promptMessages:
+		default:
+			break drainPromptMessages
+		}
+	}
 	secondDone := make(chan error, 1)
-	go func() { secondDone <- runHelper(ctx, unit+"-reloaded", probe) }()
+	go func() { secondDone <- runHelper(ctx, helperUnit, helperExecutable, probe, "") }()
 	if err := waitForHelper(ctx, secondDone); err != nil {
 		return res, err
 	}
 	select {
 	case message := <-promptMessages:
 		if isPromptFor(message, probe) {
-			return res, errors.New("saved Allow always rule prompted after daemon reload")
+			prompt, err := promptIdentityFromMessage(message)
+			if err != nil {
+				return res, err
+			}
+			res.SecondHelper = prompt.Identity
+			return res, fmt.Errorf("saved Allow always rule prompted after daemon reload: first=%+v second=%+v", res.FirstHelper, res.SecondHelper)
 		}
 	default:
+	}
+	secondObservation, _, err := waitForObservation(ctx, address, probe, observations+1)
+	if err != nil {
+		return res, err
+	}
+	res.SecondHelper = secondObservation
+	if res.FirstHelper.ProfileSource != res.SecondHelper.ProfileSource || res.FirstHelper.ProfileID != res.SecondHelper.ProfileID || res.FirstHelper.Executable != res.SecondHelper.Executable {
+		return res, fmt.Errorf("helper identity changed after restart: first=%+v second=%+v", res.FirstHelper, res.SecondHelper)
 	}
 	res.PersistenceReloaded = true
 	res.Allowed++
@@ -266,11 +355,11 @@ func run(core, mode string, events int, timeout time.Duration) (result, error) {
 
 	var samples []time.Duration
 	for index := 0; index < events; index++ {
-		started := time.Now()
-		if err := runHelper(ctx, fmt.Sprintf("%s-bench-%d", unit, index), probe); err != nil {
+		latency, err := measureHelper(ctx, fmt.Sprintf("%s-bench-%d", unit, index), helperExecutable, probe)
+		if err != nil {
 			return res, err
 		}
-		samples = append(samples, time.Since(started))
+		samples = append(samples, latency)
 		res.Allowed++
 		res.Events++
 	}
@@ -316,13 +405,91 @@ func stopUnit(ctx context.Context, unit string) error {
 	return nil
 }
 
-func runHelper(ctx context.Context, unit, path string) error {
-	command := exec.CommandContext(ctx, "systemd-run", "--unit="+unit, "--collect", "--wait", "--pipe", "/bin/cat", path)
+func runHelper(ctx context.Context, unit, executable, path, notify string) error {
+	arguments := []string{"--unit=" + unit, "--collect", "--wait", "--pipe", executable, "--probe-helper", "--probe", path}
+	if notify != "" {
+		arguments = append(arguments, "--notify", notify)
+	}
+	command := exec.CommandContext(ctx, "systemd-run", arguments...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("systemd helper access: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func runProbeHelper(path, notify string) error {
+	if path == "" {
+		return errors.New("--probe is required with --probe-helper")
+	}
+	var connection net.Conn
+	var err error
+	if notify != "" {
+		connection, err = net.DialTimeout("tcp", notify, time.Second)
+		if err != nil {
+			return fmt.Errorf("connect probe timing channel: %w", err)
+		}
+		defer connection.Close()
+		if _, err := fmt.Fprintln(connection, "before"); err != nil {
+			return fmt.Errorf("notify probe start: %w", err)
+		}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open probe: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close probe: %w", err)
+	}
+	if connection != nil {
+		if _, err := fmt.Fprintln(connection, "after"); err != nil {
+			return fmt.Errorf("notify probe completion: %w", err)
+		}
+	}
+	return nil
+}
+
+func measureHelper(ctx context.Context, unit, executable, path string) (time.Duration, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer listener.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := listener.(*net.TCPListener).SetDeadline(deadline); err != nil {
+			return 0, err
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- runHelper(ctx, unit, executable, path, listener.Addr().String()) }()
+	connection, err := listener.Accept()
+	if err != nil {
+		return 0, fmt.Errorf("accept probe timing connection: %w", err)
+	}
+	defer connection.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := connection.SetDeadline(deadline); err != nil {
+			return 0, err
+		}
+	}
+	var signal string
+	if _, err := fmt.Fscanln(connection, &signal); err != nil {
+		return 0, fmt.Errorf("read probe start: %w", err)
+	}
+	if signal != "before" {
+		return 0, fmt.Errorf("unexpected probe start signal %q", signal)
+	}
+	started := time.Now()
+	if _, err := fmt.Fscanln(connection, &signal); err != nil {
+		return 0, fmt.Errorf("read probe completion: %w", err)
+	}
+	if signal != "after" {
+		return 0, fmt.Errorf("unexpected probe completion signal %q", signal)
+	}
+	if err := waitForHelper(ctx, done); err != nil {
+		return 0, err
+	}
+	return time.Since(started), nil
 }
 
 func waitForAPI(ctx context.Context, address string) error {
@@ -364,17 +531,48 @@ func waitForQsub(ctx context.Context, messages <-chan *apiclient.Message) error 
 	}
 }
 
-func waitForPrompt(ctx context.Context, messages <-chan *apiclient.Message, path string) (string, error) {
+func waitForPrompt(ctx context.Context, messages <-chan *apiclient.Message, path string) (promptIdentity, error) {
 	for {
 		select {
 		case message := <-messages:
 			if isPromptFor(message, path) {
-				return message.Key, nil
+				return promptIdentityFromMessage(message)
 			}
 		case <-ctx.Done():
-			return "", fmt.Errorf("wait for prompt for %s: %w", path, ctx.Err())
+			return promptIdentity{}, fmt.Errorf("wait for prompt for %s: %w", path, ctx.Err())
 		}
 	}
+}
+
+func promptIdentityFromMessage(message *apiclient.Message) (promptIdentity, error) {
+	var data struct {
+		EventData struct {
+			Profile struct {
+				ID         string
+				Source     string
+				Name       string
+				LinkedPath string
+			}
+			Subject struct {
+				Exe string
+				Op  string
+			}
+		}
+	}
+	if _, err := dsd.Load(message.RawValue, &data); err != nil {
+		return promptIdentity{}, fmt.Errorf("decode prompt identity: %w", err)
+	}
+	if data.EventData.Profile.ID == "" && data.EventData.Subject.Exe == "" {
+		return promptIdentity{}, errors.New("decode prompt identity: notification has no event identity")
+	}
+	return promptIdentity{Key: message.Key, Identity: helperIdentity{
+		ProfileSource: data.EventData.Profile.Source,
+		ProfileID:     data.EventData.Profile.ID,
+		ProfileName:   data.EventData.Profile.Name,
+		ProfilePath:   data.EventData.Profile.LinkedPath,
+		Executable:    data.EventData.Subject.Exe,
+		Operation:     data.EventData.Subject.Op,
+	}}, nil
 }
 
 func isPromptFor(message *apiclient.Message, path string) bool {
@@ -404,25 +602,43 @@ func waitForHelper(ctx context.Context, done <-chan error) error {
 	}
 }
 
-func waitForObservation(ctx context.Context, address, path string) error {
+func waitForObservation(ctx context.Context, address, path string, minimum int) (helperIdentity, int, error) {
 	for {
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+address+"/api/v1/filequery/query", strings.NewReader(`{"pageSize":20}`))
 		if err != nil {
-			return err
+			return helperIdentity{}, 0, err
 		}
 		request.Header.Set("Content-Type", "application/json")
 		response, err := (&http.Client{Timeout: time.Second}).Do(request)
 		if err == nil {
-			var payload any
+			var payload struct {
+				Results []struct {
+					Path    string
+					Exe     string
+					Verdict string
+					Profile string
+					AppName string
+				}
+			}
 			decodeErr := json.NewDecoder(response.Body).Decode(&payload)
 			_ = response.Body.Close()
-			if decodeErr == nil && strings.Contains(fmt.Sprint(payload), path) && strings.Contains(fmt.Sprint(payload), "allow") {
-				return nil
+			if decodeErr == nil {
+				count := 0
+				for _, record := range payload.Results {
+					if record.Path != path || record.Verdict != "allow" {
+						continue
+					}
+					count++
+					if count >= minimum {
+						source, id, _ := strings.Cut(record.Profile, "/")
+						return helperIdentity{ProfileSource: source, ProfileID: id, ProfileName: record.AppName, Executable: record.Exe}, count, nil
+					}
+				}
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("wait for file observation: %w", ctx.Err())
+			return helperIdentity{}, 0, fmt.Errorf("wait for file observation: %w", ctx.Err())
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
@@ -503,3 +719,64 @@ func kernelRelease() string {
 }
 
 func runtimeCPUCount() int { return runtime.NumCPU() }
+
+func containerID() string {
+	data, err := os.ReadFile("/run/.containerenv")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if value, ok := strings.CutPrefix(line, "id="); ok {
+			return strings.Trim(value, "\"")
+		}
+	}
+	return ""
+}
+
+func mountNamespace() string {
+	value, err := os.Readlink("/proc/self/ns/mnt")
+	if err != nil {
+		return "unknown"
+	}
+	return value
+}
+
+func isolatedMountNamespace() bool {
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 7 || fields[4] != "/" {
+			continue
+		}
+		for index, field := range fields {
+			if field == "-" {
+				for _, option := range fields[6:index] {
+					if strings.HasPrefix(option, "shared:") || strings.HasPrefix(option, "master:") {
+						return false
+					}
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasCapability(bit uint) bool {
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		value, ok := strings.CutPrefix(line, "CapEff:\t")
+		if !ok {
+			continue
+		}
+		capabilities, err := strconv.ParseUint(strings.TrimSpace(value), 16, 64)
+		return err == nil && capabilities&(uint64(1)<<bit) != 0
+	}
+	return false
+}

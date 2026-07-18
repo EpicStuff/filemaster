@@ -24,9 +24,10 @@ sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core --mode verify
 
 Run a confined, full daemon pipeline measurement. The result is one JSON
 object on stdout; `--json` atomically writes the same object with mode 0600.
-The `response_latency` measurement is the helper syscall-to-verdict duration,
-so it includes real reader, descriptor, queue, lookup, rule, response, and
-post-response observation work.
+The `response_latency` measurement starts immediately before the reusable helper
+opens the probe and ends when that open returns. It excludes `systemd-run`
+service startup while exercising the real reader, descriptor, queue, lookup,
+rule, response, and post-response observation path.
 
 ```bash
 sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core \
@@ -39,3 +40,23 @@ stops transient units, unmounts the temporary bind mount, and removes all
 temporary files on every exit path. It intentionally does **not** call
 `RecordRootAskRolloutEvidence`: root-scope benchmark acknowledgement and the
 remaining trusted-evidence review are separate safety requirements.
+
+## Disposable-container root benchmark
+
+The verifier refuses to mark `/` unless both `--root-scope` and the explicit
+acknowledgement below are supplied. It also requires `/run/.containerenv`, PID
+1 systemd, effective `CAP_SYS_ADMIN`, and its bounded `--timeout`; it prints
+the container and mount-namespace identifiers before starting Filemaster.
+
+Only run this inside a disposable rootful Podman container:
+
+```bash
+FM_ROOT_BENCHMARK_ACK=I_UNDERSTAND_ROOT_MARKING \
+  sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core \
+  --mode benchmark --root-scope --events 1 --timeout 45s \
+  --json /tmp/filemaster-root-benchmark.json
+```
+
+The verifier does not record trusted rollout evidence. A successful confined
+and root result still requires an explicit backend-only evidence record and
+validity check before root-scope Ask can open.
