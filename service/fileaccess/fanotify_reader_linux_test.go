@@ -24,6 +24,9 @@ func newReaderTestSource(limit int64) *fanotifySource {
 		descriptorReleased: make(chan struct{}, 1),
 		failedEvents:       make(map[int32]PendingEvent),
 	}
+	if fd, err := unix.Open("/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0); err == nil {
+		source.emergencyFD = fd
+	}
 	source.responses = newFanotifyResponseWriter(99, nopLogger{}, source.finishEventFDClose)
 	source.responses.write = func(_ int, bytes []byte) (int, error) {
 		return len(bytes), nil
@@ -192,40 +195,62 @@ func TestConfiguredOutstandingBudgetCapsReaderHeadroom(t *testing.T) {
 	}
 }
 
-func TestReaderDoesNotReadWithoutDescriptorHeadroom(t *testing.T) {
+func TestReaderDeniesOverloadInsteadOfPausing(t *testing.T) {
 	source := newReaderTestSource(1)
 	source.accountEventFD(101)
 	source.poll = func([]unix.PollFd, int) (int, error) { return 1, nil }
-	readCalled := make(chan int, 1)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	meta := unix.FanotifyEventMetadata{
+		Event_len:    uint32(unsafe.Sizeof(unix.FanotifyEventMetadata{})),
+		Metadata_len: uint16(unsafe.Sizeof(unix.FanotifyEventMetadata{})),
+		Vers:         unix.FANOTIFY_METADATA_VERSION,
+		Fd:           102,
+		Mask:         unix.FAN_OPEN_PERM,
+	}
+	readCalled := make(chan int, 1)
 	source.read = func(_ int, bytes []byte) (int, error) {
 		readCalled <- len(bytes)
+		copy(bytes, fanotifyEventBytes(meta))
 		cancel()
-		return 0, unix.EAGAIN
+		return int(unsafe.Sizeof(meta)), nil
 	}
+	var response unix.FanotifyResponse
+	source.responses.write = func(_ int, bytes []byte) (int, error) {
+		response = *(*unix.FanotifyResponse)(unsafe.Pointer(&bytes[0]))
+		return len(bytes), nil
+	}
+	policyCalls := 0
 	done := make(chan error, 1)
 	go func() {
-		done <- source.Run(ctx, PendingHandlerFunc(func(context.Context, PendingEvent) error { return nil }))
+		done <- source.Run(ctx, PendingHandlerFunc(func(context.Context, PendingEvent) error {
+			policyCalls++
+			return nil
+		}))
 	}()
 
 	select {
 	case size := <-readCalled:
-		t.Fatalf("read called with exhausted headroom using %d-byte buffer", size)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	source.releaseEventFD(101)
-	select {
-	case size := <-readCalled:
 		want := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
 		if size != want {
-			t.Fatalf("read buffer after one descriptor released = %d, want %d", size, want)
+			t.Fatalf("overload read buffer = %d, want %d", size, want)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("reader did not resume after descriptor headroom returned")
+		t.Fatal("reader paused instead of consuming an overload event")
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+	if response.Fd != meta.Fd || response.Response != unix.FAN_DENY {
+		t.Fatalf("overload response = %+v, want fd %d deny", response, meta.Fd)
+	}
+	if policyCalls != 0 {
+		t.Fatalf("overload event reached policy %d times", policyCalls)
+	}
+	source.releaseEventFD(101)
+	if diagnostics := source.ReaderDiagnostics(); diagnostics.OutstandingDescriptors != 0 {
+		t.Fatalf("overload descriptor accounting leaked: %+v", diagnostics)
 	}
 }
 
@@ -233,10 +258,13 @@ func TestReaderHandlesEMFILEAsDegradedCapacityFailure(t *testing.T) {
 	source := newReaderTestSource(8)
 	source.poll = func([]unix.PollFd, int) (int, error) { return 1, nil }
 	source.emfileRetry = time.Hour
-	readCalled := make(chan struct{}, 1)
+	readCalled := make(chan int, 2)
 	source.read = func(int, []byte) (int, error) {
-		readCalled <- struct{}{}
-		return 0, unix.EMFILE
+		readCalled <- 1
+		if len(readCalled) == 1 {
+			return 0, unix.EMFILE
+		}
+		return 0, unix.EAGAIN
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

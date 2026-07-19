@@ -51,7 +51,10 @@ type MountDiagnostics struct {
 	ActiveMountIDs   []int
 	MissingMountIDs  []int
 	PartialCoverage  bool
-	LastError        string
+	// CoverageKnown is false when mountinfo could not be read, so the missing
+	// mount list is deliberately empty rather than stale.
+	CoverageKnown bool
+	LastError     string
 }
 
 func parseMountInfo(input string) ([]mountInfo, error) {
@@ -292,7 +295,21 @@ func (s *fanotifySource) reconcile() {
 
 // RunReconciliation is a dedicated managed loop so mount discovery and mark
 // syscalls never pause the fanotify event reader.
+// RunReconciliation is a dedicated managed loop so mount discovery and mark
+// syscalls never pause the fanotify event reader. It reacts immediately to
+// POLLPRI notifications from /proc/self/mounts and retains the periodic scan as
+// a fallback for kernels or procfs implementations that do not signal changes.
 func (s *fanotifySource) RunReconciliation(ctx context.Context) error {
+	watchCtx, cancel := context.WithCancel(ctx)
+	changes, watchDone := watchMountChanges(watchCtx)
+	defer func() {
+		cancel()
+		<-watchDone
+	}()
+	return s.runReconciliation(ctx, changes)
+}
+
+func (s *fanotifySource) runReconciliation(ctx context.Context, changes <-chan struct{}) error {
 	if s.reconcileDone == nil {
 		s.reconcileDone = make(chan struct{})
 	}
@@ -305,33 +322,68 @@ func (s *fanotifySource) RunReconciliation(ctx context.Context) error {
 			return nil
 		case <-s.lifecycle.Closing():
 			return nil
+		case _, ok := <-changes:
+			if !ok {
+				changes = nil
+				continue
+			}
+			s.reconcile()
 		case <-ticker.C:
 			s.reconcile()
 		}
 	}
 }
 
+func watchMountChanges(ctx context.Context) (<-chan struct{}, <-chan struct{}) {
+	changes := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(changes)
+
+		fd, err := unix.Open("/proc/self/mounts", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return
+		}
+		defer unix.Close(fd)
+
+		for {
+			pollFDs := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLPRI}}
+			_, err := unix.Poll(pollFDs, 250)
+			if err != nil {
+				if errors.Is(err, unix.EINTR) {
+					continue
+				}
+				return
+			}
+			if pollFDs[0].Revents&unix.POLLPRI != 0 {
+				select {
+				case changes <- struct{}{}:
+				default:
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+	}()
+	return changes, done
+}
+
 func (s *fanotifySource) reconcileLocked() {
 	mounts, err := s.mountInfo()
 	if err != nil {
-		s.recordReconcileFailure(err)
+		s.recordReconcileFailure(err, nil)
 		return
 	}
 	required, err := discoverRequiredMounts(mutableScopes(s.scopes), mounts)
 	if err != nil {
-		s.recordReconcileFailure(err)
+		s.recordReconcileFailure(err, mounts)
 		return
 	}
 	desiredSnapshot := snapshotFromScopes(s.scopes)
-	if !s.lifecycle.whileRunning(func() {
-		if s.pending {
-			s.activeScopes.Store(unionScopes(s.activeScopes.Load(), desiredSnapshot))
-		} else {
-			s.activeScopes.Store(desiredSnapshot)
-		}
-	}) {
-		return
-	}
 
 	newMask := resolveMarkMask()
 	var errs []error
@@ -386,6 +438,7 @@ func (s *fanotifySource) reconcileLocked() {
 	if complete && s.pending {
 		if !s.lifecycle.whileRunning(func() {
 			s.activeScopes.Store(desiredSnapshot)
+			s.pendingScopes.Store(nil)
 			s.pending = false
 			s.closeRetiredScopes()
 		}) {
@@ -408,6 +461,22 @@ func (s *fanotifySource) reconcileLocked() {
 	s.updateDiagnostics(required, errs)
 }
 
+// pathInPendingScope identifies a candidate path without taking marksMu. It is
+// used only while marks are being verified, where denying is safer than the
+// normal conclusively-outside-scope allow path.
+func (s *fanotifySource) pathInPendingScope(path string) bool {
+	snapshot := s.pendingScopes.Load()
+	if snapshot == nil {
+		return false
+	}
+	for _, scope := range snapshot.Scopes {
+		if pathContains(scope.Canonical, path) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *fanotifySource) closeRetiredScopes() {
 	for _, scope := range s.retiredScopes {
 		scope.close()
@@ -415,18 +484,36 @@ func (s *fanotifySource) closeRetiredScopes() {
 	s.retiredScopes = nil
 }
 
-func (s *fanotifySource) recordReconcileFailure(err error) {
-	s.diagnostics.LastError = err.Error()
-	s.diagnostics.PartialCoverage = true
-	s.log.Warn("fanotify mount reconciliation failed", "err", err)
+func knownRequiredMounts(scopes map[string]*policyScope, mounts []mountInfo) map[int]mountInfo {
+	required := make(map[int]mountInfo)
+	for _, scope := range scopes {
+		var containing *mountInfo
+		for i := range mounts {
+			mount := mounts[i]
+			if pathContains(scope.Canonical, mount.MountPoint) {
+				required[mount.ID] = mount
+			}
+			if pathContains(mount.MountPoint, scope.Canonical) && (containing == nil || len(mount.MountPoint) > len(containing.MountPoint)) {
+				containing = &mount
+			}
+		}
+		if containing != nil {
+			required[containing.ID] = *containing
+		}
+	}
+	return required
 }
 
-func (s *fanotifySource) updateDiagnostics(required map[int]mountInfo, errs []error) {
+func (s *fanotifySource) baseMountDiagnostics() MountDiagnostics {
 	diagnostics := MountDiagnostics{}
 	for _, scope := range snapshotFromScopes(s.scopes).Scopes {
 		diagnostics.ConfiguredScopes = append(diagnostics.ConfiguredScopes, scope.Configured)
 		diagnostics.CanonicalScopes = append(diagnostics.CanonicalScopes, scope.Canonical)
 	}
+	return diagnostics
+}
+
+func (s *fanotifySource) addKnownCoverage(diagnostics *MountDiagnostics, required map[int]mountInfo) {
 	for id, mark := range s.marks {
 		if _, required := required[id]; required && mark.mask == s.markMask {
 			diagnostics.ActiveMountIDs = append(diagnostics.ActiveMountIDs, id)
@@ -440,7 +527,38 @@ func (s *fanotifySource) updateDiagnostics(required map[int]mountInfo, errs []er
 	sort.Ints(diagnostics.ActiveMountIDs)
 	sort.Ints(diagnostics.MissingMountIDs)
 	diagnostics.PartialCoverage = len(diagnostics.MissingMountIDs) > 0
+}
+
+func (s *fanotifySource) recordReconcileFailure(err error, mounts []mountInfo) {
+	diagnostics := s.baseMountDiagnostics()
+	diagnostics.PartialCoverage = true
+	diagnostics.LastError = err.Error()
+	if mounts == nil {
+		// There is no current mount table to compare with. Expose the known
+		// active mark IDs and explicitly mark missing coverage as unknown,
+		// rather than retaining potentially stale IDs from an earlier scan.
+		for id, mark := range s.marks {
+			if mark.mask == s.markMask {
+				diagnostics.ActiveMountIDs = append(diagnostics.ActiveMountIDs, id)
+			}
+		}
+		sort.Ints(diagnostics.ActiveMountIDs)
+		diagnostics.CoverageKnown = false
+	} else {
+		diagnostics.CoverageKnown = true
+		s.addKnownCoverage(&diagnostics, knownRequiredMounts(s.scopes, mounts))
+		diagnostics.PartialCoverage = true
+	}
+	s.diagnostics = diagnostics
+	s.log.Warn("fanotify mount reconciliation failed", "err", err, "coverage_known", diagnostics.CoverageKnown, "active_mount_ids", diagnostics.ActiveMountIDs, "missing_mount_ids", diagnostics.MissingMountIDs)
+}
+
+func (s *fanotifySource) updateDiagnostics(required map[int]mountInfo, errs []error) {
+	diagnostics := s.baseMountDiagnostics()
+	diagnostics.CoverageKnown = true
+	s.addKnownCoverage(&diagnostics, required)
 	if len(errs) > 0 {
+		diagnostics.PartialCoverage = true
 		diagnostics.LastError = errors.Join(errs...).Error()
 		missingPaths := make([]string, 0, len(diagnostics.MissingMountIDs))
 		for _, id := range diagnostics.MissingMountIDs {

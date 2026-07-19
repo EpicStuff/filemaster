@@ -33,16 +33,21 @@ type fanotifySource struct {
 	pending       bool
 	marksRemoved  atomic.Bool
 
-	activeScopes atomic.Pointer[scopeSnapshot]
-	diagnostics  MountDiagnostics
+	activeScopes  atomic.Pointer[scopeSnapshot]
+	pendingScopes atomic.Pointer[scopeSnapshot]
+	diagnostics   MountDiagnostics
 
 	mountInfo func() ([]mountInfo, error)
 	mark      func(flags uint, mask uint64, path string) error
 
-	read            func(int, []byte) (int, error)
-	poll            func([]unix.PollFd, int) (int, error)
-	emfileRetry     time.Duration
-	descriptorLimit int64
+	read              func(int, []byte) (int, error)
+	poll              func([]unix.PollFd, int) (int, error)
+	emfileRetry       time.Duration
+	descriptorLimit   int64
+	emergencyMu       sync.Mutex
+	emergencyFD       int
+	emergencyReleased atomic.Bool
+	overloadRead      atomic.Bool
 
 	accountedMu         sync.Mutex
 	accounted           map[int32]struct{}
@@ -69,9 +74,10 @@ type fanotifySource struct {
 	reconcileDone        chan struct{}
 	reconcileDoneOnce    sync.Once
 
-	responses    *fanotifyResponseWriter
-	failedMu     sync.Mutex
-	failedEvents map[int32]PendingEvent
+	responses       *fanotifyResponseWriter
+	failedMu        sync.Mutex
+	failedEvents    map[int32]PendingEvent
+	failedCloseOnce sync.Once
 
 	groupCloseOnce sync.Once
 	groupCloseErr  error
@@ -207,6 +213,43 @@ func (s *fanotifySource) closeAccountedEventFD(fd int32) error {
 		return fmt.Errorf("close fanotify event fd %d: %w", fd, closeErr)
 	}
 	return nil
+}
+
+// releaseEmergencyDescriptor makes one reserved descriptor available to read
+// and deny a permission event after the kernel reports EMFILE. It never uses
+// the normal descriptor budget, so overload handling cannot silently park the
+// fanotify reader with permission requests still queued in the kernel.
+func (s *fanotifySource) releaseEmergencyDescriptor() bool {
+	s.emergencyMu.Lock()
+	defer s.emergencyMu.Unlock()
+	if s.emergencyFD < 0 {
+		return false
+	}
+	_ = unix.Close(s.emergencyFD)
+	s.emergencyFD = -1
+	s.emergencyReleased.Store(true)
+	return true
+}
+
+func (s *fanotifySource) restoreEmergencyDescriptor() {
+	s.emergencyMu.Lock()
+	defer s.emergencyMu.Unlock()
+	if s.emergencyFD >= 0 {
+		return
+	}
+	fd, err := unix.Open("/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err == nil {
+		s.emergencyFD = fd
+		s.emergencyReleased.Store(false)
+	}
+}
+
+func (s *fanotifySource) failReader(err error) error {
+	s.enterReaderFatal(err)
+	if closeErr := s.CloseGroup(); closeErr != nil {
+		return errors.Join(err, fmt.Errorf("close fanotify group after reader failure: %w", closeErr))
+	}
+	return err
 }
 
 func (s *fanotifySource) enterReaderFatal(err error) {
@@ -403,9 +446,16 @@ func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
 		readerDone:         make(chan struct{}),
 		readerIdle:         make(chan struct{}, 1),
 		reconcileDone:      make(chan struct{}),
+		emergencyFD:        -1,
 		mark: func(flags uint, mask uint64, path string) error {
 			return unix.FanotifyMark(fd, flags, mask, unix.AT_FDCWD, path)
 		},
+	}
+	// Keep a single descriptor outside the normal event budget. On a real
+	// EMFILE this is released to receive one event and deny it instead of
+	// leaving the caller parked in the kernel queue.
+	if emergencyFD, emergencyErr := unix.Open("/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0); emergencyErr == nil {
+		s.emergencyFD = emergencyFD
 	}
 	s.responses = newFanotifyResponseWriter(fd, log, s.finishEventFDClose)
 	s.responses.lifecycle = lifecycle
@@ -449,7 +499,10 @@ func (s *fanotifySource) SetWatchPaths(paths []string) error {
 			}
 		}
 		s.pending = true
-		s.activeScopes.Store(unionScopes(s.activeScopes.Load(), snapshotFromScopes(next)))
+		// Candidate scopes are intentionally not active until every required
+		// mount mark has been verified. Events from a partially marked
+		// candidate are denied by handleEvent rather than silently allowed.
+		s.pendingScopes.Store(snapshotFromScopes(next))
 	})
 	if !published {
 		closeNewScopes(next, s.scopes)
@@ -498,21 +551,17 @@ func (s *fanotifySource) Run(ctx context.Context, handler PendingHandler) error 
 		}
 
 		headroom := s.descriptorHeadroom()
-		if headroom == 0 {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-s.descriptorReleased:
-				continue
-			}
-		}
+		// A zero policy-budget headroom must not stop consuming permission
+		// events. Read one event through the reserved descriptor capacity and
+		// deny it as overload; waiting here would leave its syscall queued.
+		overload := headroom == 0 || s.emergencyReleased.Load()
 
 		n, err := s.poll(pollFds, 500)
 		if err != nil {
 			if errors.Is(err, unix.EINTR) {
 				continue
 			}
-			return fmt.Errorf("poll: %w", err)
+			return s.failReader(fmt.Errorf("poll: %w", err))
 		}
 		if n == 0 {
 			if !s.lifecycle.IsRunning() && s.marksRemoved.Load() && s.outstanding.Load() == 0 {
@@ -524,25 +573,31 @@ func (s *fanotifySource) Run(ctx context.Context, handler PendingHandler) error 
 			continue
 		}
 
-		read, err := s.read(s.fd, buf[:readBufferCapacity(headroom)])
+		readHeadroom := headroom
+		if overload {
+			readHeadroom = 1
+		}
+		s.overloadRead.Store(overload)
+		read, err := s.read(s.fd, buf[:readBufferCapacity(readHeadroom)])
 		if err != nil {
+			s.overloadRead.Store(false)
 			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) {
 				continue
 			}
 			if errors.Is(err, unix.EMFILE) {
 				s.recordReadEMFILE()
-				select {
-				case <-ctx.Done():
-					return nil
-				case <-s.descriptorReleased:
-				case <-time.After(s.emfileRetry):
+				if !s.releaseEmergencyDescriptor() {
+					return s.failReader(fmt.Errorf("fanotify read exhausted descriptors and no emergency descriptor was available: %w", err))
 				}
+				// The next read owns the released emergency slot and is forced
+				// through the overload-deny path.
+				s.overloadRead.Store(true)
 				continue
 			}
 			if errors.Is(err, unix.EBADF) {
 				return nil
 			}
-			return fmt.Errorf("read: %w", err)
+			return s.failReader(fmt.Errorf("read: %w", err))
 		}
 		s.descriptorPressure.Store(s.outstanding.Load() >= s.descriptorLimit)
 		if read <= 0 {
@@ -550,8 +605,11 @@ func (s *fanotifySource) Run(ctx context.Context, handler PendingHandler) error 
 		}
 
 		if err := s.handleEvents(ctx, handler, buf[:read]); err != nil {
+			s.overloadRead.Store(false)
 			return err
 		}
+		s.overloadRead.Store(false)
+		s.restoreEmergencyDescriptor()
 	}
 }
 
@@ -608,6 +666,12 @@ func (s *fanotifySource) ResponseDiagnostics() ResponseWriterDiagnostics {
 
 func (s *fanotifySource) CloseGroup() error {
 	s.groupCloseOnce.Do(func() {
+		s.emergencyMu.Lock()
+		if s.emergencyFD >= 0 {
+			_ = unix.Close(s.emergencyFD)
+			s.emergencyFD = -1
+		}
+		s.emergencyMu.Unlock()
 		if s.responses != nil {
 			_ = s.responses.WaitCurrentResponse(context.Background())
 			s.groupCloseErr = s.responses.SealAndCloseGroup()
@@ -716,9 +780,31 @@ func (s *fanotifySource) handleEvents(ctx context.Context, handler PendingHandle
 	// Every descriptor from this valid read is accounted before any path
 	// resolution, scope classification, response, or policy work starts.
 	for i := range events {
+		if s.overloadRead.Load() {
+			s.handleOverloadEvent(&events[i])
+			continue
+		}
 		s.handleEvent(ctx, handler, &events[i])
 	}
 	return nil
+}
+
+// handleOverloadEvent is intentionally separate from policy routing. Descriptor
+// accounting has already happened in handleEvents; overload events receive an
+// immediate deny and never reach path, process, profile, or prompt work.
+func (s *fanotifySource) handleOverloadEvent(meta *unix.FanotifyEventMetadata) {
+	if meta.Fd < 0 {
+		return
+	}
+	if uint64(meta.Mask)&fanotifyPermissionEvents == 0 {
+		_ = s.closeAccountedEventFD(meta.Fd)
+		return
+	}
+	event := FileEvent{PID: meta.Pid, Op: opFromMask(uint64(meta.Mask))}
+	pending := s.newFanotifyPendingEvent(&event, meta.Fd)
+	if err := pending.Respond(VerdictDeny); err != nil {
+		s.log.Error("fanotify overload denial failed", "fd", meta.Fd, "err", err)
+	}
 }
 
 func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler, meta *unix.FanotifyEventMetadata) {
@@ -740,9 +826,10 @@ func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler
 	// here keeps the fanotify hot path free of unrelated /proc reads.
 	path, resolved := resolveEventPath(fmt.Sprintf("/proc/self/fd/%d", meta.Fd))
 	event := FileEvent{
-		PID:  meta.Pid,
-		Path: path,
-		Op:   opFromMask(uint64(meta.Mask)),
+		PID:   meta.Pid,
+		Path:  path,
+		Op:    opFromMask(uint64(meta.Mask)),
+		IsDir: uint64(meta.Mask)&uint64(unix.FAN_ONDIR) != 0,
 	}
 	pending := s.newFanotifyPendingEvent(&event, meta.Fd)
 	var responseErr error
@@ -753,6 +840,8 @@ func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler
 		responseErr = pending.Respond(VerdictDeny)
 	case !resolved:
 		s.recordUnresolvedPath(meta.Fd)
+		responseErr = pending.Respond(VerdictDeny)
+	case s.pathInPendingScope(path):
 		responseErr = pending.Respond(VerdictDeny)
 	case !s.pathInActiveScope(path):
 		responseErr = pending.Respond(VerdictAllow)
@@ -779,11 +868,34 @@ func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler
 
 func (s *fanotifySource) retainFailedEvent(eventFD int32, owner PendingEvent) {
 	s.failedMu.Lock()
-	defer s.failedMu.Unlock()
 	if s.failedEvents == nil {
 		s.failedEvents = make(map[int32]PendingEvent)
 	}
 	s.failedEvents[eventFD] = owner
+	s.failedMu.Unlock()
+
+	// A failed response has an unknown kernel acceptance state and cannot be
+	// safely retried. Closing the fanotify group is the documented way to
+	// release its internal pending-permission list; it must not wait for a later
+	// shutdown call while the original syscall remains blocked.
+	s.failedCloseOnce.Do(func() {
+		go func() {
+			if err := s.CloseGroup(); err != nil {
+				s.log.Error("close fanotify group after response failure", "err", err)
+			}
+			s.failedMu.Lock()
+			failed := make([]int32, 0, len(s.failedEvents))
+			for fd := range s.failedEvents {
+				failed = append(failed, fd)
+			}
+			s.failedMu.Unlock()
+			for _, fd := range failed {
+				if err := s.closeAccountedEventFD(fd); err != nil {
+					s.log.Error("close failed fanotify event descriptor after group close", "fd", fd, "err", err)
+				}
+			}
+		}()
+	})
 }
 
 func resolveEventPath(link string) (string, bool) {

@@ -71,10 +71,11 @@ func (v Verdict) String() string {
 // that surface the event to a UI use them when set and fall back to Exe
 // otherwise.
 type FileEvent struct {
-	PID  int32
-	Exe  string
-	Path string
-	Op   FileOp
+	PID   int32
+	Exe   string
+	Path  string
+	Op    FileOp
+	IsDir bool // FAN_ONDIR for real fanotify sources.
 
 	// ProcessIdentity is stable for the lifetime of a resolved process. It is
 	// used only for the unidentified prompt bucket, where there is no profile

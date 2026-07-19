@@ -41,8 +41,18 @@ type RulePersistenceDiagnostics struct {
 type permanentRule struct {
 	pattern    string
 	verdict    Verdict
+	operation  FileOp
+	directory  bool
+	scoped     bool
 	entry      string
 	generation uint64
+}
+
+func (r permanentRule) key() string {
+	if !r.scoped {
+		return "any:" + r.pattern
+	}
+	return fmt.Sprintf("%d:%t:%s", r.operation, r.directory, r.pattern)
 }
 
 type dirtyRuleProfile struct {
@@ -130,12 +140,18 @@ func profileSnapshotKey(snapshot *DecisionSnapshot) string {
 	return snapshot.Source + "/" + snapshot.ProfileID
 }
 
-func canonicalPermanentRule(pattern string, verdict Verdict) (permanentRule, bool) {
+func canonicalPermanentRule(pattern string, operation FileOp, directory, scoped bool, verdict Verdict) (permanentRule, bool) {
 	pattern = filepath.Clean(pattern)
 	if pattern == "." || !filepath.IsAbs(pattern) || (verdict != VerdictAllow && verdict != VerdictDeny) {
 		return permanentRule{}, false
 	}
-	return permanentRule{pattern: pattern, verdict: verdict, entry: FormatExactRule(pattern, verdict)}, true
+	rule := permanentRule{pattern: pattern, verdict: verdict, operation: operation, directory: directory, scoped: scoped}
+	if scoped {
+		rule.entry = FormatExactOperationRule(pattern, operation, directory, verdict)
+	} else {
+		rule.entry = FormatExactRule(pattern, verdict)
+	}
+	return rule, true
 }
 
 // Bind attaches the current writable profile object without changing any dirty
@@ -229,7 +245,7 @@ func (p *RulePersistence) Apply(snapshot *DecisionSnapshot, store RuleStore, pat
 	merged := snapshot
 	notify := false
 	if !p.lifecycle.whileRunning(func() {
-		merged, notify = p.apply(snapshot, store, pattern, verdict, true)
+		merged, notify = p.apply(snapshot, store, pattern, OpOpen, false, false, verdict, true)
 	}) {
 		return merged
 	}
@@ -242,15 +258,39 @@ func (p *RulePersistence) Apply(snapshot *DecisionSnapshot, store RuleStore, pat
 // ApplyAccepted completes an Always action which won prompt ownership before
 // Closing. Prompt shutdown waits for this call before starting the final flush.
 func (p *RulePersistence) ApplyAccepted(snapshot *DecisionSnapshot, store RuleStore, pattern string, verdict Verdict) *DecisionSnapshot {
-	merged, notify := p.apply(snapshot, store, pattern, verdict, false)
+	merged, notify := p.apply(snapshot, store, pattern, OpOpen, false, false, verdict, false)
 	if notify && p.observe != nil {
 		p.observe(merged)
 	}
 	return merged
 }
 
-func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pattern string, verdict Verdict, allowBinding bool) (*DecisionSnapshot, bool) {
-	rule, ok := canonicalPermanentRule(pattern, verdict)
+// ApplyAcceptedEvent persists an accepted Always decision for exactly one
+// operation. Legacy ApplyAccepted retains all-operation rule compatibility.
+func (p *RulePersistence) ApplyAcceptedEvent(snapshot *DecisionSnapshot, store RuleStore, pattern string, operation FileOp, directory bool, verdict Verdict) *DecisionSnapshot {
+	merged, notify := p.apply(snapshot, store, pattern, operation, directory, true, verdict, false)
+	if notify && p.observe != nil {
+		p.observe(merged)
+	}
+	return merged
+}
+
+func (p *RulePersistence) ApplyEvent(snapshot *DecisionSnapshot, store RuleStore, pattern string, operation FileOp, directory bool, verdict Verdict) *DecisionSnapshot {
+	merged := snapshot
+	notify := false
+	if !p.lifecycle.whileRunning(func() {
+		merged, notify = p.apply(snapshot, store, pattern, operation, directory, true, verdict, true)
+	}) {
+		return merged
+	}
+	if notify && p.observe != nil {
+		p.observe(merged)
+	}
+	return merged
+}
+
+func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pattern string, operation FileOp, directory, scoped bool, verdict Verdict, allowBinding bool) (*DecisionSnapshot, bool) {
+	rule, ok := canonicalPermanentRule(pattern, operation, directory, scoped, verdict)
 	if !ok || snapshot == nil || store == nil {
 		return snapshot, false
 	}
@@ -265,12 +305,12 @@ func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pat
 	if allowBinding && p.bindings[key].store == nil {
 		p.bindings[key] = ruleStoreBinding{store: store, generation: 1}
 	}
-	if current, exists := state.dirty[rule.pattern]; exists && current.verdict == rule.verdict {
+	if current, exists := state.dirty[rule.key()]; exists && current.verdict == rule.verdict {
 		merged := state.publishLocked(base)
 		p.mu.Unlock()
 		return merged, false
 	}
-	if current, exists := state.applied[rule.pattern]; exists && current.verdict == rule.verdict {
+	if current, exists := state.applied[rule.key()]; exists && current.verdict == rule.verdict {
 		merged := state.publishLocked(base)
 		p.mu.Unlock()
 		return merged, false
@@ -281,8 +321,8 @@ func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pat
 	}
 	state.generation++
 	rule.generation = state.generation
-	state.dirty[rule.pattern] = rule
-	delete(state.applied, rule.pattern)
+	state.dirty[rule.key()] = rule
+	delete(state.applied, rule.key())
 	state.policyEpoch++
 	merged := state.publishLocked(base)
 	start := !state.started
@@ -396,7 +436,7 @@ func durableExactRuleAtPrecedence(snapshot *DecisionSnapshot, rule permanentRule
 		if !existing.Matches(rule.pattern) {
 			continue
 		}
-		return existing.Exact && existing.Pattern == rule.pattern && existing.Verdict == rule.verdict
+		return existing.Exact && existing.Pattern == rule.pattern && existing.Verdict == rule.verdict && existing.OperationScoped == rule.scoped && (!rule.scoped || (existing.Operation == rule.operation && existing.DirectoryOnly == rule.directory))
 	}
 	return false
 }
@@ -414,19 +454,22 @@ func (state *dirtyRuleProfile) publishLocked(base *DecisionSnapshot) *DecisionSn
 	}
 	sort.Slice(rules, func(i, j int) bool { return rules[i].generation > rules[j].generation })
 	type overlayIdentity struct {
-		pattern string
-		exact   bool
+		pattern   string
+		exact     bool
+		operation FileOp
+		directory bool
+		scoped    bool
 	}
 	overlay := make(map[overlayIdentity]permanentRule, len(rules))
 	for _, rule := range rules {
-		overlay[overlayIdentity{pattern: rule.pattern, exact: true}] = rule
+		overlay[overlayIdentity{pattern: rule.pattern, exact: true, operation: rule.operation, directory: rule.directory, scoped: rule.scoped}] = rule
 	}
 	mergedRules := make([]PathRule, 0, len(base.Rules.Rules)+len(rules))
 	for _, rule := range rules {
-		mergedRules = append(mergedRules, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, Exact: true})
+		mergedRules = append(mergedRules, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, Exact: true, Operation: rule.operation, OperationScoped: rule.scoped, DirectoryOnly: rule.directory})
 	}
 	for _, rule := range base.Rules.Rules {
-		if _, covered := overlay[overlayIdentity{pattern: rule.Pattern, exact: rule.Exact}]; !covered {
+		if _, covered := overlay[overlayIdentity{pattern: rule.Pattern, exact: rule.Exact, operation: rule.Operation, directory: rule.DirectoryOnly, scoped: rule.OperationScoped}]; !covered {
 			mergedRules = append(mergedRules, rule)
 		}
 	}
@@ -552,9 +595,9 @@ func (p *RulePersistence) persisted(key string, expected *dirtyRuleProfile, rule
 		}
 		return
 	}
-	if current, ok := state.dirty[rule.pattern]; ok && current.generation == rule.generation {
-		delete(state.dirty, rule.pattern)
-		state.applied[rule.pattern] = rule
+	if current, ok := state.dirty[rule.key()]; ok && current.generation == rule.generation {
+		delete(state.dirty, rule.key())
+		state.applied[rule.key()] = rule
 		// A successful write changes the durable base even before the next
 		// profile reload. Retaining that canonical fact lets Merge distinguish an
 		// equal-revision, content-identical reload from one that removed or
@@ -576,7 +619,7 @@ func snapshotWithDurableExactRule(base *DecisionSnapshot, rule permanentRule) *D
 	rules := make([]PathRule, 0, len(base.Rules.Rules)+1)
 	rules = append(rules, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, Exact: true})
 	for _, existing := range base.Rules.Rules {
-		if existing.Exact && existing.Pattern == rule.pattern {
+		if existing.Exact && existing.Pattern == rule.pattern && existing.OperationScoped == rule.scoped && (!rule.scoped || (existing.Operation == rule.operation && existing.DirectoryOnly == rule.directory)) {
 			continue
 		}
 		rules = append(rules, existing)
@@ -598,7 +641,7 @@ func (p *RulePersistence) failed(key string, expected *dirtyRuleProfile, rule pe
 		p.mu.Unlock()
 		return false
 	}
-	if current, ok := state.dirty[rule.pattern]; ok && current.generation == rule.generation {
+	if current, ok := state.dirty[rule.key()]; ok && current.generation == rule.generation {
 		state.retries++
 		state.lastErr = err
 		state.failure = true

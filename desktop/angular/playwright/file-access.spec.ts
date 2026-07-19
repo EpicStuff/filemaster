@@ -165,6 +165,9 @@ async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Prom
 	await mkdir(dataDir, { recursive: true });
 	await mkdir(binDir, { recursive: true });
 	await mkdir(watchDir, { recursive: true });
+	if (mode === 'real') {
+		await requireConfinedRealWatchMount(watchDir);
+	}
 	await writeFile(path.join(dataDir, 'config.json'), JSON.stringify({
 		core: {
 			devMode: true,
@@ -242,6 +245,24 @@ async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Prom
 			`fake fanotify source did not become ready at ${socketPath}: ${cause}\n` +
 				`portmaster-core output:\n${output.join('').slice(-12_000)}`,
 		);
+	}
+}
+
+async function requireConfinedRealWatchMount(watchDir: string): Promise<void> {
+	if (process.env.PLAYWRIGHT_FILEACCESS_REAL_CONFINED !== '1') {
+		throw new Error('real fanotify Playwright mode is disabled: set PLAYWRIGHT_FILEACCESS_REAL_CONFINED=1 only inside a private mount namespace');
+	}
+	const target = await new Promise<string>((resolve, reject) => {
+		const child = spawn('findmnt', ['--target', watchDir, '--noheadings', '--output', 'TARGET'], { stdio: ['ignore', 'pipe', 'pipe'] });
+		let stdout = '';
+		let stderr = '';
+		child.stdout.on('data', chunk => { stdout += String(chunk); });
+		child.stderr.on('data', chunk => { stderr += String(chunk); });
+		child.once('error', reject);
+		child.once('exit', code => code === 0 ? resolve(stdout.trim()) : reject(new Error(stderr.trim() || `findmnt exited ${code}`)));
+	});
+	if (target !== watchDir) {
+		throw new Error(`real fanotify Playwright mode requires ${watchDir} to be its own confined mount; findmnt resolved ${target || '<none>'}`);
 	}
 }
 

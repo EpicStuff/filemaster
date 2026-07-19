@@ -92,7 +92,7 @@ func (h *PromptHandler) Decide(ctx context.Context, e *FileEvent) Verdict {
 }
 
 func (h *PromptHandler) DecideForResponse(ctx context.Context, e *FileEvent) (Verdict, func()) {
-	if verdict, ok := h.lookup(e.Exe, e.Path); ok {
+	if verdict, ok := h.lookup(e.Exe, e.Path, e.Op, e.IsDir); ok {
 		return verdict, nil
 	}
 	action, ok := h.prompter.Prompt(ctx, *e, h.timeout)
@@ -105,9 +105,9 @@ func (h *PromptHandler) DecideForResponse(ctx context.Context, e *FileEvent) (Ve
 	case ActionDeny:
 		return VerdictDeny, nil
 	case ActionAllowAlways:
-		return VerdictAllow, func() { h.appendRule(e.Exe, e.Path, VerdictAllow) }
+		return VerdictAllow, func() { h.appendRule(e.Exe, e.Path, e.Op, e.IsDir, VerdictAllow) }
 	case ActionDenyAlways:
-		return VerdictDeny, func() { h.appendRule(e.Exe, e.Path, VerdictDeny) }
+		return VerdictDeny, func() { h.appendRule(e.Exe, e.Path, e.Op, e.IsDir, VerdictDeny) }
 	default:
 		return VerdictDeny, nil
 	}
@@ -127,18 +127,18 @@ func (h *PromptHandler) RulesFor(exe string) []PathRule {
 	return out
 }
 
-func (h *PromptHandler) lookup(exe, path string) (Verdict, bool) {
+func (h *PromptHandler) lookup(exe, path string, op FileOp, isDir bool) (Verdict, bool) {
 	h.rulesMu.RLock()
 	defer h.rulesMu.RUnlock()
 	rs, ok := h.rules[exe]
 	if !ok {
 		return 0, false
 	}
-	return rs.Lookup(path)
+	return rs.LookupEvent(path, op, isDir)
 }
 
-func (h *PromptHandler) appendRule(exe, pattern string, v Verdict) {
-	_ = h.appendRuleEntry(exe, PathRule{Pattern: pattern, Verdict: v, Exact: true})
+func (h *PromptHandler) appendRule(exe, pattern string, op FileOp, isDir bool, v Verdict) {
+	_ = h.appendRuleEntry(exe, PathRule{Pattern: pattern, Verdict: v, Exact: true, Operation: op, OperationScoped: true, DirectoryOnly: isDir})
 }
 
 // appendRuleEntry makes a permanent fallback rule effective before saving it.
@@ -158,7 +158,7 @@ func (h *PromptHandler) appendRuleEntry(exe string, rule PathRule) error {
 	rules := make([]PathRule, 0, len(rs.Rules)+1)
 	rules = append(rules, rule)
 	for _, existing := range rs.Rules {
-		if existing.Pattern == rule.Pattern && existing.Verdict == rule.Verdict && existing.Exact == rule.Exact {
+		if existing.Pattern == rule.Pattern && existing.Verdict == rule.Verdict && existing.Exact == rule.Exact && existing.OperationScoped == rule.OperationScoped && (!rule.OperationScoped || (existing.Operation == rule.Operation && existing.DirectoryOnly == rule.DirectoryOnly)) {
 			continue
 		}
 		rules = append(rules, existing)
@@ -180,10 +180,10 @@ func (h *PromptHandler) apply(e FileEvent, action string) Verdict {
 	case ActionDeny:
 		return VerdictDeny
 	case ActionAllowAlways:
-		h.appendRule(e.Exe, e.Path, VerdictAllow)
+		h.appendRule(e.Exe, e.Path, e.Op, e.IsDir, VerdictAllow)
 		return VerdictAllow
 	case ActionDenyAlways:
-		h.appendRule(e.Exe, e.Path, VerdictDeny)
+		h.appendRule(e.Exe, e.Path, e.Op, e.IsDir, VerdictDeny)
 		return VerdictDeny
 	default:
 		// Unknown action ID -- default-deny.

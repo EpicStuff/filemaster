@@ -20,10 +20,11 @@ type groupedPrompter interface {
 }
 
 type promptKey struct {
-	profile string
-	op      FileOp
-	path    string
-	process string
+	profile   string
+	op        FileOp
+	directory bool
+	path      string
+	process   string
 }
 
 func (key promptKey) String() string {
@@ -152,7 +153,7 @@ func (c *PromptCoordinator) Admit(ctx context.Context, pending PendingEvent, sto
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		snapshot = c.latestSnapshotLocked(snapshot)
-		if currentVerdict, ask := decisionFromSnapshot(snapshot, path); !ask {
+		if currentVerdict, ask := decisionFromSnapshot(snapshot, path, event.Op, event.IsDir); !ask {
 			immediate = &currentVerdict
 			return
 		}
@@ -249,12 +250,12 @@ func (c *PromptCoordinator) waitForPrompt(ctx context.Context, group *promptGrou
 	case ActionAllowAlways:
 		won, accepted := c.resolve(group, VerdictAllow)
 		if won && accepted && c.persistence != nil {
-			c.persistence.ApplyAccepted(group.snapshot, group.store, group.key.path, VerdictAllow)
+			c.persistence.ApplyAcceptedEvent(group.snapshot, group.store, group.key.path, group.key.op, group.key.directory, VerdictAllow)
 		}
 	case ActionDenyAlways:
 		won, accepted := c.resolve(group, VerdictDeny)
 		if won && accepted && c.persistence != nil {
-			c.persistence.ApplyAccepted(group.snapshot, group.store, group.key.path, VerdictDeny)
+			c.persistence.ApplyAcceptedEvent(group.snapshot, group.store, group.key.path, group.key.op, group.key.directory, VerdictDeny)
 		}
 	default:
 		c.resolve(group, VerdictDeny)
@@ -289,7 +290,7 @@ func (c *PromptCoordinator) snapshotReplacedRunning(snapshot *DecisionSnapshot) 
 	detached := make([]detachedGroup, 0, len(c.profiles[profileKey]))
 	for group := range c.profiles[profileKey] {
 		latest := c.latestProfileSnapshot[profileKey]
-		verdict, ask := decisionFromSnapshot(latest, group.key.path)
+		verdict, ask := decisionFromSnapshot(latest, group.key.path, group.key.op, group.key.directory)
 		if ask {
 			group.snapshot = latest
 			continue
@@ -424,8 +425,8 @@ func (c *PromptCoordinator) completeGroup(group *promptGroup, entries []promptEn
 	return accepted
 }
 
-func decisionFromSnapshot(snapshot *DecisionSnapshot, path string) (Verdict, bool) {
-	if verdict, ok := snapshot.Rules.Lookup(path); ok {
+func decisionFromSnapshot(snapshot *DecisionSnapshot, path string, op FileOp, isDir bool) (Verdict, bool) {
+	if verdict, ok := snapshot.Rules.LookupEvent(path, op, isDir); ok {
 		return verdict, false
 	}
 	switch snapshot.DefaultAction {
@@ -448,7 +449,7 @@ func (c *PromptCoordinator) latestSnapshotLocked(snapshot *DecisionSnapshot) *De
 }
 
 func (c *PromptCoordinator) newPromptKey(event *FileEvent, snapshot *DecisionSnapshot, path string) promptKey {
-	key := promptKey{profile: snapshot.Source + "/" + snapshot.ProfileID, op: event.Op, path: path}
+	key := promptKey{profile: snapshot.Source + "/" + snapshot.ProfileID, op: event.Op, directory: event.IsDir, path: path}
 	if snapshot.ProfileID == "" {
 		key.profile = ""
 		key.process = event.ProcessIdentity

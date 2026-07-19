@@ -123,6 +123,25 @@ func TestParseAndFormatRuleRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOperationExactRuleRoundTripAndProfileDecision(t *testing.T) {
+	entry := FormatExactOperationRule("/tmp/data", OpRead, false, VerdictAllow)
+	rule, ok := ParseRule(entry)
+	if !ok || !rule.Exact || !rule.OperationScoped || rule.Operation != OpRead || rule.DirectoryOnly {
+		t.Fatalf("parsed operation rule = %#v, ok=%t", rule, ok)
+	}
+	if rule.MatchesEvent("/tmp/data", OpOpen, false) {
+		t.Fatal("read rule matched open")
+	}
+	if !rule.MatchesEvent("/tmp/data", OpRead, false) {
+		t.Fatal("read rule did not match read")
+	}
+	directoryEntry := FormatExactOperationRule("/tmp/folder", OpRead, true, VerdictDeny)
+	directoryRule, ok := ParseRule(directoryEntry)
+	if !ok || !directoryRule.DirectoryOnly || !directoryRule.MatchesEvent("/tmp/folder", OpRead, true) || directoryRule.MatchesEvent("/tmp/folder", OpRead, false) {
+		t.Fatalf("directory rule did not preserve discriminator: %#v", directoryRule)
+	}
+}
+
 func TestParseRuleRejectsMalformed(t *testing.T) {
 	for _, bad := range []string{"", "+", "+a", "x /foo", "/foo", "++ /foo"} {
 		if _, ok := ParseRule(bad); ok {
@@ -176,7 +195,7 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 		t.Fatalf("FlushPermanentRules: %v", err)
 	}
 	got := lookup.appendedFor(99)
-	if len(got) != 1 || got[0] != FormatExactRule("/home/alice/notes.txt", VerdictAllow) {
+	if len(got) != 1 || got[0] != `+ @open:"/home/alice/notes.txt"` {
 		t.Fatalf("rule not persisted in profile store: %v", got)
 	}
 

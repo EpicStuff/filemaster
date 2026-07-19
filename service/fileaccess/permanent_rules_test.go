@@ -567,3 +567,24 @@ func TestPermanentRulesStopWaitsForBlockedWorkerAfterFlushDeadline(t *testing.T)
 	}
 	persistence.WaitWorkers()
 }
+
+func TestPermanentRulesKeepAlwaysRulesOperationScoped(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond})
+	store := &persistenceTestStore{}
+	base := persistenceSnapshot()
+	merged := persistence.ApplyEvent(base, store, "/tmp/data", OpRead, false, VerdictAllow)
+	if verdict, ok := merged.Rules.LookupEvent("/tmp/data", OpRead, false); !ok || verdict != VerdictAllow {
+		t.Fatalf("read rule lookup = (%v, %t), want (allow, true)", verdict, ok)
+	}
+	if _, ok := merged.Rules.LookupEvent("/tmp/data", OpOpen, false); ok {
+		t.Fatal("read Always rule matched open")
+	}
+	waitRule(t, func() bool {
+		entries, _ := store.snapshot()
+		return len(entries) == 1
+	})
+	entries, _ := store.snapshot()
+	if got := entries[0]; got != FormatExactOperationRule("/tmp/data", OpRead, false, VerdictAllow) {
+		t.Fatalf("stored rule = %q", got)
+	}
+}

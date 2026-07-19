@@ -22,6 +22,12 @@ type PathRule struct {
 	Pattern string
 	Verdict Verdict
 	Exact   bool
+
+	// OperationScoped restricts this rule to one filesystem operation. Legacy
+	// rules leave it false and therefore continue to apply to every operation.
+	Operation       FileOp
+	OperationScoped bool
+	DirectoryOnly   bool
 }
 
 // Matches reports whether the rule applies to path.
@@ -30,6 +36,19 @@ func (r PathRule) Matches(path string) bool {
 		return r.Pattern == path
 	}
 	return matchPathPattern(r.Pattern, path)
+}
+
+// MatchesEvent applies the path match plus an optional operation and directory
+// discriminator. This keeps legacy path-only rules backward compatible while
+// allowing learned Always rules to be safely operation-specific.
+func (r PathRule) MatchesEvent(path string, op FileOp, isDir bool) bool {
+	if !r.Matches(path) {
+		return false
+	}
+	if r.OperationScoped && r.Operation != op {
+		return false
+	}
+	return !r.DirectoryOnly || isDir
 }
 
 // PathRules is an ordered list of PathRules. First match wins; if no
@@ -42,7 +61,7 @@ type PathRules struct {
 // Decide implements Handler: look up the event's path in the rule list
 // and return the matching verdict (or the default).
 func (rs PathRules) Decide(_ context.Context, e *FileEvent) Verdict {
-	if v, ok := rs.Lookup(e.Path); ok {
+	if v, ok := rs.LookupEvent(e.Path, e.Op, e.IsDir); ok {
 		return v
 	}
 	return rs.Default
@@ -55,6 +74,16 @@ func (rs PathRules) Decide(_ context.Context, e *FileEvent) Verdict {
 func (rs PathRules) Lookup(path string) (Verdict, bool) {
 	for _, r := range rs.Rules {
 		if r.Matches(path) {
+			return r.Verdict, true
+		}
+	}
+	return 0, false
+}
+
+// LookupEvent evaluates the first matching rule for this exact operation.
+func (rs PathRules) LookupEvent(path string, op FileOp, isDir bool) (Verdict, bool) {
+	for _, r := range rs.Rules {
+		if r.MatchesEvent(path, op, isDir) {
 			return r.Verdict, true
 		}
 	}

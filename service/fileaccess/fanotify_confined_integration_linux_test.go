@@ -91,11 +91,15 @@ func testConfinedFanotifyIntegrationChild(t *testing.T) {
 
 	filePath := filepath.Join(root, "file")
 	promptPath := filepath.Join(root, "prompt")
+	denyPath := filepath.Join(root, "deny")
 	nestedPath := filepath.Join(nested, "nested-file")
 	if err := os.WriteFile(filePath, []byte("contents"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(promptPath, []byte("prompt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(denyPath, []byte("deny"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(nestedPath, []byte("nested"), 0o600); err != nil {
@@ -170,6 +174,10 @@ func testConfinedFanotifyIntegrationChild(t *testing.T) {
 	}
 
 promptCompleted:
+	handler.denyPath = denyPath
+	if err := openAndRead(denyPath); err == nil {
+		t.Fatal("real fanotify deny did not reject the syscall")
+	}
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer drainCancel()
@@ -266,9 +274,13 @@ func (p confinedPrompter) Prompt(_ context.Context, event FileEvent, _ time.Dura
 type confinedFanotifyHandler struct {
 	coordinator *PromptCoordinator
 	snapshot    *DecisionSnapshot
+	denyPath    string
 }
 
-func (h *confinedFanotifyHandler) Decide(_ context.Context, _ *FileEvent) Verdict {
+func (h *confinedFanotifyHandler) Decide(_ context.Context, event *FileEvent) Verdict {
+	if event.Path == h.denyPath {
+		return VerdictDeny
+	}
 	return VerdictAllow
 }
 

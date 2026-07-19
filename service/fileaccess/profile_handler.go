@@ -443,6 +443,13 @@ func (h *ProfileHandler) Decide(ctx context.Context, e *FileEvent) Verdict {
 // persistence. The decision pipeline invokes the latter only after the
 // fanotify response has been accepted.
 func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (Verdict, func()) {
+	// At FAN_OPEN_EXEC_PERM time /proc/<pid>/exe still identifies the old
+	// image. Until profile lookup can resolve and match the target executable
+	// directly, applying that cached predecessor policy would be unsafe.
+	if e.Op == OpExec {
+		h.log.Warn("denying exec without target executable profile resolution", "pid", e.PID, "path", e.Path)
+		return VerdictDeny, nil
+	}
 	res, isSelf := h.lookupSelfProfile(e.PID)
 	if !isSelf {
 		var err error
@@ -491,7 +498,7 @@ func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (V
 	}
 	rules := snapshot.Rules
 	defaultAction := snapshot.DefaultAction
-	if verdict, ok := rules.Lookup(e.Path); ok {
+	if verdict, ok := rules.LookupEvent(e.Path, e.Op, e.IsDir); ok {
 		return verdict, nil
 	}
 
@@ -524,13 +531,13 @@ func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (V
 	case ActionAllowAlways:
 		return VerdictAllow, func() {
 			if persistence := h.rulePersistence(); persistence != nil {
-				persistence.Apply(snapshot, res.Store, e.Path, VerdictAllow)
+				persistence.ApplyEvent(snapshot, res.Store, e.Path, e.Op, e.IsDir, VerdictAllow)
 			}
 		}
 	case ActionDenyAlways:
 		return VerdictDeny, func() {
 			if persistence := h.rulePersistence(); persistence != nil {
-				persistence.Apply(snapshot, res.Store, e.Path, VerdictDeny)
+				persistence.ApplyEvent(snapshot, res.Store, e.Path, e.Op, e.IsDir, VerdictDeny)
 			}
 		}
 	default:
@@ -602,7 +609,7 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 			Rules:         res.ParsedRules,
 		}
 	}
-	if decision, ask := decisionFromSnapshot(snapshot, e.Path); !ask {
+	if decision, ask := decisionFromSnapshot(snapshot, e.Path, e.Op, e.IsDir); !ask {
 		return false, false, decision, nil
 	}
 	if !h.rootAskAllowed() {
@@ -671,6 +678,22 @@ func FormatExactRule(path string, v Verdict) string {
 	return "- @" + strconv.Quote(path)
 }
 
+// FormatExactOperationRule stores a literal path bound to one operation. The
+// tagged form is deliberately distinct from legacy path patterns: @read: is
+// operation-scoped while @ remains compatible with existing all-operation
+// exact rules.
+func FormatExactOperationRule(path string, op FileOp, isDir bool, v Verdict) string {
+	path = filepath.Clean(path)
+	tag := op.String()
+	if isDir {
+		tag = "dir-" + tag
+	}
+	if v == VerdictAllow {
+		return "+ @" + tag + ":" + strconv.Quote(path)
+	}
+	return "- @" + tag + ":" + strconv.Quote(path)
+}
+
 // ParseRule decodes a "<+|-> <pattern>" string into a PathRule. Returns
 // false on malformed input.
 func ParseRule(entry string) (PathRule, bool) {
@@ -688,14 +711,45 @@ func ParseRule(entry string) (PathRule, bool) {
 	}
 	payload := entry[2:]
 	if strings.HasPrefix(payload, "@") {
-		path, err := strconv.Unquote(payload[1:])
+		payload = payload[1:]
+		var op FileOp
+		var scoped, directory bool
+		if colon := strings.IndexByte(payload, ':'); colon >= 0 {
+			var ok bool
+			op, directory, ok = parseRuleOperation(payload[:colon])
+			if !ok {
+				return PathRule{}, false
+			}
+			scoped = true
+			payload = payload[colon+1:]
+		}
+		path, err := strconv.Unquote(payload)
 		path = filepath.Clean(path)
 		if err != nil || path == "." || !filepath.IsAbs(path) {
 			return PathRule{}, false
 		}
-		return PathRule{Pattern: path, Verdict: v, Exact: true}, true
+		return PathRule{Pattern: path, Verdict: v, Exact: true, Operation: op, OperationScoped: scoped, DirectoryOnly: directory}, true
 	}
 	return PathRule{Pattern: strings.TrimSpace(payload), Verdict: v}, true
+}
+
+func parseRuleOperation(tag string) (FileOp, bool, bool) {
+	directory := strings.HasPrefix(tag, "dir-")
+	if directory {
+		tag = strings.TrimPrefix(tag, "dir-")
+	}
+	switch tag {
+	case "open":
+		return OpOpen, directory, true
+	case "read":
+		return OpRead, directory, true
+	case "write":
+		return OpWrite, directory, true
+	case "exec":
+		return OpExec, directory, true
+	default:
+		return 0, false, false
+	}
 }
 
 // ParseRules parses a []string of rule entries (as stored in a profile)

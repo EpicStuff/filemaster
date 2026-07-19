@@ -121,8 +121,8 @@ func TestDecisionPipelineRetainsUnacceptedFanotifyResponse(t *testing.T) {
 			if err := retained.Respond(VerdictDeny); !errors.Is(err, ErrPendingEventAlreadyResolved) {
 				t.Fatalf("second retained-owner verdict error = %v, want ErrPendingEventAlreadyResolved", err)
 			}
-			if diagnostics := source.ReaderDiagnostics(); diagnostics.OutstandingDescriptors != 1 {
-				t.Fatalf("outstanding descriptors = %d, want retained descriptor", diagnostics.OutstandingDescriptors)
+			if diagnostics := source.ReaderDiagnostics(); diagnostics.OutstandingDescriptors != 0 {
+				t.Fatalf("outstanding descriptors = %d, want group-closed failed descriptor released", diagnostics.OutstandingDescriptors)
 			}
 			if !source.responses.draining.Load() {
 				t.Fatal("response writer did not enter fatal draining")

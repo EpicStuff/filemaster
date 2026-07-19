@@ -3,11 +3,13 @@
 package fileaccess
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -173,15 +175,18 @@ func TestMountReconciliationRetainsPartialCoverageAndRetries(t *testing.T) {
 	}
 }
 
-func TestScopeTransitionPublishesUnionBeforeNewMountMark(t *testing.T) {
+func TestScopeTransitionPublishesOnlyVerifiedNewScope(t *testing.T) {
 	oldRoot := t.TempDir()
 	newRoot := t.TempDir()
 	var calls []string
 	s := newReconciliationTestSource([]mountInfo{{ID: 1, MountPoint: "/"}, {ID: 2, MountPoint: oldRoot}, {ID: 3, MountPoint: newRoot}}, nil)
 	s.mark = func(flags uint, _ uint64, path string) error {
 		if flags&uint(unix.FAN_MARK_ADD) != 0 && path == newRoot {
-			if !snapshotContains(s.activeScopes.Load(), oldRoot) || !snapshotContains(s.activeScopes.Load(), newRoot) {
-				t.Fatal("new mount mark was added before the union scope was published")
+			if !snapshotContains(s.activeScopes.Load(), oldRoot) || snapshotContains(s.activeScopes.Load(), newRoot) {
+				t.Fatal("candidate scope became active before its new mount mark was verified")
+			}
+			if !s.pathInPendingScope(newRoot) {
+				t.Fatal("candidate scope was not retained for deny-until-verified classification")
 			}
 		}
 		if flags&uint(unix.FAN_MARK_REMOVE) != 0 && path == oldRoot && snapshotContains(s.activeScopes.Load(), oldRoot) {
@@ -254,6 +259,98 @@ func newReconciliationTestSource(mounts []mountInfo, mark func(uint, uint64, str
 			return mounts, nil
 		},
 		mark: mark,
+	}
+}
+
+func TestMountChangeNotificationReconcilesNestedMountImmediately(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var mountsMu sync.Mutex
+	mounts := []mountInfo{{ID: 1, MountPoint: "/"}, {ID: 2, MountPoint: root}}
+	nestedMarked := make(chan struct{}, 1)
+	s := newReconciliationTestSource(nil, nil)
+	s.mountInfo = func() ([]mountInfo, error) {
+		mountsMu.Lock()
+		defer mountsMu.Unlock()
+		return append([]mountInfo(nil), mounts...), nil
+	}
+	s.mark = func(_ uint, _ uint64, path string) error {
+		if path == nested {
+			select {
+			case nestedMarked <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	}
+
+	scope, err := activateScope(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scope.close()
+	s.scopes[root] = scope
+	s.pending = true
+	s.reconcile()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	reconcileDone := make(chan error, 1)
+	changes := make(chan struct{}, 1)
+	go func() { reconcileDone <- s.runReconciliation(ctx, changes) }()
+
+	mountsMu.Lock()
+	mounts = append(mounts, mountInfo{ID: 3, MountPoint: nested})
+	mountsMu.Unlock()
+	changes <- struct{}{}
+
+	select {
+	case <-nestedMarked:
+	case <-time.After(time.Second):
+		t.Fatal("nested mount was not reconciled from the mount-change notification")
+	}
+
+	cancel()
+	select {
+	case err := <-reconcileDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reconciliation loop did not exit")
+	}
+}
+
+func TestMountReconcileFailureRecomputesCoverageDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	s := newReconciliationTestSource([]mountInfo{{ID: 1, MountPoint: "/"}}, nil)
+	if err := s.SetWatchPaths([]string{root}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mountInfo = func() ([]mountInfo, error) {
+		return nil, errors.New("mountinfo unavailable")
+	}
+	s.reconcile()
+
+	got := s.MountDiagnostics()
+	if !got.PartialCoverage || got.CoverageKnown {
+		t.Fatalf("failure coverage state = %#v", got)
+	}
+	if got.LastError == "" {
+		t.Fatal("failure diagnostics lost the mountinfo error")
+	}
+	if !reflect.DeepEqual(got.ConfiguredScopes, []string{root}) || !reflect.DeepEqual(got.CanonicalScopes, []string{root}) {
+		t.Fatalf("failure diagnostics lost configured scope details: %#v", got)
+	}
+	if !reflect.DeepEqual(got.ActiveMountIDs, []int{1}) {
+		t.Fatalf("failure diagnostics active mounts = %#v, want [1]", got.ActiveMountIDs)
+	}
+	if len(got.MissingMountIDs) != 0 {
+		t.Fatalf("failure diagnostics retained stale missing mounts: %#v", got.MissingMountIDs)
 	}
 }
 
