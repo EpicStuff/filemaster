@@ -22,6 +22,25 @@ Host-dependent verification is deliberately not inferred from unit tests.
 | Confined full pipeline benchmark | `cmds/fanotify-confined-pipeline` | Harness emits one complete JSON result with event/verdict/prompt counts, decision and response latency, shutdown duration, effective daemon settings, accounting, persistence, and environment state; it atomically writes a randomized same-directory mode-0600 artifact | `sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core --mode benchmark --events 25 --json /tmp/filemaster-confined-benchmark.json` | Accepted Phase 8 host verification. It uses only a temporary bind mount and never marks `/`. |
 | Root scope Ask gate | `rollout_gate_linux.go`, `profile_handler.go` | `phase8_test.go` | `go test ./service/fileaccess -run TestRootAskGate` | **Intentionally deferred:** root scope verification is not part of Phase 8 completion. Root Ask remains closed because no trusted root-scope evidence exists. |
 
+## Independent architecture review follow-up
+
+The final independent review verdict was **ACCEPT WITH NONBLOCKING FINDINGS**.
+There were no Blocker or High findings and no root-gate bypass. Every confirmed
+correctness finding was resolved before Phase 8 completion:
+
+| Finding | Resolution | Focused coverage |
+| --- | --- | --- |
+| R1/R2: malformed fanotify batch ownership and untrusted frame advancement | `fanotify_linux.go` now accounts only safely framed fixed-prefix descriptors, never advances through an untrusted length, explicitly records an unparseable tail, denies/closes safely identified ownership, and closes the source after fatal framing loss. | `fanotify_reader_linux_test.go`: malformed A/B/C tail and suspicious metadata-version length cases. |
+| P1: coordinator-less Always persistence | `ProfileHandler` routes accepted coordinator-less Always actions through `RulePersistence`, so the immutable dirty overlay, serialized write, retry, and diagnostics apply identically. | `TestProfileHandlerCoordinatorlessAlwaysUsesDurableOverlayAndRetry`. |
+| S1: mark-removal failures after Closed | `diagnostics_linux.go` publishes `shutdown-mark-removal-failed` until final mark removal is genuinely complete, including after `LifecycleClosed`. | `TestShutdownMarkRemovalFailureWarningSurvivesClosed`. |
+| P2: equal-revision divergent merge | `RulePersistence.Merge` compares policy content as well as revision. A successful durable write records its canonical exact base rule, so an equal-revision external removal/change cannot be mistaken for an identical reload. | `TestPermanentRulesEqualRevisionDivergenceDoesNotRestoreCleanRule`. |
+| P3: per-profile persistence worker lifetime | Idle writers retire after a bounded idle interval; `Stop` flushes bounded dirty work then joins every worker without accepting further requests. | `TestPermanentRulesRetireIdleWorkersAndStopWithoutDiscardingDirtyState`. |
+| R3: redundant accounting | `handleEvent` now routes only pre-accounted descriptors; accounting remains visibly before path resolution and policy. | `TestShutdownResponseFailureRemainsExplicitlyOwned` and reader batch tests. |
+| S2: fake reader lifecycle parity | The fake source reports running/exited state, group closure unblocks the reader, and reader-exit/accounting behavior is covered. | `TestFakeSourceReportsReaderLifecycleAndGroupClosure`. |
+
+Root testing remains explicitly deferred. `/` was not marked during this work,
+and Root Ask remains closed without trusted root-scope evidence.
+
 The exact file-access Playwright command,
 `cd desktop/angular && npx playwright test playwright/file-access.spec.ts --project=chromium --workers=1 --reporter=line`,
 now passes. The prior startup deadlock was corrected by restoring the

@@ -468,3 +468,69 @@ func TestPermanentRulesCurrentRevisionCanRemoveAppliedRule(t *testing.T) {
 		t.Fatalf("removed durable rule was silently restored: %v, %v", verdict, ok)
 	}
 }
+
+func TestPermanentRulesEqualRevisionDivergenceDoesNotRestoreCleanRule(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	store := &persistenceTestStore{}
+	base := persistenceSnapshot()
+	persistence.Apply(base, store, "/tmp/equal-revision", VerdictAllow)
+	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
+	identical := persistence.Merge(newDecisionSnapshot("profile", "local", 2, []string{FormatExactRule("/tmp/equal-revision", VerdictAllow)}, base.Revision))
+	if verdict, ok := identical.Rules.Lookup("/tmp/equal-revision"); !ok || verdict != VerdictAllow {
+		t.Fatalf("equal-revision identical content changed durable policy: %v, %v", verdict, ok)
+	}
+
+	// An equal revision is only unchanged when its policy content is equal. A
+	// divergent replacement is authoritative for clean/applied rules.
+	removed := persistence.Merge(newDecisionSnapshot("profile", "local", 2, nil, base.Revision))
+	if _, ok := removed.Rules.Lookup("/tmp/equal-revision"); ok {
+		t.Fatal("equal-revision external removal was silently restored")
+	}
+
+	blocked := &persistenceTestStore{release: make(chan struct{})}
+	defer close(blocked.release)
+	updated := persistence.Apply(removed, blocked, "/tmp/local-dirty", VerdictDeny)
+	if verdict, ok := updated.Rules.Lookup("/tmp/local-dirty"); !ok || verdict != VerdictDeny {
+		t.Fatalf("dirty local intent was lost during equal-revision merge: %v, %v", verdict, ok)
+	}
+	mergedDirty := persistence.Merge(newDecisionSnapshot("profile", "local", 2, nil, base.Revision))
+	if verdict, ok := mergedDirty.Rules.Lookup("/tmp/local-dirty"); !ok || verdict != VerdictDeny {
+		t.Fatalf("equal-revision base overwrote newer dirty overlay: %v, %v", verdict, ok)
+	}
+}
+
+func TestPermanentRulesRetireIdleWorkersAndStopWithoutDiscardingDirtyState(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{WorkerIdle: time.Millisecond})
+	for _, id := range []string{"idle-a", "idle-b", "idle-c", "idle-d"} {
+		persistence.Apply(newDecisionSnapshot(id, "local", 2, nil, 1), &persistenceTestStore{}, "/tmp/"+id, VerdictAllow)
+	}
+	waitRule(t, func() bool {
+		diagnostics := persistence.Diagnostics()
+		for _, id := range []string{"idle-a", "idle-b", "idle-c", "idle-d"} {
+			if diagnostics["local/"+id].DirtyCount != 0 {
+				return false
+			}
+		}
+		return true
+	})
+	waitRule(t, func() bool {
+		persistence.mu.Lock()
+		defer persistence.mu.Unlock()
+		for _, state := range persistence.profiles {
+			if state.started {
+				return false
+			}
+		}
+		return true
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := persistence.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	merged := persistence.Apply(persistenceSnapshot(), &persistenceTestStore{}, "/tmp/after-stop", VerdictAllow)
+	if _, ok := merged.Rules.Lookup("/tmp/after-stop"); ok {
+		t.Fatal("stopped persistence accepted a new durable rule")
+	}
+}

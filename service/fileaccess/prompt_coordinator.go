@@ -109,6 +109,15 @@ func (c *PromptCoordinator) FlushPermanentRules(ctx context.Context) error {
 	return c.persistence.Flush(ctx)
 }
 
+// StopPermanentRules retires idle per-profile persistence workers only after
+// the final bounded flush has had a chance to retain every dirty rule.
+func (c *PromptCoordinator) StopPermanentRules(ctx context.Context) error {
+	if c.persistence == nil {
+		return nil
+	}
+	return c.persistence.Stop(ctx)
+}
+
 // Admit transfers a pending Ask to an exact group. The result tells the
 // pipeline whether it already resolved the event or now owns it asynchronously.
 func (c *PromptCoordinator) Admit(ctx context.Context, pending PendingEvent, store RuleStore, snapshot *DecisionSnapshot) (handled, handedOff bool, verdict Verdict, afterResponse func()) {

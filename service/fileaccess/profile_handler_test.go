@@ -15,6 +15,7 @@ type fakeRuleStore struct {
 	id       string
 	appendMu sync.Mutex
 	appended []string
+	errs     []error
 }
 
 func (s *fakeRuleStore) ID() string { return s.id }
@@ -23,6 +24,11 @@ func (s *fakeRuleStore) AppendRule(entry string) error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
 	s.appended = append(s.appended, entry)
+	if len(s.errs) != 0 {
+		err := s.errs[0]
+		s.errs = s.errs[1:]
+		return err
+	}
 	return nil
 }
 
@@ -164,8 +170,13 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 	if v != VerdictAllow {
 		t.Fatalf("first call: got %s, want allow", v)
 	}
+	flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := h.FlushPermanentRules(flushCtx); err != nil {
+		t.Fatalf("FlushPermanentRules: %v", err)
+	}
 	got := lookup.appendedFor(99)
-	if len(got) != 1 || got[0] != "+ /home/alice/notes.txt" {
+	if len(got) != 1 || got[0] != FormatExactRule("/home/alice/notes.txt", VerdictAllow) {
 		t.Fatalf("rule not persisted in profile store: %v", got)
 	}
 
@@ -196,6 +207,11 @@ func TestProfileHandlerPerProfileIsolation(t *testing.T) {
 	if v := h.Decide(context.Background(), &FileEvent{PID: 100, Path: "/home/alice/notes.txt"}); v != VerdictAllow {
 		t.Fatalf("vim: got %s, want allow", v)
 	}
+	flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := h.FlushPermanentRules(flushCtx); err != nil {
+		t.Fatalf("FlushPermanentRules: %v", err)
+	}
 	if p.called != 1 {
 		t.Fatalf("prompter calls after vim: %d, want 1", p.called)
 	}
@@ -212,6 +228,67 @@ func TestProfileHandlerPerProfileIsolation(t *testing.T) {
 	if len(lookup.appendedFor(100)) != 1 || len(lookup.appendedFor(101)) != 0 {
 		t.Errorf("per-profile rule counts wrong: vim=%d cat=%d",
 			len(lookup.appendedFor(100)), len(lookup.appendedFor(101)))
+	}
+}
+
+func TestProfileHandlerCoordinatorlessAlwaysUsesDurableOverlayAndRetry(t *testing.T) {
+	path := "/tmp/coordinatorless-always"
+	store := &fakeRuleStore{id: "profile-C", errs: []error{errors.New("save failed")}}
+	lookup := &fakeLookup{
+		profiles: map[int32]*fakeProfile{77: {id: "profile-C", defAct: profile.DefaultActionAsk}},
+		stores:   map[int32]*fakeRuleStore{77: store},
+	}
+	prompter := &scriptedPrompter{responses: map[string]string{path: ActionAllowAlways}}
+	handler := NewProfileHandler(lookup, prompter, nil, time.Second, nopLogger{})
+
+	if verdict := handler.Decide(context.Background(), &FileEvent{PID: 77, Path: path}); verdict != VerdictAllow {
+		t.Fatalf("first verdict = %s, want allow", verdict)
+	}
+	waitRule(t, func() bool {
+		diagnostics := handler.rulePersistence().Diagnostics()["/profile-C"]
+		return diagnostics.DirtyCount == 1 && diagnostics.PersistentFailure && diagnostics.LastError != nil
+	})
+
+	// The dirty overlay wins immediately, before the failed store has retried.
+	handler.prompter = &scriptedPrompter{responses: map[string]string{path: ActionDeny}}
+	if verdict := handler.Decide(context.Background(), &FileEvent{PID: 77, Path: path}); verdict != VerdictAllow {
+		t.Fatalf("dirty overlay verdict = %s, want allow", verdict)
+	}
+	if handler.prompter.(*scriptedPrompter).called != 0 {
+		t.Fatal("coordinatorless retry path prompted despite the dirty overlay")
+	}
+
+	flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := handler.FlushPermanentRules(flushCtx); err != nil {
+		t.Fatalf("FlushPermanentRules: %v", err)
+	}
+	diagnostics := handler.rulePersistence().Diagnostics()["/profile-C"]
+	if diagnostics.DirtyCount != 0 || diagnostics.PersistentFailure || diagnostics.LastError != nil {
+		t.Fatalf("successful retry did not clear persistent failure: %+v", diagnostics)
+	}
+	if got := lookup.appendedFor(77); len(got) != 2 {
+		t.Fatalf("store attempts = %v, want failed write and real retry", got)
+	}
+}
+
+func TestProfileHandlerCoordinatorlessAlwaysDoesNotPersistBeforeAcceptedResponse(t *testing.T) {
+	path := "/tmp/coordinatorless-unaccepted"
+	store := &fakeRuleStore{id: "profile-D"}
+	lookup := &fakeLookup{
+		profiles: map[int32]*fakeProfile{78: {id: "profile-D", defAct: profile.DefaultActionAsk}},
+		stores:   map[int32]*fakeRuleStore{78: store},
+	}
+	handler := NewProfileHandler(lookup, &scriptedPrompter{responses: map[string]string{path: ActionAllowAlways}}, nil, time.Second, nopLogger{})
+	verdict, afterResponse := handler.DecideForResponse(context.Background(), &FileEvent{PID: 78, Path: path})
+	if verdict != VerdictAllow || afterResponse == nil {
+		t.Fatalf("Always decision = %s, callback=%v", verdict, afterResponse != nil)
+	}
+	if got := lookup.appendedFor(78); len(got) != 0 {
+		t.Fatalf("unaccepted response persisted rule: %v", got)
+	}
+	if diagnostics := handler.rulePersistence().Diagnostics(); len(diagnostics) != 0 {
+		t.Fatalf("unaccepted response created dirty persistence state: %+v", diagnostics)
 	}
 }
 

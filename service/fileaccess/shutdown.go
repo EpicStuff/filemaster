@@ -341,10 +341,15 @@ func (fa *FileAccess) runFinalCleanup(reportCtx context.Context) {
 			} else {
 				fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) { d.PromptDrainError = "" })
 			}
-			if err := coordinator.FlushPermanentRules(reportCtx); err != nil {
+		}
+		if fa.profileHandler != nil {
+			if err := fa.profileHandler.FlushPermanentRules(reportCtx); err != nil {
 				fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) { d.FlushError = err.Error() })
 			} else {
 				fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) { d.FlushError = "" })
+			}
+			if err := fa.profileHandler.StopPermanentRules(reportCtx); err != nil {
+				fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) { d.FlushError = err.Error() })
 			}
 		}
 		close(promptDone)

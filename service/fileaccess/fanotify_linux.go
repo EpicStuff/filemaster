@@ -647,17 +647,29 @@ func (s *fanotifySource) handleEvents(ctx context.Context, handler PendingHandle
 	metaLen := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
 	events := make([]unix.FanotifyEventMetadata, 0, len(buf)/metaLen)
 	var batchErr error
-	var invalidEvent *unix.FanotifyEventMetadata
 
 	for len(buf) >= metaLen {
-		// Copy the fixed metadata prefix out of the read buffer. The overflow
-		// bit and visible descriptor are handled before trusting any lengths.
+		// The fixed metadata prefix is the only safe information until this
+		// record's version and framing have both been validated. Account a
+		// visible descriptor before any routing, but never use an untrusted
+		// Event_len to locate another record.
 		meta := *(*unix.FanotifyEventMetadata)(unsafe.Pointer(&buf[0]))
 		if uint64(meta.Mask)&uint64(unix.FAN_Q_OVERFLOW) != 0 {
 			s.recordQueueOverflow()
 		}
 		if meta.Fd >= 0 {
 			s.accountEventFD(meta.Fd)
+			events = append(events, meta)
+		}
+
+		if meta.Vers != unix.FANOTIFY_METADATA_VERSION {
+			batchErr = fmt.Errorf(
+				"fanotify metadata version mismatch: got %d, want %d; refusing untrusted event length and leaving %d-byte tail unparseable",
+				meta.Vers,
+				unix.FANOTIFY_METADATA_VERSION,
+				len(buf)-metaLen,
+			)
+			break
 		}
 
 		eventLen := int(meta.Event_len)
@@ -671,47 +683,37 @@ func (s *fanotifySource) handleEvents(ctx context.Context, handler PendingHandle
 			structuralErr = fmt.Errorf("invalid fanotify metadata length %d: want %d", meta.Metadata_len, metaLen)
 		}
 		if structuralErr != nil {
-			batchErr = errors.Join(batchErr, structuralErr)
-			if meta.Fd >= 0 {
-				invalidEvent = &meta
-			}
+			batchErr = fmt.Errorf("%w; refusing malformed record boundary and leaving %d-byte tail unparseable", structuralErr, len(buf)-metaLen)
 			break
 		}
 
-		if meta.Vers != unix.FANOTIFY_METADATA_VERSION && batchErr == nil {
-			batchErr = fmt.Errorf("fanotify metadata version mismatch: got %d, want %d", meta.Vers, unix.FANOTIFY_METADATA_VERSION)
-			// The record boundary is still trustworthy, so enter the fatal state
-			// now but continue scanning this already returned kernel buffer.
-			s.enterReaderFatal(batchErr)
-		}
-
-		if meta.Fd >= 0 {
-			events = append(events, meta)
-		}
+		// Both the compatible metadata version and framing are now trusted, so
+		// advancing by Event_len preserves the complete-batch accounting
+		// guarantee for valid kernel buffers.
 		buf = buf[eventLen:]
 	}
-	if len(buf) != 0 {
-		batchErr = errors.Join(batchErr, fmt.Errorf("trailing %d-byte partial fanotify metadata record", len(buf)))
+	if batchErr == nil && len(buf) != 0 {
+		batchErr = fmt.Errorf("trailing %d-byte partial fanotify metadata record is unparseable", len(buf))
 	}
 
 	if batchErr != nil {
-		if !s.readerFatal.Load() {
-			s.enterReaderFatal(batchErr)
-		}
+		s.enterReaderFatal(batchErr)
 		var resolutionErr error
-		if invalidEvent != nil {
-			resolutionErr = errors.Join(resolutionErr, s.resolveAccountedEventForFatal(invalidEvent))
-		}
-		// No event from a fatal batch may reach path resolution, scope
-		// classification, or policy. Resolve every structurally scanned
-		// descriptor directly through the controlled deny/close path.
+		// No safely identified event from a fatal batch may reach path
+		// resolution, scope classification, or policy. Resolve every accounted
+		// descriptor through the controlled deny/close path before closing the
+		// group; an unframed tail is intentionally reported, not guessed at.
 		for i := range events {
 			resolutionErr = errors.Join(resolutionErr, s.resolveAccountedEventForFatal(&events[i]))
 		}
-		return errors.Join(batchErr, resolutionErr)
+		groupErr := s.CloseGroup()
+		if groupErr != nil {
+			groupErr = fmt.Errorf("close fanotify group after fatal malformed batch: %w", groupErr)
+		}
+		return errors.Join(batchErr, resolutionErr, groupErr)
 	}
 
-	// Every descriptor from this read is accounted before any path
+	// Every descriptor from this valid read is accounted before any path
 	// resolution, scope classification, response, or policy work starts.
 	for i := range events {
 		s.handleEvent(ctx, handler, &events[i])
@@ -723,14 +725,9 @@ func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler
 	if meta.Fd < 0 {
 		return
 	}
-	s.accountEventFD(meta.Fd)
-
-	if meta.Vers != unix.FANOTIFY_METADATA_VERSION {
-		err := fmt.Errorf("fanotify metadata version mismatch: got %d, want %d", meta.Vers, unix.FANOTIFY_METADATA_VERSION)
-		s.enterReaderFatal(err)
-		_ = s.resolveAccountedEventForFatal(meta)
-		return
-	}
+	// handleEvents has already validated this metadata and accounted its
+	// descriptor. Routing must never perform accounting: that invariant keeps
+	// descriptor ownership ahead of path resolution and policy work.
 
 	isPerm := uint64(meta.Mask)&fanotifyPermissionEvents != 0
 	if !isPerm {

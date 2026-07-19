@@ -87,7 +87,9 @@ func (fa *FileAccess) Diagnostics() FileAccessDiagnostics {
 	if fa.profileHandler != nil {
 		if coordinator := fa.profileHandler.coordinator(); coordinator != nil {
 			diagnostics.Prompt = coordinator.Diagnostics()
-			diagnostics.PermanentRules = coordinator.RulePersistence().Diagnostics()
+		}
+		if persistence := fa.profileHandler.rulePersistence(); persistence != nil {
+			diagnostics.PermanentRules = persistence.Diagnostics()
 		}
 	}
 	if diagnostics.PermanentRules == nil {
@@ -133,6 +135,12 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 	}
 	if diagnostics.Shutdown.State == LifecycleClosing && len(diagnostics.Shutdown.Unresolved) > 0 {
 		appendWarning("incomplete-shutdown", "error", "Controlled shutdown still has unresolved file access ownership.")
+	}
+	// Mark-removal failures remain enforcement-relevant after the reader and
+	// group have closed. Errors retains history, whereas Failures describes the
+	// current unsuccessful final removal state and clears after verified recovery.
+	if len(diagnostics.Shutdown.Marks.Failures) > 0 || (diagnostics.Shutdown.State != LifecycleRunning && !diagnostics.Shutdown.Marks.Complete) {
+		appendWarning("shutdown-mark-removal-failed", "error", "Controlled shutdown could not remove every fanotify mark; enforcement coverage was not cleanly released.")
 	}
 	if diagnostics.RootAskGate.Requested && !diagnostics.RootAskGate.Open {
 		appendWarning("root-ask-gate", "warning", "Root scope Ask mode remains blocked until all rollout evidence is current.")

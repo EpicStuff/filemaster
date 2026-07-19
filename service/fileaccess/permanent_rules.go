@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	defaultRuleRetryMin = 100 * time.Millisecond
-	defaultRuleRetryMax = 5 * time.Second
+	defaultRuleRetryMin   = 100 * time.Millisecond
+	defaultRuleRetryMax   = 5 * time.Second
+	defaultRuleWorkerIdle = 30 * time.Second
 )
 
 // RulePersistenceOptions makes retry timing deterministic for focused tests.
@@ -21,6 +22,9 @@ type RulePersistenceOptions struct {
 	MinBackoff time.Duration
 	MaxBackoff time.Duration
 	After      func(time.Duration) <-chan time.Time
+	// WorkerIdle bounds how long an idle per-profile writer stays resident.
+	// It is injectable so focused tests do not need wall-clock delays.
+	WorkerIdle time.Duration
 }
 
 // RulePersistenceDiagnostics exposes durable-rule health without making
@@ -75,7 +79,12 @@ type RulePersistence struct {
 	min       time.Duration
 	max       time.Duration
 	after     func(time.Duration) <-chan time.Time
+	idle      time.Duration
 	lifecycle *PipelineLifecycle
+	workers   sync.WaitGroup
+	stop      chan struct{}
+	stopOnce  sync.Once
+	stopped   bool
 }
 
 func NewRulePersistence(observe func(*DecisionSnapshot), options RulePersistenceOptions) *RulePersistence {
@@ -95,6 +104,9 @@ func newRulePersistence(observe func(*DecisionSnapshot), options RulePersistence
 	if options.After == nil {
 		options.After = time.After
 	}
+	if options.WorkerIdle <= 0 {
+		options.WorkerIdle = defaultRuleWorkerIdle
+	}
 	if lifecycle == nil {
 		lifecycle = NewPipelineLifecycle()
 	}
@@ -105,7 +117,9 @@ func newRulePersistence(observe func(*DecisionSnapshot), options RulePersistence
 		min:       options.MinBackoff,
 		max:       options.MaxBackoff,
 		after:     options.After,
+		idle:      options.WorkerIdle,
 		lifecycle: lifecycle,
+		stop:      make(chan struct{}),
 	}
 }
 
@@ -242,6 +256,10 @@ func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pat
 	}
 	key := profileSnapshotKey(snapshot)
 	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return snapshot, false
+	}
 	state := p.profileLocked(key)
 	base := state.baseForLocked(snapshot)
 	if allowBinding && p.bindings[key].store == nil {
@@ -270,6 +288,9 @@ func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pat
 	start := !state.started
 	if start {
 		state.started = true
+		// Register before releasing p.mu so Stop cannot begin Wait while an
+		// accepted Apply is between deciding to start and launching its worker.
+		p.workers.Add(1)
 	}
 	wake := state.wake
 	p.mu.Unlock()
@@ -299,7 +320,13 @@ func (p *RulePersistence) Merge(snapshot *DecisionSnapshot) *DecisionSnapshot {
 	}
 	previousBase := state.base
 	base := state.baseForLocked(snapshot)
-	advancedBase := previousBase != nil && base != previousBase && base.Revision > previousBase.Revision
+	// Revisions are monotonic publication tokens, but callers may legitimately
+	// present a replacement snapshot with the same revision. Treat equal
+	// revisions as unchanged only when their complete decision content matches;
+	// otherwise the replacement is authoritative for clean/applied policy.
+	advancedBase := previousBase != nil && base != previousBase &&
+		(base.Revision > previousBase.Revision ||
+			(base.Revision == previousBase.Revision && !sameDecisionSnapshotPolicy(base, previousBase)))
 	for pattern, rule := range state.applied {
 		if durableExactRuleAtPrecedence(base, rule) {
 			delete(state.applied, pattern)
@@ -317,6 +344,22 @@ func (p *RulePersistence) Merge(snapshot *DecisionSnapshot) *DecisionSnapshot {
 	merged := state.publishLocked(base)
 	p.mu.Unlock()
 	return merged
+}
+
+func sameDecisionSnapshotPolicy(left, right *DecisionSnapshot) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	if left.ProfileID != right.ProfileID || left.Source != right.Source || left.DefaultAction != right.DefaultAction || left.Rules.Default != right.Rules.Default || len(left.Rules.Rules) != len(right.Rules.Rules) {
+		return false
+	}
+	for i, rule := range left.Rules.Rules {
+		other := right.Rules.Rules[i]
+		if rule.Pattern != other.Pattern || rule.Verdict != other.Verdict || rule.Exact != other.Exact {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *RulePersistence) profileLocked(key string) *dirtyRuleProfile {
@@ -404,8 +447,19 @@ func (state *dirtyRuleProfile) publishLocked(base *DecisionSnapshot) *DecisionSn
 }
 
 func (p *RulePersistence) runProfile(key string, state *dirtyRuleProfile) {
-	for range state.wake {
+	defer p.workers.Done()
+	for {
+		select {
+		case <-p.stop:
+			return
+		case <-state.wake:
+		}
 		for {
+			select {
+			case <-p.stop:
+				return
+			default:
+			}
 			rule, binding, ok := p.nextRule(key, state)
 			if !ok {
 				break
@@ -423,9 +477,35 @@ func (p *RulePersistence) runProfile(key string, state *dirtyRuleProfile) {
 				continue
 			}
 			if p.failed(key, state, rule, binding.generation, err) {
-				<-p.after(p.backoff(state))
+				select {
+				case <-p.stop:
+					return
+				case <-p.after(p.backoff(state)):
+				}
 			}
 		}
+
+		idle := time.NewTimer(p.idle)
+		select {
+		case <-p.stop:
+			if !idle.Stop() {
+				<-idle.C
+			}
+			return
+		case <-state.wake:
+			if !idle.Stop() {
+				<-idle.C
+			}
+			continue
+		case <-idle.C:
+		}
+		p.mu.Lock()
+		if p.profiles[key] == state && len(state.dirty) == 0 {
+			state.started = false
+			p.mu.Unlock()
+			return
+		}
+		p.mu.Unlock()
 	}
 }
 
@@ -475,6 +555,11 @@ func (p *RulePersistence) persisted(key string, expected *dirtyRuleProfile, rule
 	if current, ok := state.dirty[rule.pattern]; ok && current.generation == rule.generation {
 		delete(state.dirty, rule.pattern)
 		state.applied[rule.pattern] = rule
+		// A successful write changes the durable base even before the next
+		// profile reload. Retaining that canonical fact lets Merge distinguish an
+		// equal-revision, content-identical reload from one that removed or
+		// changed this accepted exact rule.
+		state.base = snapshotWithDurableExactRule(state.base, rule)
 		state.policyEpoch++
 	}
 	if len(state.dirty) == 0 {
@@ -482,6 +567,27 @@ func (p *RulePersistence) persisted(key string, expected *dirtyRuleProfile, rule
 		state.lastErr = nil
 	}
 	p.mu.Unlock()
+}
+
+func snapshotWithDurableExactRule(base *DecisionSnapshot, rule permanentRule) *DecisionSnapshot {
+	if base == nil {
+		return nil
+	}
+	rules := make([]PathRule, 0, len(base.Rules.Rules)+1)
+	rules = append(rules, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, Exact: true})
+	for _, existing := range base.Rules.Rules {
+		if existing.Exact && existing.Pattern == rule.pattern {
+			continue
+		}
+		rules = append(rules, existing)
+	}
+	return &DecisionSnapshot{
+		ProfileID:     base.ProfileID,
+		Source:        base.Source,
+		DefaultAction: base.DefaultAction,
+		Rules:         PathRules{Rules: rules, Default: base.Rules.Default},
+		Revision:      base.Revision,
+	}
 }
 
 func (p *RulePersistence) failed(key string, expected *dirtyRuleProfile, rule permanentRule, bindingGeneration uint64, err error) bool {
@@ -568,5 +674,35 @@ func (p *RulePersistence) Flush(ctx context.Context) error {
 			return fmt.Errorf("permanent rule flush left %d dirty profiles: %v: %w", len(remaining), remaining, ctx.Err())
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+// Stop ends all per-profile writers after a bounded attempt to persist the
+// current dirty overlay. It never discards dirty state: a flush failure remains
+// visible in Diagnostics and prevents a caller from treating shutdown as clean.
+func (p *RulePersistence) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	flushErr := p.Flush(ctx)
+	p.mu.Lock()
+	if !p.stopped {
+		p.stopped = true
+		p.stopOnce.Do(func() { close(p.stop) })
+	}
+	p.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		p.workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return flushErr
+	case <-ctx.Done():
+		if flushErr != nil {
+			return flushErr
+		}
+		return fmt.Errorf("permanent rule workers did not stop: %w", ctx.Err())
 	}
 }

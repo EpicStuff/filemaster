@@ -49,3 +49,46 @@ func TestFakeSourceReleasesAcceptedResponseAccounting(t *testing.T) {
 		t.Fatalf("accepted fake response leaked accounting: %+v", diagnostics)
 	}
 }
+
+func TestFakeSourceReportsReaderLifecycleAndGroupClosure(t *testing.T) {
+	source := newFakeSource([]FileEvent{{Path: "/tmp/phase8", Op: OpOpen}})
+	lifecycle := NewPipelineLifecycle()
+	source.SetLifecycle(lifecycle)
+	handled := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- source.Run(context.Background(), PendingHandlerFunc(func(_ context.Context, pending PendingEvent) error {
+			err := pending.Respond(VerdictAllow)
+			close(handled)
+			return err
+		}))
+	}()
+
+	<-handled
+	if diagnostics := source.ReaderDiagnostics(); !diagnostics.Running || diagnostics.Exited || diagnostics.OutstandingDescriptors != 0 {
+		t.Fatalf("fake source did not report its active, drained reader: %+v", diagnostics)
+	}
+	lifecycle.BeginClosing(context.Background())
+	if lifecycle.State() != LifecycleClosing {
+		t.Fatalf("lifecycle state = %s, want closing", lifecycle.State())
+	}
+	if diagnostics := source.ReaderDiagnostics(); !diagnostics.Running || diagnostics.Exited {
+		t.Fatalf("fake reader did not remain visible while shutdown was closing: %+v", diagnostics)
+	}
+	if err := source.CloseGroup(); err != nil {
+		t.Fatalf("close fake group: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("fake source run failed: %v", err)
+	}
+	if err := source.WaitReaderExit(context.Background()); err != nil {
+		t.Fatalf("wait for fake reader exit: %v", err)
+	}
+	if diagnostics := source.ReaderDiagnostics(); diagnostics.Running || !diagnostics.Exited || diagnostics.OutstandingDescriptors != 0 {
+		t.Fatalf("fake source did not report its exited, drained reader: %+v", diagnostics)
+	}
+	if response := source.ResponseDiagnostics(); !response.Closed {
+		t.Fatalf("fake source did not report group closure: %+v", response)
+	}
+	lifecycle.PublishClosed(nil)
+}

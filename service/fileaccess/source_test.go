@@ -25,6 +25,10 @@ type fakeSource struct {
 	reconciliationErr error
 	readerDrainErr    error
 	readerExitErr     error
+	readerStarted     bool
+	readerRunning     bool
+	readerExited      bool
+	readerDone        chan struct{}
 	groupCloseErr     error
 	scopeCleanupErr   error
 	scopesCleaned     bool
@@ -39,12 +43,27 @@ type decision struct {
 
 func newFakeSource(events []FileEvent) *fakeSource {
 	return &fakeSource{
-		events: events,
-		closed: make(chan struct{}),
+		events:     events,
+		closed:     make(chan struct{}),
+		readerDone: make(chan struct{}),
 	}
 }
 
 func (s *fakeSource) Run(ctx context.Context, handler PendingHandler) error {
+	s.mu.Lock()
+	s.readerStarted = true
+	s.readerRunning = true
+	s.readerExited = false
+	readerDone := s.readerDone
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.readerRunning = false
+		s.readerExited = true
+		close(readerDone)
+		s.mu.Unlock()
+	}()
+
 	for _, sourceEvent := range s.events {
 		select {
 		case <-ctx.Done():
@@ -141,6 +160,11 @@ func (s *fakeSource) CloseGroup() error {
 	s.groupClosed = true
 	err := s.groupCloseErr
 	s.mu.Unlock()
+	if err == nil {
+		// Closing the fake group unblocks its parked reader, matching the real
+		// fanotify group lifetime without pretending to model kernel behavior.
+		return s.Close()
+	}
 	return err
 }
 
@@ -160,7 +184,23 @@ func (s *fakeSource) ScopeCleanupComplete() bool {
 	return s.scopesCleaned
 }
 
-func (s *fakeSource) WaitReaderExit(context.Context) error { return s.readerExitErr }
+func (s *fakeSource) WaitReaderExit(ctx context.Context) error {
+	s.mu.Lock()
+	started := s.readerStarted
+	exited := s.readerExited
+	done := s.readerDone
+	err := s.readerExitErr
+	s.mu.Unlock()
+	if !started || exited {
+		return err
+	}
+	select {
+	case <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func (s *fakeSource) ReaderDiagnostics() ReaderDiagnostics {
 	s.mu.Lock()
@@ -169,6 +209,8 @@ func (s *fakeSource) ReaderDiagnostics() ReaderDiagnostics {
 		OutstandingDescriptors:     s.outstanding,
 		PeakOutstandingDescriptors: s.peakOutstanding,
 		FailedResponseDescriptors:  append([]int32(nil), s.failedResponses...),
+		Running:                    s.readerRunning,
+		Exited:                     s.readerExited,
 	}
 }
 

@@ -345,12 +345,9 @@ func TestMalformedVisiblePermissionEventsAreDeniedAndFatal(t *testing.T) {
 func TestMalformedVisibleNonPermissionFDIsClosedAndReleased(t *testing.T) {
 	metadataSize := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
 	source := newReaderTestSource(1)
-	closeCalls := 0
+	closed := make(map[int]int)
 	source.responses.close = func(fd int) error {
-		closeCalls++
-		if fd != 203 {
-			t.Fatalf("close fd = %d, want 203", fd)
-		}
+		closed[fd]++
 		return nil
 	}
 
@@ -363,8 +360,8 @@ func TestMalformedVisibleNonPermissionFDIsClosedAndReleased(t *testing.T) {
 		Vers:         unix.FANOTIFY_METADATA_VERSION,
 		Fd:           203,
 	}))
-	if err == nil || closeCalls != 1 {
-		t.Fatalf("batch error=%v close calls=%d, want fatal error and one close", err, closeCalls)
+	if err == nil || closed[203] != 1 || closed[99] != 1 {
+		t.Fatalf("batch error=%v closes=%+v, want event and fatal group each closed once", err, closed)
 	}
 	if diagnostics := source.ReaderDiagnostics(); diagnostics.OutstandingDescriptors != 0 {
 		t.Fatalf("malformed nonpermission accounting = %+v, want released", diagnostics)
@@ -403,11 +400,16 @@ func TestOverflowDetectedBeforeVisibleFDHandling(t *testing.T) {
 
 func TestValidEarlierEventsAreResolvedBeforeMalformedBatchReturns(t *testing.T) {
 	metadataSize := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
-	source := newReaderTestSource(2)
+	source := newReaderTestSource(3)
 	var responses []unix.FanotifyResponse
+	closed := make(map[int]int)
 	source.responses.write = func(_ int, bytes []byte) (int, error) {
 		responses = append(responses, *(*unix.FanotifyResponse)(unsafe.Pointer(&bytes[0])))
 		return len(bytes), nil
+	}
+	source.responses.close = func(fd int) error {
+		closed[fd]++
+		return nil
 	}
 	policyCalls := 0
 	err := source.handleEvents(context.Background(), PendingHandlerFunc(func(context.Context, PendingEvent) error {
@@ -426,26 +428,45 @@ func TestValidEarlierEventsAreResolvedBeforeMalformedBatchReturns(t *testing.T) 
 			Fd:           302,
 			Mask:         unix.FAN_OPEN_PERM,
 		},
+		// This valid-looking record is in an unframed tail. The parser must
+		// not guess its boundary or descriptor location after malformed 302.
+		unix.FanotifyEventMetadata{
+			Vers: unix.FANOTIFY_METADATA_VERSION,
+			Fd:   303,
+			Mask: unix.FAN_OPEN_PERM,
+		},
 	))
-	if err == nil {
-		t.Fatal("valid-plus-malformed batch returned nil error")
+	if err == nil || !strings.Contains(err.Error(), "unparseable") {
+		t.Fatalf("valid-plus-malformed batch error = %v, want explicit unparseable-tail fatal error", err)
 	}
 	if policyCalls != 0 {
 		t.Fatalf("policy calls = %d, want fatal batch to bypass policy", policyCalls)
 	}
 	if len(responses) != 2 {
-		t.Fatalf("responses = %+v, want malformed and earlier event denied", responses)
+		t.Fatalf("responses = %+v, want only safely identified descriptors denied", responses)
 	}
 	responded := map[int32]uint32{}
 	for _, response := range responses {
+		if _, exists := responded[response.Fd]; exists {
+			t.Fatalf("duplicate response for fd %d: %+v", response.Fd, responses)
+		}
 		responded[response.Fd] = response.Response
 	}
 	if responded[301] != unix.FAN_DENY || responded[302] != unix.FAN_DENY {
 		t.Fatalf("responses = %+v, want fds 301 and 302 denied", responses)
 	}
+	if _, exists := responded[303]; exists {
+		t.Fatalf("unframed tail fd 303 was guessed and responded: %+v", responses)
+	}
+	if closed[301] != 1 || closed[302] != 1 {
+		t.Fatalf("event descriptor closes = %+v, want fds 301 and 302 exactly once", closed)
+	}
 	diagnostics := source.ReaderDiagnostics()
-	if diagnostics.OutstandingDescriptors != 0 || diagnostics.PeakOutstandingDescriptors != 2 || !diagnostics.Fatal {
+	if diagnostics.OutstandingDescriptors != 0 || diagnostics.PeakOutstandingDescriptors != 2 || !diagnostics.Fatal || !diagnostics.Degraded {
 		t.Fatalf("valid-plus-malformed diagnostics = %+v", diagnostics)
+	}
+	if !strings.Contains(diagnostics.FatalError, "unparseable") || !source.ResponseDiagnostics().Closed {
+		t.Fatalf("fatal tail/group diagnostics = %+v response=%+v", diagnostics, source.ResponseDiagnostics())
 	}
 }
 
@@ -496,18 +517,11 @@ func TestMetadataVersionMismatchTerminatesSourceBeforeLaterPolicy(t *testing.T) 
 	if readCalls != 1 || policyCalls != 0 {
 		t.Fatalf("read calls=%d policy calls=%d, want source stop after first read without policy", readCalls, policyCalls)
 	}
-	if len(responses) != 2 {
-		t.Fatalf("fatal mismatch responses = %+v, want both first-batch descriptors denied", responses)
-	}
-	responded := map[int32]uint32{}
-	for _, response := range responses {
-		responded[response.Fd] = response.Response
-	}
-	if responded[401] != unix.FAN_DENY || responded[402] != unix.FAN_DENY {
-		t.Fatalf("fatal mismatch responses = %+v, want fds 401 and 402 denied", responses)
+	if len(responses) != 1 || responses[0].Fd != 401 || responses[0].Response != unix.FAN_DENY {
+		t.Fatalf("fatal mismatch responses = %+v, want only safely identified fd 401 denied", responses)
 	}
 	diagnostics := source.ReaderDiagnostics()
-	if !diagnostics.Fatal || !diagnostics.Degraded || !strings.Contains(diagnostics.FatalError, "metadata version mismatch") {
+	if !diagnostics.Fatal || !diagnostics.Degraded || !strings.Contains(diagnostics.FatalError, "metadata version mismatch") || !strings.Contains(diagnostics.FatalError, "unparseable") {
 		t.Fatalf("metadata mismatch diagnostics = %+v", diagnostics)
 	}
 	if diagnostics.OutstandingDescriptors != 0 || !source.responses.draining.Load() {
@@ -516,6 +530,7 @@ func TestMetadataVersionMismatchTerminatesSourceBeforeLaterPolicy(t *testing.T) 
 }
 
 func TestMetadataVersionMismatchFatalScanResolvesWholeBatch(t *testing.T) {
+	metadataSize := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
 	source := newReaderTestSource(4)
 	firstBatch := fanotifyEventBytes(
 		unix.FanotifyEventMetadata{
@@ -524,9 +539,13 @@ func TestMetadataVersionMismatchFatalScanResolvesWholeBatch(t *testing.T) {
 			Mask: unix.FAN_OPEN_PERM,
 		},
 		unix.FanotifyEventMetadata{
-			Vers: unix.FANOTIFY_METADATA_VERSION + 1,
-			Fd:   412,
-			Mask: unix.FAN_OPEN_PERM,
+			// A mismatched version makes this length untrusted even though it
+			// appears to span the returned buffer.
+			Event_len:    uint32(metadataSize * 3),
+			Metadata_len: uint16(metadataSize),
+			Vers:         unix.FANOTIFY_METADATA_VERSION + 1,
+			Fd:           412,
+			Mask:         unix.FAN_OPEN_PERM,
 		},
 		unix.FanotifyEventMetadata{
 			Vers: unix.FANOTIFY_METADATA_VERSION,
@@ -562,8 +581,8 @@ func TestMetadataVersionMismatchFatalScanResolvesWholeBatch(t *testing.T) {
 		return nil
 	}))
 
-	if err == nil || !strings.Contains(err.Error(), "metadata version mismatch") {
-		t.Fatalf("source error = %v, want metadata version mismatch", err)
+	if err == nil || !strings.Contains(err.Error(), "metadata version mismatch") || !strings.Contains(err.Error(), "refusing untrusted event length") {
+		t.Fatalf("source error = %v, want version mismatch with untrusted-length diagnostic", err)
 	}
 	if readCalls != 1 {
 		t.Fatalf("read calls = %d, want exactly one", readCalls)
@@ -571,20 +590,26 @@ func TestMetadataVersionMismatchFatalScanResolvesWholeBatch(t *testing.T) {
 	if policyCalls != 0 {
 		t.Fatalf("policy calls = %d, want zero", policyCalls)
 	}
-	if len(responses) != 3 {
-		t.Fatalf("fatal scan responses = %+v, want three denials", responses)
+	if len(responses) != 2 {
+		t.Fatalf("fatal scan responses = %+v, want only safely identified denials", responses)
 	}
 	responded := map[int32]uint32{}
 	for _, response := range responses {
+		if _, exists := responded[response.Fd]; exists {
+			t.Fatalf("duplicate response for fd %d: %+v", response.Fd, responses)
+		}
 		responded[response.Fd] = response.Response
 	}
-	for _, fd := range []int32{411, 412, 413} {
+	for _, fd := range []int32{411, 412} {
 		if responded[fd] != unix.FAN_DENY {
 			t.Fatalf("fatal scan responses = %+v, want fd %d denied", responses, fd)
 		}
 	}
+	if _, exists := responded[413]; exists {
+		t.Fatalf("fd 413 in untrusted tail was responded: %+v", responses)
+	}
 	diagnostics := source.ReaderDiagnostics()
-	if diagnostics.OutstandingDescriptors != 0 || diagnostics.PeakOutstandingDescriptors != 3 {
+	if diagnostics.OutstandingDescriptors != 0 || diagnostics.PeakOutstandingDescriptors != 2 || !strings.Contains(diagnostics.FatalError, "unparseable") {
 		t.Fatalf("fatal scan descriptor diagnostics = %+v", diagnostics)
 	}
 	source.accountedMu.Lock()

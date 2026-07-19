@@ -351,13 +351,17 @@ func TestShutdownResponseFailureRemainsExplicitlyOwned(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	source.handleEvent(context.Background(), PendingHandlerFunc(func(context.Context, PendingEvent) error {
-		return nil
-	}), &unix.FanotifyEventMetadata{
+	metadata := &unix.FanotifyEventMetadata{
 		Vers: unix.FANOTIFY_METADATA_VERSION,
 		Fd:   int32(file.Fd()),
 		Mask: unix.FAN_OPEN_PERM,
-	})
+	}
+	if !source.accountEventFD(metadata.Fd) {
+		t.Fatal("accountEventFD rejected the test descriptor")
+	}
+	source.handleEvent(context.Background(), PendingHandlerFunc(func(context.Context, PendingEvent) error {
+		return nil
+	}), metadata)
 	diagnostics := source.ReaderDiagnostics()
 	if diagnostics.OutstandingDescriptors != 1 || len(diagnostics.FailedResponseDescriptors) != 1 {
 		t.Fatalf("failed response owner not retained: %+v", diagnostics)

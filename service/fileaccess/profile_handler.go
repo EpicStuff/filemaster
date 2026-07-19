@@ -127,8 +127,9 @@ type ProfileHandler struct {
 	promptAdmission   func(string) (func(), bool)
 	rootAskGate       func() RootAskGateStatus
 
-	promptCoordinatorMu sync.RWMutex
-	promptCoordinator   *PromptCoordinator
+	promptCoordinatorMu   sync.RWMutex
+	promptCoordinator     *PromptCoordinator
+	standalonePersistence *RulePersistence
 
 	// The daemon's own profile is a complete in-memory decision snapshot.
 	// It is refreshed before fanotify marks are installed and on profile
@@ -141,6 +142,9 @@ type ProfileHandler struct {
 
 func (h *ProfileHandler) setLifecycle(lifecycle *PipelineLifecycle) {
 	h.lifecycle = lifecycle
+	if h.standalonePersistence != nil {
+		h.standalonePersistence.lifecycle = lifecycle
+	}
 }
 
 // NewProfileHandler returns a profile-backed handler. The fallback
@@ -164,8 +168,12 @@ func NewProfileHandler(lookup ProfileLookup, prompter Prompter, fallback Handler
 		fallback: fallback,
 		log:      log,
 	}
+	handler.standalonePersistence = newRulePersistence(handler.publishSnapshot, RulePersistenceOptions{}, NewPipelineLifecycle())
 	if publisher, ok := lookup.(interface{ setSnapshotObserver(func(*DecisionSnapshot)) }); ok {
 		publisher.setSnapshotObserver(handler.publishSnapshot)
+	}
+	if overlay, ok := lookup.(interface{ setRulePersistence(*RulePersistence) }); ok {
+		overlay.setRulePersistence(handler.standalonePersistence)
 	}
 	return handler
 }
@@ -208,6 +216,27 @@ func (h *ProfileHandler) coordinator() *PromptCoordinator {
 	h.promptCoordinatorMu.RLock()
 	defer h.promptCoordinatorMu.RUnlock()
 	return h.promptCoordinator
+}
+
+func (h *ProfileHandler) rulePersistence() *RulePersistence {
+	if coordinator := h.coordinator(); coordinator != nil && coordinator.RulePersistence() != nil {
+		return coordinator.RulePersistence()
+	}
+	return h.standalonePersistence
+}
+
+func (h *ProfileHandler) FlushPermanentRules(ctx context.Context) error {
+	if persistence := h.rulePersistence(); persistence != nil {
+		return persistence.Flush(ctx)
+	}
+	return nil
+}
+
+func (h *ProfileHandler) StopPermanentRules(ctx context.Context) error {
+	if persistence := h.rulePersistence(); persistence != nil {
+		return persistence.Stop(ctx)
+	}
+	return nil
 }
 
 func (h *ProfileHandler) acquirePromptSlot(profileKey string) (func(), bool) {
@@ -434,12 +463,22 @@ func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (V
 	e.ProfileName = res.ProfileName
 	e.ProfileLinkedPath = res.ProfileLinkedPath
 
-	rules := res.ParsedRules
-	defaultAction := res.DefaultAction
-	if res.Snapshot != nil {
-		rules = res.Snapshot.Rules
-		defaultAction = res.Snapshot.DefaultAction
+	snapshot := res.Snapshot
+	if snapshot == nil {
+		snapshot = &DecisionSnapshot{
+			ProfileID:     e.ProfileID,
+			Source:        e.ProfileSource,
+			DefaultAction: res.DefaultAction,
+			Rules:         res.ParsedRules,
+		}
 	}
+	if h.coordinator() == nil {
+		if persistence := h.rulePersistence(); persistence != nil {
+			snapshot = persistence.Merge(snapshot)
+		}
+	}
+	rules := snapshot.Rules
+	defaultAction := snapshot.DefaultAction
 	if verdict, ok := rules.Lookup(e.Path); ok {
 		return verdict, nil
 	}
@@ -472,14 +511,14 @@ func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (V
 		return VerdictDeny, nil
 	case ActionAllowAlways:
 		return VerdictAllow, func() {
-			if err := res.Store.AppendRule(FormatRule(e.Path, VerdictAllow)); err != nil {
-				h.log.Error("persist allow-always failed", "profile", res.Store.ID(), "path", e.Path, "err", err)
+			if persistence := h.rulePersistence(); persistence != nil {
+				persistence.Apply(snapshot, res.Store, e.Path, VerdictAllow)
 			}
 		}
 	case ActionDenyAlways:
 		return VerdictDeny, func() {
-			if err := res.Store.AppendRule(FormatRule(e.Path, VerdictDeny)); err != nil {
-				h.log.Error("persist deny-always failed", "profile", res.Store.ID(), "path", e.Path, "err", err)
+			if persistence := h.rulePersistence(); persistence != nil {
+				persistence.Apply(snapshot, res.Store, e.Path, VerdictDeny)
 			}
 		}
 	default:

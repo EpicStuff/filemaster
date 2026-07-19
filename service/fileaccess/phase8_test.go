@@ -291,3 +291,49 @@ func TestWarningStatesCoalesceUpdateAndClear(t *testing.T) {
 		t.Fatalf("recovered warning was not cleared: %+v", got)
 	}
 }
+
+func TestShutdownMarkRemovalFailureWarningSurvivesClosed(t *testing.T) {
+	lifecycle := NewPipelineLifecycle()
+	lifecycle.BeginClosing(context.Background())
+	lifecycle.PublishClosed(nil)
+	fa := &FileAccess{
+		source:                  &phase8DiagnosticSource{},
+		lifecycle:               lifecycle,
+		effectivePipelineConfig: DefaultDecisionPipelineConfig(),
+		states:                  mgr.New("fileaccess phase8 shutdown warning states").NewStateMgr(),
+		warningStates:           make(map[string]DegradedWarning),
+		shutdownDiagnostics: ShutdownDiagnostics{Marks: MarkRemovalDiagnostics{
+			Final:    true,
+			Complete: false,
+			Failures: []MarkRemovalFailure{{MountID: 7, MountPath: "/scope", Error: "injected removal failure"}},
+		}},
+	}
+
+	if diagnostics := fa.Diagnostics(); diagnostics.Shutdown.State != LifecycleClosed || len(diagnostics.Shutdown.Marks.Failures) != 1 || !hasWarning(diagnostics.Warnings, "shutdown-mark-removal-failed") {
+		t.Fatalf("closed shutdown lost its mark removal warning: %+v", diagnostics)
+	}
+	fa.refreshWarningStates()
+	if states := fa.States().Export().States; len(states) != 1 || states[0].ID != "fileaccess/shutdown-mark-removal-failed" {
+		t.Fatalf("mark removal warning was not published through manager state: %+v", states)
+	}
+
+	fa.shutdownMu.Lock()
+	fa.shutdownDiagnostics.Marks = MarkRemovalDiagnostics{Final: true, Complete: true}
+	fa.shutdownMu.Unlock()
+	fa.refreshWarningStates()
+	if diagnostics := fa.Diagnostics(); hasWarning(diagnostics.Warnings, "shutdown-mark-removal-failed") {
+		t.Fatalf("successful final mark removal retained warning: %+v", diagnostics.Warnings)
+	}
+	if states := fa.States().Export().States; len(states) != 0 {
+		t.Fatalf("recovered mark removal warning was not cleared: %+v", states)
+	}
+}
+
+func hasWarning(warnings []DegradedWarning, id string) bool {
+	for _, warning := range warnings {
+		if warning.ID == id {
+			return true
+		}
+	}
+	return false
+}
