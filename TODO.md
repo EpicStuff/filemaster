@@ -111,6 +111,9 @@ allow/deny, not redirect.
 - [ ] Build a launcher shim that applies the ruleset before `execve` (Landlock
 	must be set up by the parent).
 
+## other stuff
+- make sure user is notified of failed fan mark
+
 ## Potential Future Features
 - comptemplate clamav integration feasability
 - comptemplate app groups feasablilty
