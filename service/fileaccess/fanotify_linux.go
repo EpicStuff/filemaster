@@ -512,7 +512,10 @@ func (s *fanotifySource) SetWatchPaths(paths []string) error {
 		// Candidate scopes are intentionally not active until every required
 		// mount mark has been verified. Events from a partially marked
 		// candidate are denied by handleEvent rather than silently allowed.
-		s.pendingScopes.Store(snapshotFromScopes(next))
+		// Only newly added or changed scopes are pending; scopes already active
+		// stay on their policy path so one unmarkable scope cannot fail-closed
+		// unrelated, already-verified scopes.
+		s.pendingScopes.Store(pendingScopesFrom(next, s.activeScopes.Load()))
 	})
 	if !published {
 		closeNewScopes(next, s.scopes)

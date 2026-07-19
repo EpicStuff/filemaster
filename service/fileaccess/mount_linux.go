@@ -242,6 +242,30 @@ func snapshotFromScopes(scopes map[string]*policyScope) *scopeSnapshot {
 	return snapshot
 }
 
+// pendingScopesFrom returns only the scopes in next that are not already active
+// (by canonical path) in the current snapshot. A partially marked candidate is
+// denied wholesale by handleEvent while its mount marks are verified; scoping
+// that deny to newly added or changed scopes keeps already-verified, unchanged
+// scopes on their normal policy path. Otherwise one unmarkable new scope would
+// fail-closed every access to every configured scope until reconcile completes.
+func pendingScopesFrom(next map[string]*policyScope, active *scopeSnapshot) *scopeSnapshot {
+	activeCanonical := make(map[string]struct{})
+	if active != nil {
+		for _, scope := range active.Scopes {
+			activeCanonical[scope.Canonical] = struct{}{}
+		}
+	}
+	full := snapshotFromScopes(next)
+	pending := &scopeSnapshot{Scopes: make([]scopeMatch, 0, len(full.Scopes))}
+	for _, scope := range full.Scopes {
+		if _, verified := activeCanonical[scope.Canonical]; verified {
+			continue
+		}
+		pending.Scopes = append(pending.Scopes, scope)
+	}
+	return pending
+}
+
 func mutableScopes(scopes map[string]*policyScope) []*policyScope {
 	configured := make([]string, 0, len(scopes))
 	for path := range scopes {

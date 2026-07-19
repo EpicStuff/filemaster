@@ -217,6 +217,49 @@ func TestScopeTransitionPublishesOnlyVerifiedNewScope(t *testing.T) {
 	}
 }
 
+// TestUnverifiedNewScopeDoesNotDenyVerifiedUnchangedScopes is the regression
+// test for the scope over-deny blast radius: when a newly added scope fails to
+// mark, only that scope must be denied-until-verified. Accesses to an
+// already-active, unchanged scope must stay on the normal policy path, not be
+// fail-closed for as long as the unrelated scope stays unmarkable.
+func TestUnverifiedNewScopeDoesNotDenyVerifiedUnchangedScopes(t *testing.T) {
+	stableRoot := t.TempDir()
+	newRoot := t.TempDir()
+	failNew := false
+	s := newReconciliationTestSource([]mountInfo{{ID: 1, MountPoint: "/"}, {ID: 2, MountPoint: stableRoot}, {ID: 3, MountPoint: newRoot}}, func(_ uint, _ uint64, path string) error {
+		if path == newRoot && failNew {
+			return errors.New("injected mark failure")
+		}
+		return nil
+	})
+
+	if err := s.SetWatchPaths([]string{stableRoot}); err != nil {
+		t.Fatal(err)
+	}
+	if !snapshotContains(s.activeScopes.Load(), stableRoot) {
+		t.Fatal("stable scope did not become active")
+	}
+
+	// Add a second scope whose required mount can never be marked.
+	failNew = true
+	if err := s.SetWatchPaths([]string{stableRoot, newRoot}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !s.pending {
+		t.Fatal("scope activation should stay pending while the new mount is unmarkable")
+	}
+	if !s.pathInPendingScope(newRoot) {
+		t.Fatal("the unverified new scope must be denied-until-verified")
+	}
+	if s.pathInPendingScope(stableRoot) {
+		t.Fatal("the unchanged, already-verified scope must NOT be denied by pending")
+	}
+	if !s.pathInActiveScope(stableRoot) {
+		t.Fatal("the unchanged scope lost its active-policy path")
+	}
+}
+
 func TestMountMaskChangesOnlyChangedBits(t *testing.T) {
 	root := t.TempDir()
 	var calls []struct {
