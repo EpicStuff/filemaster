@@ -172,21 +172,3 @@ func (h *PromptHandler) appendRuleEntry(exe string, rule PathRule) error {
 	}
 	return nil
 }
-
-func (h *PromptHandler) apply(e FileEvent, action string) Verdict {
-	switch action {
-	case ActionAllow:
-		return VerdictAllow
-	case ActionDeny:
-		return VerdictDeny
-	case ActionAllowAlways:
-		h.appendRule(e.Exe, e.Path, e.Op, e.IsDir, VerdictAllow)
-		return VerdictAllow
-	case ActionDenyAlways:
-		h.appendRule(e.Exe, e.Path, e.Op, e.IsDir, VerdictDeny)
-		return VerdictDeny
-	default:
-		// Unknown action ID -- default-deny.
-		return VerdictDeny
-	}
-}

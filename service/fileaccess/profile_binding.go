@@ -126,12 +126,6 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	return res, nil
 }
 
-// parsedRulesFor returns the cached PathRules for id, re-parsing only
-// when the raw rule count has changed.
-func (l *processProfileLookup) parsedRulesFor(id string, raw []string) PathRules {
-	return l.snapshotFor(id, "", profile.DefaultActionAsk, raw).Rules
-}
-
 func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint8, raw []string) *DecisionSnapshot {
 	snapshot, replaced := l.snapshotForRunning(id, source, defaultAction, raw)
 	if !replaced {

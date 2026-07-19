@@ -197,28 +197,6 @@ func discoverRequiredMounts(scopes []*policyScope, mounts []mountInfo) (map[int]
 	return required, nil
 }
 
-func unionScopes(current, desired *scopeSnapshot) *scopeSnapshot {
-	byConfigured := make(map[string]scopeMatch)
-	for _, snapshot := range []*scopeSnapshot{current, desired} {
-		if snapshot == nil {
-			continue
-		}
-		for _, scope := range snapshot.Scopes {
-			byConfigured[scope.Configured] = scope
-		}
-	}
-	configured := make([]string, 0, len(byConfigured))
-	for path := range byConfigured {
-		configured = append(configured, path)
-	}
-	sort.Strings(configured)
-	union := &scopeSnapshot{Scopes: make([]scopeMatch, 0, len(configured))}
-	for _, path := range configured {
-		union.Scopes = append(union.Scopes, byConfigured[path])
-	}
-	return union
-}
-
 func sortedMountIDs(mounts map[int]mountInfo) []int {
 	ids := make([]int, 0, len(mounts))
 	for id := range mounts {
