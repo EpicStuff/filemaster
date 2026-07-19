@@ -677,32 +677,34 @@ func (p *RulePersistence) Flush(ctx context.Context) error {
 	}
 }
 
-// Stop ends all per-profile writers after a bounded attempt to persist the
-// current dirty overlay. It never discards dirty state: a flush failure remains
-// visible in Diagnostics and prevents a caller from treating shutdown as clean.
+// StopAdmission rejects future persistence requests and signals every writer
+// to exit once any in-progress store call returns. It does not discard dirty
+// state and intentionally does not wait under p.mu.
+func (p *RulePersistence) StopAdmission() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped {
+		return
+	}
+	p.stopped = true
+	p.stopOnce.Do(func() { close(p.stop) })
+}
+
+// WaitWorkers joins every per-profile writer. Store calls are not
+// cancellable, so this is deliberately independent of a bounded flush/report
+// context: final lifecycle closure must wait for real worker exit.
+func (p *RulePersistence) WaitWorkers() {
+	p.workers.Wait()
+}
+
+// Stop preserves the standalone convenience contract: flush with ctx, reject
+// new work, then join workers even if the bounded flush deadline expired.
 func (p *RulePersistence) Stop(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	flushErr := p.Flush(ctx)
-	p.mu.Lock()
-	if !p.stopped {
-		p.stopped = true
-		p.stopOnce.Do(func() { close(p.stop) })
-	}
-	p.mu.Unlock()
-	done := make(chan struct{})
-	go func() {
-		p.workers.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return flushErr
-	case <-ctx.Done():
-		if flushErr != nil {
-			return flushErr
-		}
-		return fmt.Errorf("permanent rule workers did not stop: %w", ctx.Err())
-	}
+	p.StopAdmission()
+	p.WaitWorkers()
+	return flushErr
 }

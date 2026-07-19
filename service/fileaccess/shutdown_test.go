@@ -874,3 +874,60 @@ func TestShutdownReconciliationPreventsClosedUntilExit(t *testing.T) {
 		t.Fatal("reconciliation release did not allow Closed publication")
 	}
 }
+
+func TestShutdownWaitsForBlockedPermanentRuleWorkerAfterReport(t *testing.T) {
+	lifecycle := NewPipelineLifecycle()
+	source := &shutdownFakeSource{
+		markResult: MarkRemovalResult{Complete: true},
+		response:   ResponseWriterDiagnostics{CurrentFD: -1},
+	}
+	fileAccess := newShutdownTestFileAccess(source, lifecycle)
+	handler := NewProfileHandler(&fakeLookup{}, nil, nil, time.Second, nopLogger{})
+	handler.setLifecycle(lifecycle)
+	fileAccess.profileHandler = handler
+
+	store := &persistenceTestStore{started: make(chan struct{}, 1), release: make(chan struct{})}
+	persistence := handler.rulePersistence()
+	persistence.Apply(persistenceSnapshot(), store, "/tmp/blocked-shutdown-rule", VerdictAllow)
+	<-store.started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := fileAccess.Shutdown(ctx); err == nil {
+		t.Fatal("blocked persistent writer unexpectedly produced a clean shutdown report")
+	}
+	if lifecycle.State() != LifecycleClosing {
+		t.Fatalf("lifecycle = %s, want closing while persistence worker is blocked", lifecycle.State())
+	}
+	select {
+	case <-fileAccess.shutdownFinalDone:
+		t.Fatal("final cleanup completed before the blocked persistence worker exited")
+	default:
+	}
+	if diagnostics := persistence.Diagnostics()["local/profile"]; diagnostics.DirtyCount != 1 {
+		t.Fatalf("blocked write lost dirty state: %+v", diagnostics)
+	}
+	waitRule(t, func() bool {
+		persistence.mu.Lock()
+		defer persistence.mu.Unlock()
+		return persistence.stopped
+	})
+	merged := persistence.Apply(persistenceSnapshot(), &persistenceTestStore{}, "/tmp/rejected-after-shutdown", VerdictDeny)
+	if _, ok := merged.Rules.Lookup("/tmp/rejected-after-shutdown"); ok {
+		t.Fatal("shutdown accepted a new persistence request")
+	}
+
+	close(store.release)
+	select {
+	case <-fileAccess.shutdownFinalDone:
+	case <-time.After(time.Second):
+		t.Fatal("releasing the store call did not complete final shutdown cleanup")
+	}
+	if lifecycle.State() != LifecycleClosed {
+		t.Fatalf("lifecycle = %s, want closed after persistence worker exit", lifecycle.State())
+	}
+	persistence.WaitWorkers()
+	if diagnostics := persistence.Diagnostics()["local/profile"]; diagnostics.DirtyCount != 0 || diagnostics.PersistentFailure {
+		t.Fatalf("successful blocked write did not settle diagnostics: %+v", diagnostics)
+	}
+}

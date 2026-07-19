@@ -239,6 +239,18 @@ func (h *ProfileHandler) StopPermanentRules(ctx context.Context) error {
 	return nil
 }
 
+func (h *ProfileHandler) StopPermanentRuleAdmission() {
+	if persistence := h.rulePersistence(); persistence != nil {
+		persistence.StopAdmission()
+	}
+}
+
+func (h *ProfileHandler) WaitPermanentRuleWorkers() {
+	if persistence := h.rulePersistence(); persistence != nil {
+		persistence.WaitWorkers()
+	}
+}
+
 func (h *ProfileHandler) acquirePromptSlot(profileKey string) (func(), bool) {
 	h.promptAdmissionMu.RLock()
 	admission := h.promptAdmission

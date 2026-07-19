@@ -534,3 +534,36 @@ func TestPermanentRulesRetireIdleWorkersAndStopWithoutDiscardingDirtyState(t *te
 		t.Fatal("stopped persistence accepted a new durable rule")
 	}
 }
+
+func TestPermanentRulesStopWaitsForBlockedWorkerAfterFlushDeadline(t *testing.T) {
+	store := &persistenceTestStore{started: make(chan struct{}, 1), release: make(chan struct{})}
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	persistence.Apply(persistenceSnapshot(), store, "/tmp/blocked-stop", VerdictAllow)
+	<-store.started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- persistence.Stop(ctx) }()
+	<-ctx.Done()
+	select {
+	case err := <-done:
+		t.Fatalf("Stop returned before blocked worker exited: %v", err)
+	default:
+	}
+	waitRule(t, func() bool {
+		persistence.mu.Lock()
+		defer persistence.mu.Unlock()
+		return persistence.stopped
+	})
+	merged := persistence.Apply(persistenceSnapshot(), &persistenceTestStore{}, "/tmp/rejected-after-stop", VerdictDeny)
+	if _, ok := merged.Rules.Lookup("/tmp/rejected-after-stop"); ok {
+		t.Fatal("persistence accepted a rule after stop admission began")
+	}
+
+	close(store.release)
+	if err := <-done; err == nil {
+		t.Fatal("Stop lost the bounded flush timeout")
+	}
+	persistence.WaitWorkers()
+}

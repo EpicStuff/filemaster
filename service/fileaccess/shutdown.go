@@ -348,9 +348,11 @@ func (fa *FileAccess) runFinalCleanup(reportCtx context.Context) {
 			} else {
 				fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) { d.FlushError = "" })
 			}
-			if err := fa.profileHandler.StopPermanentRules(reportCtx); err != nil {
-				fa.updateShutdownDiagnostics(func(d *ShutdownDiagnostics) { d.FlushError = err.Error() })
-			}
+			// Reporting bounds only durable storage. Once it finishes, reject new
+			// persistence and keep final cleanup alive until every in-flight store
+			// call returns and its writer has actually exited.
+			fa.profileHandler.StopPermanentRuleAdmission()
+			fa.profileHandler.WaitPermanentRuleWorkers()
 		}
 		close(promptDone)
 	}()
