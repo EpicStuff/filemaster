@@ -142,6 +142,34 @@ func TestDeletedEventPathIsUnresolved(t *testing.T) {
 	}
 }
 
+// TestLiveEventPathResolvesToRealPath covers the real fd->path kernel boundary
+// (readlink of /proc/self/fd/N) without any privilege, so it runs on every
+// default `go test`. It complements the deleted-path negative case.
+func TestLiveEventPathResolvesToRealPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "live")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	resolved, ok := resolveEventPath("/proc/self/fd/" + strconv.Itoa(int(f.Fd())))
+	if !ok {
+		t.Fatal("live event path was not resolved")
+	}
+	// t.TempDir may sit under a symlinked prefix (e.g. /tmp -> /private/tmp);
+	// the kernel returns the canonical target, so compare on the canonical form.
+	want, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != want {
+		t.Fatalf("resolved path = %q, want %q", resolved, want)
+	}
+}
+
 func TestMountReconciliationRetainsPartialCoverageAndRetries(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "nested")

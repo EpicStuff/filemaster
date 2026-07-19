@@ -26,12 +26,15 @@ const (
 // a child process with a private mount namespace. It never marks the host root:
 // the only configured scope is a bind mount created below t.TempDir().
 //
-// Run explicitly on a capable Linux host:
-//
-//	FM_FANOTIFY_INTEGRATION=1 go test ./service/fileaccess -run '^TestConfinedFanotifyIntegration$' -count=1 -v -timeout=45s
+// It runs automatically under `go test ./service/fileaccess/` whenever the
+// process is root (the only case where a real fanotify group and mount marks
+// are possible at all), giving the kernel boundary an automatic regression
+// guard on capable CI. On non-root hosts, or when CAP_SYS_ADMIN / namespaces /
+// thread resources are unavailable, it skips cleanly rather than failing. Set
+// FM_FANOTIFY_INTEGRATION=1 to force the attempt regardless of euid.
 func TestConfinedFanotifyIntegration(t *testing.T) {
-	if os.Getenv(confinedFanotifyIntegrationEnv) != "1" {
-		t.Skipf("set %s=1 to run the real fanotify integration harness", confinedFanotifyIntegrationEnv)
+	if os.Getenv(confinedFanotifyIntegrationEnv) != "1" && os.Geteuid() != 0 {
+		t.Skipf("run as root or set %s=1 to exercise the real fanotify integration harness", confinedFanotifyIntegrationEnv)
 	}
 	if os.Getenv(confinedFanotifyIntegrationChildEnv) == "1" {
 		testConfinedFanotifyIntegrationChild(t)
@@ -43,7 +46,15 @@ func TestConfinedFanotifyIntegration(t *testing.T) {
 	command.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWNS}
 	output, err := command.CombinedOutput()
 	if err != nil {
-		if errors.Is(err, syscall.EPERM) || strings.Contains(string(output), "requires CAP_SYS_ADMIN") || strings.Contains(string(output), "private mount namespace unavailable") {
+		// Anything that means "this host cannot host the harness" is a skip, not
+		// a failure: missing CAP_SYS_ADMIN, no namespace support, or exhausted
+		// thread/process resources (constrained sandboxes cap clone/pthread).
+		lower := strings.ToLower(string(output))
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EAGAIN) ||
+			strings.Contains(lower, "requires cap_sys_admin") ||
+			strings.Contains(lower, "private mount namespace unavailable") ||
+			strings.Contains(lower, "resource temporarily unavailable") ||
+			strings.Contains(lower, "operation not permitted") {
 			t.Skipf("confined fanotify integration unavailable: %s", strings.TrimSpace(string(output)))
 		}
 		t.Fatalf("confined fanotify integration child failed: %v\n%s", err, output)
