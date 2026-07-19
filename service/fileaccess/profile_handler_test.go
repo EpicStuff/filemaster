@@ -50,9 +50,13 @@ type fakeLookup struct {
 
 	mu     sync.Mutex
 	stores map[int32]*fakeRuleStore
+	calls  int
 }
 
 func (l *fakeLookup) Lookup(_ context.Context, pid int32) (LookupResult, error) {
+	l.mu.Lock()
+	l.calls++
+	l.mu.Unlock()
 	if l.err != nil {
 		return LookupResult{}, l.err
 	}
@@ -371,6 +375,33 @@ func TestProfileHandlerDefaultActionAskFiresPrompter(t *testing.T) {
 				t.Errorf("prompter calls: %d, want 1", p.called)
 			}
 		})
+	}
+}
+
+func TestProfileHandlerDecidePendingExecSkipsStaleProfileLookup(t *testing.T) {
+	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
+		1: {id: "predecessor", defAct: profile.DefaultActionAsk},
+	}}
+	h := NewProfileHandler(lookup, nil, nil, time.Second, nopLogger{})
+	pending := newPendingEvent(&FileEvent{PID: 1, Path: "/tmp/target", Op: OpExec}, func(Verdict) responseResult {
+		return responseResult{accepted: true}
+	})
+
+	handled, handedOff, verdict, afterResponse := h.DecidePending(context.Background(), pending)
+	if handled || handedOff {
+		t.Fatalf("exec pending decision = handled=%t handedOff=%t, want direct fail-closed response", handled, handedOff)
+	}
+	if verdict != VerdictDeny {
+		t.Fatalf("exec pending verdict = %s, want deny", verdict)
+	}
+	if afterResponse != nil {
+		t.Fatal("exec pending decision unexpectedly scheduled post-response work")
+	}
+	lookup.mu.Lock()
+	calls := lookup.calls
+	lookup.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("exec pending decision consulted stale PID profile %d times", calls)
 	}
 }
 

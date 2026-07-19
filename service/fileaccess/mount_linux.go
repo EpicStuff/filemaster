@@ -46,11 +46,13 @@ type mountedMark struct {
 // MountDiagnostics is a compact snapshot of mount-mark coverage. It is kept
 // deliberately independent from the later general diagnostics pipeline.
 type MountDiagnostics struct {
-	ConfiguredScopes []string
-	CanonicalScopes  []string
-	ActiveMountIDs   []int
-	MissingMountIDs  []int
-	PartialCoverage  bool
+	ConfiguredScopes           []string
+	CanonicalScopes            []string
+	ActiveMountIDs             []int
+	MissingMountIDs            []int
+	DynamicMountCoverageBreach bool
+	DynamicMountIDs            []int
+	PartialCoverage            bool
 	// CoverageKnown is false when mountinfo could not be read, so the missing
 	// mount list is deliberately empty rather than stale.
 	CoverageKnown bool
@@ -385,6 +387,25 @@ func (s *fanotifySource) reconcileLocked() {
 	}
 	desiredSnapshot := snapshotFromScopes(s.scopes)
 
+	// A mount created beneath an already-active scope was unmarked until this
+	// reconciliation saw it. fanotify mount marks are per mount ID, so marking
+	// it now restores only prospective coverage. Keep that breach visible for
+	// this source lifetime instead of reporting a clean state after marking.
+	if !s.pending {
+		for id, mount := range required {
+			if _, marked := s.marks[id]; marked {
+				continue
+			}
+			if s.dynamicMountCoverageGaps == nil {
+				s.dynamicMountCoverageGaps = make(map[int]mountInfo)
+			}
+			if _, recorded := s.dynamicMountCoverageGaps[id]; !recorded {
+				s.log.Warn("fanotify mount coverage gap", "mount_id", id, "mount_path", mount.MountPoint)
+			}
+			s.dynamicMountCoverageGaps[id] = mount
+		}
+	}
+
 	newMask := resolveMarkMask()
 	var errs []error
 	for id, mount := range required {
@@ -510,6 +531,15 @@ func (s *fanotifySource) baseMountDiagnostics() MountDiagnostics {
 		diagnostics.ConfiguredScopes = append(diagnostics.ConfiguredScopes, scope.Configured)
 		diagnostics.CanonicalScopes = append(diagnostics.CanonicalScopes, scope.Canonical)
 	}
+	if len(s.dynamicMountCoverageGaps) > 0 {
+		diagnostics.DynamicMountCoverageBreach = true
+		for id := range s.dynamicMountCoverageGaps {
+			diagnostics.DynamicMountIDs = append(diagnostics.DynamicMountIDs, id)
+		}
+		sort.Ints(diagnostics.DynamicMountIDs)
+		diagnostics.PartialCoverage = true
+		diagnostics.LastError = fmt.Sprintf("in-scope mounts %v were discovered after enforcement began; accesses before reconciliation may not have been intercepted", diagnostics.DynamicMountIDs)
+	}
 	return diagnostics
 }
 
@@ -526,13 +556,17 @@ func (s *fanotifySource) addKnownCoverage(diagnostics *MountDiagnostics, require
 	}
 	sort.Ints(diagnostics.ActiveMountIDs)
 	sort.Ints(diagnostics.MissingMountIDs)
-	diagnostics.PartialCoverage = len(diagnostics.MissingMountIDs) > 0
+	diagnostics.PartialCoverage = diagnostics.PartialCoverage || len(diagnostics.MissingMountIDs) > 0
 }
 
 func (s *fanotifySource) recordReconcileFailure(err error, mounts []mountInfo) {
 	diagnostics := s.baseMountDiagnostics()
 	diagnostics.PartialCoverage = true
-	diagnostics.LastError = err.Error()
+	if diagnostics.LastError != "" {
+		diagnostics.LastError += "; " + err.Error()
+	} else {
+		diagnostics.LastError = err.Error()
+	}
 	if mounts == nil {
 		// There is no current mount table to compare with. Expose the known
 		// active mark IDs and explicitly mark missing coverage as unknown,
@@ -559,7 +593,12 @@ func (s *fanotifySource) updateDiagnostics(required map[int]mountInfo, errs []er
 	s.addKnownCoverage(&diagnostics, required)
 	if len(errs) > 0 {
 		diagnostics.PartialCoverage = true
-		diagnostics.LastError = errors.Join(errs...).Error()
+		errText := errors.Join(errs...).Error()
+		if diagnostics.LastError != "" {
+			diagnostics.LastError += "; " + errText
+		} else {
+			diagnostics.LastError = errText
+		}
 		missingPaths := make([]string, 0, len(diagnostics.MissingMountIDs))
 		for _, id := range diagnostics.MissingMountIDs {
 			missingPaths = append(missingPaths, required[id].MountPoint)
@@ -577,6 +616,7 @@ func (s *fanotifySource) MountDiagnostics() MountDiagnostics {
 	diagnostics.CanonicalScopes = append([]string(nil), diagnostics.CanonicalScopes...)
 	diagnostics.ActiveMountIDs = append([]int(nil), diagnostics.ActiveMountIDs...)
 	diagnostics.MissingMountIDs = append([]int(nil), diagnostics.MissingMountIDs...)
+	diagnostics.DynamicMountIDs = append([]int(nil), diagnostics.DynamicMountIDs...)
 	return diagnostics
 }
 

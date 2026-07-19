@@ -25,13 +25,14 @@ type fanotifySource struct {
 	fd        int
 	lifecycle *PipelineLifecycle
 
-	marksMu       sync.Mutex
-	scopes        map[string]*policyScope
-	retiredScopes []*policyScope
-	marks         map[int]mountedMark
-	markMask      uint64
-	pending       bool
-	marksRemoved  atomic.Bool
+	marksMu                  sync.Mutex
+	scopes                   map[string]*policyScope
+	retiredScopes            []*policyScope
+	marks                    map[int]mountedMark
+	dynamicMountCoverageGaps map[int]mountInfo
+	markMask                 uint64
+	pending                  bool
+	marksRemoved             atomic.Bool
 
 	activeScopes  atomic.Pointer[scopeSnapshot]
 	pendingScopes atomic.Pointer[scopeSnapshot]
@@ -429,24 +430,25 @@ func newFanotifySource(paths []string, log logger) (*fanotifySource, error) {
 
 	lifecycle := NewPipelineLifecycle()
 	s := &fanotifySource{
-		log:                log,
-		fd:                 fd,
-		lifecycle:          lifecycle,
-		scopes:             make(map[string]*policyScope),
-		marks:              make(map[int]mountedMark),
-		markMask:           resolveMarkMask(),
-		mountInfo:          readMountInfo,
-		failedEvents:       make(map[int32]PendingEvent),
-		read:               unix.Read,
-		poll:               unix.Poll,
-		emfileRetry:        defaultEMFILERetry,
-		descriptorLimit:    descriptorLimit,
-		accounted:          make(map[int32]struct{}),
-		descriptorReleased: make(chan struct{}, 1),
-		readerDone:         make(chan struct{}),
-		readerIdle:         make(chan struct{}, 1),
-		reconcileDone:      make(chan struct{}),
-		emergencyFD:        -1,
+		log:                      log,
+		fd:                       fd,
+		lifecycle:                lifecycle,
+		scopes:                   make(map[string]*policyScope),
+		marks:                    make(map[int]mountedMark),
+		dynamicMountCoverageGaps: make(map[int]mountInfo),
+		markMask:                 resolveMarkMask(),
+		mountInfo:                readMountInfo,
+		failedEvents:             make(map[int32]PendingEvent),
+		read:                     unix.Read,
+		poll:                     unix.Poll,
+		emfileRetry:              defaultEMFILERetry,
+		descriptorLimit:          descriptorLimit,
+		accounted:                make(map[int32]struct{}),
+		descriptorReleased:       make(chan struct{}, 1),
+		readerDone:               make(chan struct{}),
+		readerIdle:               make(chan struct{}, 1),
+		reconcileDone:            make(chan struct{}),
+		emergencyFD:              -1,
 		mark: func(flags uint, mask uint64, path string) error {
 			return unix.FanotifyMark(fd, flags, mask, unix.AT_FDCWD, path)
 		},

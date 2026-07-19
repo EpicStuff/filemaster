@@ -324,6 +324,59 @@ func TestMountChangeNotificationReconcilesNestedMountImmediately(t *testing.T) {
 	}
 }
 
+func TestLateInScopeMountKeepsDynamicCoverageBreachAfterMarking(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var mountsMu sync.Mutex
+	mounts := []mountInfo{{ID: 1, MountPoint: "/"}, {ID: 2, MountPoint: root}}
+	s := newReconciliationTestSource(nil, nil)
+	s.lifecycle = NewPipelineLifecycle()
+	s.mountInfo = func() ([]mountInfo, error) {
+		mountsMu.Lock()
+		defer mountsMu.Unlock()
+		return append([]mountInfo(nil), mounts...), nil
+	}
+	scope, err := activateScope(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scope.close()
+	s.scopes[root] = scope
+	s.marks[2] = mountedMark{mount: mounts[1], mask: s.markMask}
+	s.activeScopes.Store(snapshotFromScopes(s.scopes))
+
+	mountsMu.Lock()
+	mounts = append(mounts, mountInfo{ID: 3, MountPoint: nested})
+	mountsMu.Unlock()
+	s.reconcile()
+
+	diagnostics := s.MountDiagnostics()
+	if !diagnostics.DynamicMountCoverageBreach || !diagnostics.PartialCoverage {
+		t.Fatalf("late in-scope mount lost coverage breach: %#v", diagnostics)
+	}
+	if len(diagnostics.DynamicMountIDs) != 1 || diagnostics.DynamicMountIDs[0] != 3 {
+		t.Fatalf("unexpected dynamic mount IDs: %#v", diagnostics.DynamicMountIDs)
+	}
+	if len(diagnostics.MissingMountIDs) != 0 {
+		t.Fatalf("marked late mount should have prospective coverage: %#v", diagnostics.MissingMountIDs)
+	}
+	if diagnostics.LastError == "" {
+		t.Fatal("late mount coverage breach has no actionable diagnostic")
+	}
+
+	// A clean later reconciliation cannot erase evidence that access could have
+	// occurred before the new mount was marked.
+	s.reconcile()
+	diagnostics = s.MountDiagnostics()
+	if !diagnostics.DynamicMountCoverageBreach || !diagnostics.PartialCoverage || diagnostics.LastError == "" {
+		t.Fatalf("dynamic mount coverage breach was cleared after reconciliation: %#v", diagnostics)
+	}
+}
+
 func TestMountReconcileFailureRecomputesCoverageDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	s := newReconciliationTestSource([]mountInfo{{ID: 1, MountPoint: "/"}}, nil)

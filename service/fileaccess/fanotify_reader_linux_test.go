@@ -257,33 +257,109 @@ func TestReaderDeniesOverloadInsteadOfPausing(t *testing.T) {
 func TestReaderHandlesEMFILEAsDegradedCapacityFailure(t *testing.T) {
 	source := newReaderTestSource(8)
 	source.poll = func([]unix.PollFd, int) (int, error) { return 1, nil }
-	source.emfileRetry = time.Hour
-	readCalled := make(chan int, 2)
-	source.read = func(int, []byte) (int, error) {
-		readCalled <- 1
-		if len(readCalled) == 1 {
-			return 0, unix.EMFILE
-		}
-		return 0, unix.EAGAIN
+
+	meta := unix.FanotifyEventMetadata{
+		Event_len:    uint32(unsafe.Sizeof(unix.FanotifyEventMetadata{})),
+		Metadata_len: uint16(unsafe.Sizeof(unix.FanotifyEventMetadata{})),
+		Vers:         unix.FANOTIFY_METADATA_VERSION,
+		Fd:           102,
+		Mask:         unix.FAN_OPEN_PERM,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- source.Run(ctx, PendingHandlerFunc(func(context.Context, PendingEvent) error { return nil }))
-	}()
-
-	select {
-	case <-readCalled:
+	defer cancel()
+	reads := 0
+	source.read = func(_ int, bytes []byte) (int, error) {
+		reads++
+		if reads == 1 {
+			return 0, unix.EMFILE
+		}
+		copy(bytes, fanotifyEventBytes(meta))
 		cancel()
-	case <-time.After(time.Second):
-		t.Fatal("reader did not attempt injected read")
+		return int(unsafe.Sizeof(meta)), nil
 	}
-	if err := <-done; err != nil {
+
+	var response unix.FanotifyResponse
+	source.responses.write = func(_ int, bytes []byte) (int, error) {
+		response = *(*unix.FanotifyResponse)(unsafe.Pointer(&bytes[0]))
+		return len(bytes), nil
+	}
+	if err := source.Run(ctx, PendingHandlerFunc(func(context.Context, PendingEvent) error {
+		t.Fatal("EMFILE recovery event reached normal policy")
+		return nil
+	})); err != nil {
 		t.Fatal(err)
 	}
+
+	if reads != 2 {
+		t.Fatalf("read attempts = %d, want EMFILE then emergency-slot read", reads)
+	}
+	if response.Fd != meta.Fd || response.Response != unix.FAN_DENY {
+		t.Fatalf("EMFILE emergency response = %+v, want fd %d deny", response, meta.Fd)
+	}
 	diagnostics := source.ReaderDiagnostics()
-	if diagnostics.EMFILECount != 1 || !diagnostics.DescriptorPressure || !diagnostics.Degraded {
+	if diagnostics.EMFILECount != 1 || !diagnostics.Degraded {
 		t.Fatalf("EMFILE diagnostics = %+v", diagnostics)
+	}
+	if diagnostics.DescriptorPressure {
+		t.Fatalf("descriptor pressure remained set after the emergency denial recovered: %+v", diagnostics)
+	}
+	if diagnostics.OutstandingDescriptors != 0 {
+		t.Fatalf("EMFILE emergency descriptor accounting leaked: %+v", diagnostics)
+	}
+}
+
+func TestReaderPollAndReadFailuresEnterFatalStateAndCloseGroup(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		set  func(*fanotifySource)
+		want string
+	}{
+		{
+			name: "poll",
+			set: func(source *fanotifySource) {
+				source.poll = func([]unix.PollFd, int) (int, error) {
+					return 0, unix.EIO
+				}
+			},
+			want: "poll",
+		},
+		{
+			name: "read",
+			set: func(source *fanotifySource) {
+				source.poll = func([]unix.PollFd, int) (int, error) {
+					return 1, nil
+				}
+				source.read = func(int, []byte) (int, error) {
+					return 0, unix.EIO
+				}
+			},
+			want: "read",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := newReaderTestSource(8)
+			test.set(source)
+
+			err := source.Run(context.Background(), PendingHandlerFunc(func(context.Context, PendingEvent) error {
+				t.Fatal("fatal reader failure reached policy")
+				return nil
+			}))
+			if !errors.Is(err, unix.EIO) {
+				t.Fatalf("reader error = %v, want EIO", err)
+			}
+
+			diagnostics := source.ReaderDiagnostics()
+			if !diagnostics.Fatal || !diagnostics.Degraded || !diagnostics.Exited || diagnostics.Running {
+				t.Fatalf("reader diagnostics after fatal %s failure = %+v", test.name, diagnostics)
+			}
+			if diagnostics.FatalError == "" || !strings.Contains(diagnostics.FatalError, test.want) {
+				t.Fatalf("fatal error = %q, want %q", diagnostics.FatalError, test.want)
+			}
+			response := source.ResponseDiagnostics()
+			if !response.Sealed || !response.Closed {
+				t.Fatalf("response group was not sealed and closed after fatal %s failure: %+v", test.name, response)
+			}
+		})
 	}
 }
 

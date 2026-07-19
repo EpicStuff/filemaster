@@ -111,7 +111,7 @@ func waitPromptStart(t *testing.T, prompter *actionPrompter) {
 	}
 }
 
-func TestPromptCoordinatorObservesAndRefreshesEveryAcceptedGroupedEvent(t *testing.T) {
+func TestPromptCoordinatorObservesEveryAcceptedGroupedEvent(t *testing.T) {
 	prompter := &actionPrompter{entered: make(chan struct{}, 1), actions: make(chan string, 1), completed: make(chan struct{}, 1)}
 	lookup := &refreshingAskLookup{store: &fakeRuleStore{id: "profile"}, refreshed: make(chan int32, 2)}
 	handler := NewProfileHandler(lookup, prompter, nil, time.Second, nopLogger{})
@@ -121,8 +121,8 @@ func TestPromptCoordinatorObservesAndRefreshesEveryAcceptedGroupedEvent(t *testi
 	t.Cleanup(cancel)
 	pipeline.Start(ctx)
 
-	first, firstResponses := pipelinePending(FileEvent{PID: 10, Path: "/tmp/exec", Op: OpExec})
-	second, secondResponses := pipelinePending(FileEvent{PID: 11, Path: "/tmp/exec", Op: OpExec})
+	first, firstResponses := pipelinePending(FileEvent{PID: 10, Path: "/tmp/grouped", Op: OpOpen})
+	second, secondResponses := pipelinePending(FileEvent{PID: 11, Path: "/tmp/grouped", Op: OpOpen})
 	if err := pipeline.Handle(ctx, first); err != nil {
 		t.Fatalf("first Handle: %v", err)
 	}
@@ -156,13 +156,6 @@ func TestPromptCoordinatorObservesAndRefreshesEveryAcceptedGroupedEvent(t *testi
 	if got := waitPipelineVerdict(t, secondResponses); got != VerdictAllow {
 		t.Fatalf("second verdict = %s, want allow", got)
 	}
-	for range 2 {
-		select {
-		case <-lookup.refreshed:
-		case <-time.After(time.Second):
-			t.Fatal("missing grouped exec refresh")
-		}
-	}
 	if got := observer.observedCount(); got != 2 {
 		t.Fatalf("observed grouped events = %d, want 2", got)
 	}
@@ -178,7 +171,7 @@ func TestPromptCoordinatorUnacceptedResponseSkipsObservationAndRefresh(t *testin
 	t.Cleanup(cancel)
 	pipeline.Start(ctx)
 
-	pending := newPendingEvent(&FileEvent{PID: 10, Path: "/tmp/exec", Op: OpExec}, func(Verdict) responseResult {
+	pending := newPendingEvent(&FileEvent{PID: 10, Path: "/tmp/open", Op: OpOpen}, func(Verdict) responseResult {
 		return responseResult{err: errors.New("response failed")}
 	})
 	if err := pipeline.Handle(ctx, pending); err != nil {

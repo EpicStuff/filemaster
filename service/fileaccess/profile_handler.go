@@ -553,6 +553,13 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 	if e == nil {
 		return false, false, VerdictDeny, nil
 	}
+	// Before execve completes, PID-based lookup identifies the predecessor
+	// image. Do not let that stale profile create a prompt or verdict for the
+	// target executable; DecideForResponse performs the matching fail-closed
+	// response path without coordinator admission.
+	if e.Op == OpExec {
+		return false, false, VerdictDeny, nil
+	}
 
 	res, isSelf := h.lookupSelfProfile(e.PID)
 	if !isSelf {
