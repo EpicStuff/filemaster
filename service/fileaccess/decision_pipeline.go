@@ -62,6 +62,7 @@ type DecisionPipelineDiagnostics struct {
 	ActiveDecisions         int64
 	Outstanding             int64
 	PendingAsk              int
+	PendingAskByProfile     map[string]int
 	Closing                 bool
 	QueueSaturationDenies   uint64
 	OutstandingBudgetDenies uint64
@@ -513,8 +514,13 @@ func (p *DecisionPipeline) recordQueueDepth() {
 func (p *DecisionPipeline) Diagnostics() DecisionPipelineDiagnostics {
 	p.askMu.Lock()
 	pendingAsk := 0
-	for _, count := range p.pendingAsk {
+	var pendingAskByProfile map[string]int
+	if len(p.pendingAsk) > 0 {
+		pendingAskByProfile = make(map[string]int, len(p.pendingAsk))
+	}
+	for profileKey, count := range p.pendingAsk {
 		pendingAsk += count
+		pendingAskByProfile[profileKey] = count
 	}
 	p.askMu.Unlock()
 	return DecisionPipelineDiagnostics{
@@ -527,6 +533,7 @@ func (p *DecisionPipeline) Diagnostics() DecisionPipelineDiagnostics {
 		ActiveDecisions:         p.activeDecisions.Load(),
 		Outstanding:             p.outstanding.Load(),
 		PendingAsk:              pendingAsk,
+		PendingAskByProfile:     pendingAskByProfile,
 		Closing:                 !p.lifecycle.IsRunning(),
 		QueueSaturationDenies:   p.queueDenied.Load(),
 		OutstandingBudgetDenies: p.limitDenied.Load(),

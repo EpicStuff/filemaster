@@ -50,6 +50,36 @@ func TestRecordingHandlerRecordsEnrichedProfile(t *testing.T) {
 	}
 }
 
+// TestRecordingHandlerCountsDroppedObservations verifies that a saturated feed
+// drops records (enforcement runs ahead of observation) and that each drop is
+// counted and exposed via ObservationDiagnostics rather than lost silently.
+func TestRecordingHandlerCountsDroppedObservations(t *testing.T) {
+	feed := make(chan filequery.FileAccessRecord, 1)
+	inner := HandlerFunc(func(_ context.Context, _ *FileEvent) Verdict { return VerdictAllow })
+	h := NewRecordingHandler(inner, feed)
+
+	source, ok := h.(observationDiagnosticSource)
+	if !ok {
+		t.Fatal("recording handler does not expose ObservationDiagnostics")
+	}
+
+	// First record fills the buffer; the next three have nowhere to go.
+	for range 4 {
+		h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/x", Op: OpRead})
+	}
+
+	diag := source.ObservationDiagnostics()
+	if diag.QueueCapacity != 1 {
+		t.Errorf("queue capacity = %d, want 1", diag.QueueCapacity)
+	}
+	if diag.QueueDepth != 1 {
+		t.Errorf("queue depth = %d, want 1 (buffer full)", diag.QueueDepth)
+	}
+	if diag.Dropped != 3 {
+		t.Errorf("dropped = %d, want 3", diag.Dropped)
+	}
+}
+
 // TestRecordingHandlerUnresolvedProfileIsBare records the honest "/" bucket
 // when the inner handler could not resolve a profile (e.g. dead PID). No
 // synthetic exe-derived identity is invented.

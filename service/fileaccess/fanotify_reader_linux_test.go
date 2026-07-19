@@ -60,6 +60,24 @@ func TestDecisionLatencyDiagnosticsTrackOnlyAcceptedResponses(t *testing.T) {
 	}
 }
 
+// TestResponseLatencyMeasuresWriteSeparately proves response latency (§15.19)
+// captures the kernel-write cost on its own, distinct from decision latency.
+func TestResponseLatencyMeasuresWriteSeparately(t *testing.T) {
+	source := newReaderTestSource(8)
+	source.responses.write = func(_ int, bytes []byte) (int, error) {
+		time.Sleep(5 * time.Millisecond)
+		return len(bytes), nil
+	}
+	pending := source.newFanotifyPendingEvent(&FileEvent{Op: OpOpen}, 101)
+	if err := pending.Respond(VerdictAllow); err != nil {
+		t.Fatalf("accept response: %v", err)
+	}
+	diagnostic := source.ReaderDiagnostics()
+	if diagnostic.LastResponseLatencyNanos < (4 * time.Millisecond).Nanoseconds() {
+		t.Fatalf("response latency = %dns, want >= 4ms (the write sleep)", diagnostic.LastResponseLatencyNanos)
+	}
+}
+
 func fanotifyEventBytes(events ...unix.FanotifyEventMetadata) []byte {
 	metadataSize := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
 	buf := make([]byte, 0, len(events)*metadataSize)

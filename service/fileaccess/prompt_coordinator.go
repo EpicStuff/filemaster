@@ -68,6 +68,7 @@ type PromptCoordinator struct {
 	latestProfileSnapshot map[string]*DecisionSnapshot
 	unidentifiedSequence  atomic.Uint64
 	activePrompts         atomic.Int64
+	promptTimeouts        atomic.Uint64
 	promptChanged         chan struct{}
 	persistence           *RulePersistence
 }
@@ -236,6 +237,13 @@ func (c *PromptCoordinator) waitForPrompt(ctx context.Context, group *promptGrou
 		action, ok = c.prompter.Prompt(ctx, group.event, c.timeout)
 	}
 	if !ok {
+		// The prompter reports !ok for both a timeout and a context
+		// cancellation (shutdown). Count only the timeout case (§15.16): the
+		// prompt was abandoned to the default deny rather than answered, which
+		// is otherwise indistinguishable from an explicit block.
+		if ctx.Err() == nil {
+			c.promptTimeouts.Add(1)
+		}
 		c.resolve(group, VerdictDeny)
 		return
 	}
@@ -311,6 +319,7 @@ type PromptCoordinatorDiagnostics struct {
 	Groups        int
 	Events        int
 	ActivePrompts int64
+	Timeouts      uint64
 }
 
 func (c *PromptCoordinator) Diagnostics() PromptCoordinatorDiagnostics {
@@ -319,6 +328,7 @@ func (c *PromptCoordinator) Diagnostics() PromptCoordinatorDiagnostics {
 	diagnostics := PromptCoordinatorDiagnostics{
 		Groups:        len(c.groups),
 		ActivePrompts: c.activePrompts.Load(),
+		Timeouts:      c.promptTimeouts.Load(),
 	}
 	for _, group := range c.groups {
 		diagnostics.Events += len(group.entries)

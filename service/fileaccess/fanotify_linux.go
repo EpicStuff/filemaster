@@ -56,6 +56,7 @@ type fanotifySource struct {
 	peakOutstanding     atomic.Int64
 	decisionResponses   atomic.Uint64
 	lastDecisionLatency atomic.Int64
+	lastResponseLatency atomic.Int64
 	descriptorReleased  chan struct{}
 
 	queueOverflows       atomic.Uint64
@@ -293,9 +294,15 @@ func (s *fanotifySource) resolveAccountedEventForFatal(meta *unix.FanotifyEventM
 func (s *fanotifySource) newFanotifyPendingEvent(event *FileEvent, eventFD int32) *pendingEventOwner {
 	started := time.Now()
 	return newPendingEventWithFailureSink(event, func(verdict Verdict) responseResult {
+		// Split decision latency (event read -> verdict ready) from response
+		// latency (the kernel write itself, §15.19) so a slow response writer
+		// is distinguishable from a slow decision path.
+		respondStart := time.Now()
 		result := s.responses.respond(eventFD, verdict)
 		if result.accepted {
-			s.lastDecisionLatency.Store(time.Since(started).Nanoseconds())
+			responded := time.Now()
+			s.lastDecisionLatency.Store(respondStart.Sub(started).Nanoseconds())
+			s.lastResponseLatency.Store(responded.Sub(respondStart).Nanoseconds())
 			s.decisionResponses.Add(1)
 		}
 		return result
@@ -358,6 +365,7 @@ func (s *fanotifySource) ReaderDiagnostics() ReaderDiagnostics {
 		PeakOutstandingDescriptors: s.peakOutstanding.Load(),
 		DecisionResponseCount:      s.decisionResponses.Load(),
 		LastDecisionLatencyNanos:   s.lastDecisionLatency.Load(),
+		LastResponseLatencyNanos:   s.lastResponseLatency.Load(),
 		AccountedDescriptors:       accounted,
 		FailedResponseDescriptors:  failed,
 		DescriptorPressure:         s.descriptorPressure.Load(),

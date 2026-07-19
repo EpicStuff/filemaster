@@ -259,6 +259,41 @@ func TestDecisionPipelineProfileHandlerExecUsesLaunchingProfile(t *testing.T) {
 	}
 }
 
+func TestDecisionPipelineReportsPendingAskByProfile(t *testing.T) {
+	pipeline := NewDecisionPipeline(allowAll, DecisionPipelineConfig{Workers: 1, QueueCapacity: 1, OutstandingLimit: 4, PerProfileAskLimit: 4})
+
+	releaseA1, ok := pipeline.acquireAsk("local/a")
+	if !ok {
+		t.Fatal("acquire local/a #1 denied")
+	}
+	releaseA2, ok := pipeline.acquireAsk("local/a")
+	if !ok {
+		t.Fatal("acquire local/a #2 denied")
+	}
+	releaseB, ok := pipeline.acquireAsk("local/b")
+	if !ok {
+		t.Fatal("acquire local/b denied")
+	}
+
+	diag := pipeline.Diagnostics()
+	if diag.PendingAsk != 3 {
+		t.Fatalf("aggregate PendingAsk = %d, want 3", diag.PendingAsk)
+	}
+	if got := diag.PendingAskByProfile["local/a"]; got != 2 {
+		t.Fatalf("PendingAskByProfile[local/a] = %d, want 2", got)
+	}
+	if got := diag.PendingAskByProfile["local/b"]; got != 1 {
+		t.Fatalf("PendingAskByProfile[local/b] = %d, want 1", got)
+	}
+
+	releaseA1()
+	releaseA2()
+	releaseB()
+	if diag := pipeline.Diagnostics(); len(diag.PendingAskByProfile) != 0 {
+		t.Fatalf("PendingAskByProfile after release = %v, want empty", diag.PendingAskByProfile)
+	}
+}
+
 type observingHandler struct {
 	inner     Handler
 	responded atomic.Bool

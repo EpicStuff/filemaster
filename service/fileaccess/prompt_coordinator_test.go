@@ -296,3 +296,37 @@ func TestPromptCoordinatorTimeoutAndClosingDeny(t *testing.T) {
 		t.Fatalf("closing verdict = %s, want deny", got)
 	}
 }
+
+// TestPromptCoordinatorCountsTimeouts asserts a prompt abandoned to the default
+// deny is counted as a timeout (§15.16), while an explicitly answered block is
+// not — the two are otherwise indistinguishable in the verdict alone.
+func TestPromptCoordinatorCountsTimeouts(t *testing.T) {
+	timeoutPrompter := coordinatorPrompterFunc(func(_ context.Context, _ FileEvent, timeout time.Duration) (string, bool) {
+		time.Sleep(timeout)
+		return "", false
+	})
+	h := newCoordinatorHarness(timeoutPrompter, 4)
+	snapshot := coordinatorSnapshot("profile", 1, profile.DefaultActionAsk)
+	pending, responses := coordinatorPending(FileEvent{Path: "/tmp/timeout", Op: OpOpen})
+	h.coordinator.Admit(context.Background(), pending, nil, snapshot)
+	if got := waitCoordinatorVerdict(t, responses); got != VerdictDeny {
+		t.Fatalf("timeout verdict = %s, want deny", got)
+	}
+	if got := h.coordinator.Diagnostics().Timeouts; got != 1 {
+		t.Fatalf("timeouts after one abandoned prompt = %d, want 1", got)
+	}
+
+	// An explicit block must not inflate the timeout counter.
+	denyPrompter := coordinatorPrompterFunc(func(_ context.Context, _ FileEvent, _ time.Duration) (string, bool) {
+		return ActionDeny, true
+	})
+	h = newCoordinatorHarness(denyPrompter, 4)
+	pending, responses = coordinatorPending(FileEvent{Path: "/tmp/explicit", Op: OpOpen})
+	h.coordinator.Admit(context.Background(), pending, nil, snapshot)
+	if got := waitCoordinatorVerdict(t, responses); got != VerdictDeny {
+		t.Fatalf("explicit verdict = %s, want deny", got)
+	}
+	if got := h.coordinator.Diagnostics().Timeouts; got != 0 {
+		t.Fatalf("timeouts after explicit block = %d, want 0", got)
+	}
+}

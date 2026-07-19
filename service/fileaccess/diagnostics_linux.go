@@ -37,6 +37,7 @@ type FileAccessDiagnostics struct {
 	FailedResponseCount int
 	Decision            DecisionPipelineDiagnostics
 	Prompt              PromptCoordinatorDiagnostics
+	Observation         ObservationDiagnostics
 	PermanentRules      map[string]RulePersistenceDiagnostics
 	Shutdown            ShutdownDiagnostics
 	LifecycleState      string
@@ -54,6 +55,10 @@ type readerDiagnosticSource interface {
 
 type responseDiagnosticSource interface {
 	ResponseDiagnostics() ResponseWriterDiagnostics
+}
+
+type observationDiagnosticSource interface {
+	ObservationDiagnostics() ObservationDiagnostics
 }
 
 // Diagnostics returns compact diagnostics by default. Descriptor identities
@@ -83,6 +88,9 @@ func (fa *FileAccess) Diagnostics() FileAccessDiagnostics {
 	}
 	if fa.pipeline != nil {
 		diagnostics.Decision = fa.pipeline.Diagnostics()
+	}
+	if handler, ok := fa.handler.(observationDiagnosticSource); ok {
+		diagnostics.Observation = handler.ObservationDiagnostics()
 	}
 	if fa.profileHandler != nil {
 		if coordinator := fa.profileHandler.coordinator(); coordinator != nil {
@@ -123,6 +131,9 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 	}
 	if diagnostics.Reader.UnresolvedPathDenyCount > 0 {
 		appendWarning("unresolved-path-deny", "warning", "File access events with unresolved paths were denied for safety.")
+	}
+	if diagnostics.Observation.Dropped > 0 {
+		appendWarning("observation-drops", "warning", "The observation feed is saturated; some file access records were dropped and are not visible in the activity log. Enforcement is unaffected.")
 	}
 	if diagnostics.FailedResponseCount > 0 {
 		appendWarning("retained-response-ownership", "error", "One or more permission events have a retained failed response owner.")
