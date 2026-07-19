@@ -231,9 +231,11 @@ func TestDecisionPipelineRefreshesAllowedExecMapping(t *testing.T) {
 	}
 }
 
-func TestDecisionPipelineProfileHandlerExecDeniesWithoutPredecessorLookup(t *testing.T) {
+func TestDecisionPipelineProfileHandlerExecUsesLaunchingProfile(t *testing.T) {
+	// Exec flows through the profile like read/write. A block default denies the
+	// launch via the launching process's profile, which must be consulted.
 	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
-		91: {id: "predecessor", defAct: profile.DefaultActionAsk},
+		91: {id: "launcher", defAct: profile.DefaultActionBlock},
 	}}
 	handler := NewProfileHandler(lookup, nil, nil, time.Second, nopLogger{})
 	pipeline := NewDecisionPipeline(handler, DecisionPipelineConfig{Workers: 1, QueueCapacity: 1, OutstandingLimit: 1})
@@ -246,14 +248,14 @@ func TestDecisionPipelineProfileHandlerExecDeniesWithoutPredecessorLookup(t *tes
 		t.Fatalf("Handle: %v", err)
 	}
 	if got := waitPipelineVerdict(t, responses); got != VerdictDeny {
-		t.Fatalf("exec verdict = %s, want deny without target executable profile resolution", got)
+		t.Fatalf("exec verdict = %s, want deny from block default", got)
 	}
 
 	lookup.mu.Lock()
 	calls := lookup.calls
 	lookup.mu.Unlock()
-	if calls != 0 {
-		t.Fatalf("pipeline consulted predecessor PID profile %d times for exec", calls)
+	if calls == 0 {
+		t.Fatal("pipeline did not consult launching PID profile for exec")
 	}
 }
 

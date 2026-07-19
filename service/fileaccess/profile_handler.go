@@ -443,13 +443,13 @@ func (h *ProfileHandler) Decide(ctx context.Context, e *FileEvent) Verdict {
 // persistence. The decision pipeline invokes the latter only after the
 // fanotify response has been accepted.
 func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (Verdict, func()) {
-	// At FAN_OPEN_EXEC_PERM time /proc/<pid>/exe still identifies the old
-	// image. Until profile lookup can resolve and match the target executable
-	// directly, applying that cached predecessor policy would be unsafe.
-	if e.Op == OpExec {
-		h.log.Warn("denying exec without target executable profile resolution", "pid", e.PID, "path", e.Path)
-		return VerdictDeny, nil
-	}
+	// OpExec is decided like OpRead/OpWrite: the profile resolved from the PID
+	// is the launching (predecessor) process, and e.Path is the executable it
+	// is trying to run. That process is the actor whose policy governs the
+	// launch — "may <this app> execute <path>?" — mirroring "may <this app>
+	// read <path>?". After an allowed exec the pipeline calls
+	// RefreshProcessMapping so the now-replaced image is reevaluated for its
+	// own subsequent file accesses.
 	res, isSelf := h.lookupSelfProfile(e.PID)
 	if !isSelf {
 		var err error
@@ -553,14 +553,10 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 	if e == nil {
 		return false, false, VerdictDeny, nil
 	}
-	// Before execve completes, PID-based lookup identifies the predecessor
-	// image. Do not let that stale profile create a prompt or verdict for the
-	// target executable; DecideForResponse performs the matching fail-closed
-	// response path without coordinator admission.
-	if e.Op == OpExec {
-		return false, false, VerdictDeny, nil
-	}
-
+	// OpExec follows the same path as OpRead/OpWrite: the launching
+	// (predecessor) process's profile decides whether it may execute e.Path,
+	// with Ask decisions routed through the prompt coordinator like any other
+	// operation. See DecideForResponse for the actor/target rationale.
 	res, isSelf := h.lookupSelfProfile(e.PID)
 	if !isSelf {
 		var err error

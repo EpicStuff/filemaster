@@ -378,9 +378,12 @@ func TestProfileHandlerDefaultActionAskFiresPrompter(t *testing.T) {
 	}
 }
 
-func TestProfileHandlerDecidePendingExecSkipsStaleProfileLookup(t *testing.T) {
+func TestProfileHandlerDecidePendingExecUsesLaunchingProfile(t *testing.T) {
+	// Exec is decided like read/write: the launching process's profile governs
+	// the launch. A permit default resolves to allow without a prompt, and the
+	// profile must actually be consulted (unlike the old unconditional deny).
 	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
-		1: {id: "predecessor", defAct: profile.DefaultActionAsk},
+		1: {id: "launcher", defAct: profile.DefaultActionPermit},
 	}}
 	h := NewProfileHandler(lookup, nil, nil, time.Second, nopLogger{})
 	pending := newPendingEvent(&FileEvent{PID: 1, Path: "/tmp/target", Op: OpExec}, func(Verdict) responseResult {
@@ -389,19 +392,19 @@ func TestProfileHandlerDecidePendingExecSkipsStaleProfileLookup(t *testing.T) {
 
 	handled, handedOff, verdict, afterResponse := h.DecidePending(context.Background(), pending)
 	if handled || handedOff {
-		t.Fatalf("exec pending decision = handled=%t handedOff=%t, want direct fail-closed response", handled, handedOff)
+		t.Fatalf("exec pending decision = handled=%t handedOff=%t, want direct rule response", handled, handedOff)
 	}
-	if verdict != VerdictDeny {
-		t.Fatalf("exec pending verdict = %s, want deny", verdict)
+	if verdict != VerdictAllow {
+		t.Fatalf("exec pending verdict = %s, want allow from permit default", verdict)
 	}
 	if afterResponse != nil {
-		t.Fatal("exec pending decision unexpectedly scheduled post-response work")
+		t.Fatal("rule-resolved exec unexpectedly scheduled post-response work")
 	}
 	lookup.mu.Lock()
 	calls := lookup.calls
 	lookup.mu.Unlock()
-	if calls != 0 {
-		t.Fatalf("exec pending decision consulted stale PID profile %d times", calls)
+	if calls != 1 {
+		t.Fatalf("exec pending decision consulted launching PID profile %d times, want 1", calls)
 	}
 }
 
