@@ -51,35 +51,62 @@ type promptIdentity struct {
 }
 
 type result struct {
-	Mode                   string         `json:"mode"`
-	Scope                  string         `json:"scope"`
-	Events                 int            `json:"events"`
-	Allowed                int            `json:"allowed"`
-	Denied                 int            `json:"denied"`
-	Prompts                int            `json:"prompts"`
-	QueueSaturationDenies  uint64         `json:"queue_saturation_denies"`
-	OutstandingLimitDenies uint64         `json:"outstanding_limit_denies"`
-	ProfileAskLimitDenies  uint64         `json:"profile_ask_limit_denies"`
-	MaxQueueDepth          int            `json:"max_queue_depth"`
-	MaxOutstanding         int64          `json:"max_outstanding_descriptors"`
-	FailedResponses        int            `json:"failed_responses"`
-	UnresolvedOwnership    int            `json:"unresolved_ownership"`
-	DirtyPermanentRules    int            `json:"dirty_permanent_rules"`
-	DecisionLatency        latencySummary `json:"decision_latency"`
-	ResponseLatency        latencySummary `json:"response_latency"`
-	FirstHelper            helperIdentity `json:"first_helper"`
-	SecondHelper           helperIdentity `json:"second_helper,omitempty"`
-	ObservationVerified    bool           `json:"observation_verified"`
-	PersistenceReloaded    bool           `json:"persistence_reloaded"`
-	ControlledShutdown     bool           `json:"controlled_shutdown"`
-	Kernel                 string         `json:"kernel"`
-	CPUCount               int            `json:"cpu_count"`
-	ContainerID            string         `json:"container_id"`
-	MountNamespace         string         `json:"mount_namespace"`
-	Failure                string         `json:"failure,omitempty"`
+	Mode                   string            `json:"mode"`
+	Scope                  string            `json:"scope"`
+	Events                 int               `json:"events"`
+	Allowed                int               `json:"allowed"`
+	Denied                 int               `json:"denied"`
+	Prompts                int               `json:"prompts"`
+	QueueSaturationDenies  uint64            `json:"queue_saturation_denies"`
+	OutstandingLimitDenies uint64            `json:"outstanding_limit_denies"`
+	ProfileAskLimitDenies  uint64            `json:"profile_ask_limit_denies"`
+	MaxQueueDepth          int               `json:"max_queue_depth"`
+	MaxOutstanding         int64             `json:"max_outstanding_descriptors"`
+	FailedResponses        int               `json:"failed_responses"`
+	UnresolvedOwnership    int               `json:"unresolved_ownership"`
+	DirtyPermanentRules    int               `json:"dirty_permanent_rules"`
+	ShutdownDurationMS     float64           `json:"shutdown_duration_ms"`
+	EffectiveSettings      effectiveSettings `json:"effective_fileaccess_settings"`
+	DecisionLatency        latencySummary    `json:"decision_latency"`
+	ResponseLatency        latencySummary    `json:"response_latency"`
+	FirstHelper            helperIdentity    `json:"first_helper"`
+	SecondHelper           helperIdentity    `json:"second_helper,omitempty"`
+	ObservationVerified    bool              `json:"observation_verified"`
+	PersistenceReloaded    bool              `json:"persistence_reloaded"`
+	ControlledShutdown     bool              `json:"controlled_shutdown"`
+	Kernel                 string            `json:"kernel"`
+	CPUCount               int               `json:"cpu_count"`
+	ContainerID            string            `json:"container_id"`
+	MountNamespace         string            `json:"mount_namespace"`
+	Failure                string            `json:"failure,omitempty"`
+}
+
+type effectiveSettings struct {
+	WatchPaths            []string `json:"watch_paths"`
+	InterceptReads        bool     `json:"intercept_reads"`
+	WorkerCount           int      `json:"worker_count"`
+	QueueCapacity         int      `json:"queue_capacity"`
+	OutstandingEventLimit int64    `json:"outstanding_event_limit"`
+	PerProfileAskLimit    int      `json:"per_profile_ask_limit"`
+	RequestedRootAsk      bool     `json:"requested_root_ask"`
+	RootAskGateOpen       bool     `json:"root_ask_gate_open"`
 }
 
 type diagnostics struct {
+	Settings struct {
+		WatchPaths              []string `json:"WatchPaths"`
+		InterceptReads          bool     `json:"InterceptReads"`
+		RequestedRootAsk        bool     `json:"RequestedRootAsk"`
+		EffectivePipelineConfig struct {
+			Workers            int   `json:"Workers"`
+			QueueCapacity      int   `json:"QueueCapacity"`
+			OutstandingLimit   int64 `json:"OutstandingLimit"`
+			PerProfileAskLimit int   `json:"PerProfileAskLimit"`
+		} `json:"EffectivePipelineConfig"`
+	} `json:"Settings"`
+	RootAskGate struct {
+		Open bool `json:"Open"`
+	} `json:"RootAskGate"`
 	Reader struct {
 		OutstandingDescriptors int64  `json:"OutstandingDescriptors"`
 		PeakOutstanding        int64  `json:"PeakOutstandingDescriptors"`
@@ -129,15 +156,6 @@ func main() {
 		return
 	}
 
-	var outputFile *os.File
-	var err error
-	if *output != "" {
-		outputFile, err = preparePrivateJSON(*output)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-	}
 	res, err := run(*core, *mode, *events, *timeout, *rootScope)
 	if err != nil {
 		res.Failure = err.Error()
@@ -148,8 +166,8 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println(string(encoded))
-	if outputFile != nil {
-		if writeErr := commitPrivateJSON(*output, outputFile, encoded); writeErr != nil {
+	if *output != "" {
+		if writeErr := writePrivateJSON(*output, encoded); writeErr != nil {
 			fmt.Fprintln(os.Stderr, writeErr)
 			os.Exit(1)
 		}
@@ -401,13 +419,25 @@ drainPromptMessages:
 	res.MaxOutstanding = diagnostic.Reader.PeakOutstanding
 	res.FailedResponses = diagnostic.FailedResponseCount
 	res.DirtyPermanentRules = diagnostic.PermanentRules.DirtyCount
+	res.EffectiveSettings = effectiveSettings{
+		WatchPaths:            append([]string(nil), diagnostic.Settings.WatchPaths...),
+		InterceptReads:        diagnostic.Settings.InterceptReads,
+		WorkerCount:           diagnostic.Settings.EffectivePipelineConfig.Workers,
+		QueueCapacity:         diagnostic.Settings.EffectivePipelineConfig.QueueCapacity,
+		OutstandingEventLimit: diagnostic.Settings.EffectivePipelineConfig.OutstandingLimit,
+		PerProfileAskLimit:    diagnostic.Settings.EffectivePipelineConfig.PerProfileAskLimit,
+		RequestedRootAsk:      diagnostic.Settings.RequestedRootAsk,
+		RootAskGateOpen:       diagnostic.RootAskGate.Open,
+	}
 	res.UnresolvedOwnership = diagnostic.Decision.QueueDepth + int(diagnostic.Decision.Outstanding) + diagnostic.Prompt.Events
 	if diagnostic.Reader.OutstandingDescriptors != 0 || diagnostic.Decision.Outstanding != 0 || diagnostic.Prompt.Events != 0 {
 		return res, fmt.Errorf("pipeline did not drain: reader=%d outstanding=%d prompts=%d", diagnostic.Reader.OutstandingDescriptors, diagnostic.Decision.Outstanding, diagnostic.Prompt.Events)
 	}
+	shutdownStarted := time.Now()
 	if err := stopUnit(ctx, unit); err != nil {
 		return res, err
 	}
+	res.ShutdownDurationMS = float64(time.Since(shutdownStarted).Microseconds()) / 1000
 	stopped = true
 	res.ControlledShutdown = true
 	return res, nil
@@ -718,32 +748,74 @@ func summarize(samples []time.Duration) latencySummary {
 	return latencySummary{Count: int64(len(ordered)), P50MS: toMS(ordered[(len(ordered)-1)/2]), P95MS: toMS(ordered[(len(ordered)*95+99)/100-1]), MaxMS: toMS(ordered[len(ordered)-1])}
 }
 
-func preparePrivateJSON(path string) (*os.File, error) {
-	temporary := path + ".tmp"
-	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return file, nil
+type privateJSONOps struct {
+	createTemp func(dir, pattern string) (*os.File, error)
+	rename     func(oldPath, newPath string) error
+	syncDir    func(path string) error
 }
 
-func commitPrivateJSON(path string, file *os.File, data []byte) error {
-	if _, err := file.Write(append(data, '\n')); err != nil {
-		_ = file.Close()
+var defaultPrivateJSONOps = privateJSONOps{
+	createTemp: os.CreateTemp,
+	rename:     os.Rename,
+	syncDir:    syncDirectory,
+}
+
+func writePrivateJSON(path string, data []byte) error {
+	return writePrivateJSONWithOps(path, data, defaultPrivateJSONOps)
+}
+
+func writePrivateJSONWithOps(path string, data []byte, ops privateJSONOps) (err error) {
+	directory := filepath.Dir(path)
+	file, err := ops.createTemp(directory, "."+filepath.Base(path)+"-")
+	if err != nil {
+		return err
+	}
+	temporary := file.Name()
+	defer func() {
+		if file != nil {
+			_ = file.Close()
+		}
+		if temporary != "" {
+			_ = os.Remove(temporary)
+		}
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("private benchmark artifact has mode %o, want 600", info.Mode().Perm())
+	}
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	if _, err := file.Write([]byte{'\n'}); err != nil {
 		return err
 	}
 	if err := file.Sync(); err != nil {
-		_ = file.Close()
 		return err
 	}
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return os.Rename(path+".tmp", path)
+	file = nil
+	if err := ops.rename(temporary, path); err != nil {
+		return err
+	}
+	temporary = ""
+	return ops.syncDir(directory)
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func kernelRelease() string {

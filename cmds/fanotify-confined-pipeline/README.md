@@ -30,6 +30,14 @@ immediately before the reusable helper opens the probe and ends when that open
 returns. Both exclude `systemd-run` service startup; the verifier rejects a
 sample if another response races it, rather than reporting ambiguous latency.
 
+The JSON contract includes event/verdict and prompt counts, queue/descriptor
+denials and peaks, response/ownership/persistence status, decision and response
+latency summaries, `shutdown_duration_ms`, kernel/container metadata, and
+`effective_fileaccess_settings`. The settings are read from the daemon
+diagnostics and include watched paths, read interception, effective worker,
+queue, outstanding-event, and per-profile Ask limits, plus requested and
+effective Root Ask gate state.
+
 ```bash
 sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core \
   --mode benchmark --events 25 --json /tmp/filemaster-confined-benchmark.json
