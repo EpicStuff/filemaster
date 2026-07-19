@@ -163,12 +163,20 @@ func TestMountReconciliationRetainsPartialCoverageAndRetries(t *testing.T) {
 	}
 	if got := s.MountDiagnostics(); !got.PartialCoverage || !reflect.DeepEqual(got.MissingMountIDs, []int{2}) {
 		t.Fatalf("partial diagnostics = %#v", got)
+	} else if !got.ScopeActivationPending || !reflect.DeepEqual(got.PendingScopes, []string{root}) {
+		t.Fatalf("pending scope diagnostics = %#v, want %q pending", got, root)
+	}
+	if snapshotContains(s.activeScopes.Load(), root) {
+		t.Fatal("scope became active despite a failed required mark")
 	}
 
 	failNested = false
 	s.reconcile()
-	if got := s.MountDiagnostics(); got.PartialCoverage || len(got.MissingMountIDs) != 0 {
+	if got := s.MountDiagnostics(); got.PartialCoverage || len(got.MissingMountIDs) != 0 || got.ScopeActivationPending {
 		t.Fatalf("retry diagnostics = %#v", got)
+	}
+	if !snapshotContains(s.activeScopes.Load(), root) {
+		t.Fatal("verified scope was not published after all required marks succeeded")
 	}
 	if _, ok := s.marks[2]; !ok {
 		t.Fatal("failed mount was not retried")
@@ -360,6 +368,13 @@ func TestLateInScopeMountKeepsDynamicCoverageBreachAfterMarking(t *testing.T) {
 	}
 	if len(diagnostics.DynamicMountIDs) != 1 || diagnostics.DynamicMountIDs[0] != 3 {
 		t.Fatalf("unexpected dynamic mount IDs: %#v", diagnostics.DynamicMountIDs)
+	}
+	if len(diagnostics.DynamicMountCoverageGaps) != 1 {
+		t.Fatalf("dynamic coverage gaps = %#v, want one detailed gap", diagnostics.DynamicMountCoverageGaps)
+	}
+	gap := diagnostics.DynamicMountCoverageGaps[0]
+	if gap.MountID != 3 || gap.MountPath != nested || len(gap.AffectedScopes) != 1 || gap.AffectedScopes[0] != root {
+		t.Fatalf("dynamic coverage gap = %#v, want mount 3 at %q affecting %q", gap, nested, root)
 	}
 	if len(diagnostics.MissingMountIDs) != 0 {
 		t.Fatalf("marked late mount should have prospective coverage: %#v", diagnostics.MissingMountIDs)

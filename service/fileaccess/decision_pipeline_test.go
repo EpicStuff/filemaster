@@ -231,6 +231,32 @@ func TestDecisionPipelineRefreshesAllowedExecMapping(t *testing.T) {
 	}
 }
 
+func TestDecisionPipelineProfileHandlerExecDeniesWithoutPredecessorLookup(t *testing.T) {
+	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
+		91: {id: "predecessor", defAct: profile.DefaultActionAsk},
+	}}
+	handler := NewProfileHandler(lookup, nil, nil, time.Second, nopLogger{})
+	pipeline := NewDecisionPipeline(handler, DecisionPipelineConfig{Workers: 1, QueueCapacity: 1, OutstandingLimit: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	pipeline.Start(ctx)
+
+	pending, responses := pipelinePending(FileEvent{PID: 91, Path: "/tmp/target", Op: OpExec})
+	if err := pipeline.Handle(ctx, pending); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := waitPipelineVerdict(t, responses); got != VerdictDeny {
+		t.Fatalf("exec verdict = %s, want deny without target executable profile resolution", got)
+	}
+
+	lookup.mu.Lock()
+	calls := lookup.calls
+	lookup.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("pipeline consulted predecessor PID profile %d times for exec", calls)
+	}
+}
+
 type observingHandler struct {
 	inner     Handler
 	responded atomic.Bool

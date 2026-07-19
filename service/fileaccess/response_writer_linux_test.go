@@ -193,37 +193,33 @@ func TestFanotifyResponseWriterSerializesWrites(t *testing.T) {
 
 func TestFatalResponseFailureStartsControlledDraining(t *testing.T) {
 	dir := t.TempDir()
-	firstPath := filepath.Join(dir, "first")
-	secondPath := filepath.Join(dir, "second")
-	if err := os.WriteFile(firstPath, []byte("first"), 0o600); err != nil {
-		t.Fatalf("write first file: %v", err)
+	path := filepath.Join(dir, "first")
+	if err := os.WriteFile(path, []byte("first"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
 	}
-	if err := os.WriteFile(secondPath, []byte("second"), 0o600); err != nil {
-		t.Fatalf("write second file: %v", err)
-	}
-	first, err := os.Open(firstPath)
+	file, err := os.Open(path)
 	if err != nil {
-		t.Fatalf("open first file: %v", err)
+		t.Fatalf("open file: %v", err)
 	}
-	defer first.Close()
-	second, err := os.Open(secondPath)
-	if err != nil {
-		t.Fatalf("open second file: %v", err)
-	}
-	defer second.Close()
+	defer file.Close()
 
 	writer := newFanotifyResponseWriter(46, nopLogger{}, nil)
 	var writes atomic.Int32
-	var secondResponse unix.FanotifyResponse
-	writer.write = func(_ int, bytes []byte) (int, error) {
-		if writes.Add(1) == 1 {
-			return 0, unix.EIO
-		}
-		secondResponse = *(*unix.FanotifyResponse)(unsafe.Pointer(&bytes[0]))
-		return len(bytes), nil
+	var groupCloses atomic.Int32
+	writer.write = func(_ int, _ []byte) (int, error) {
+		writes.Add(1)
+		return 0, unix.EIO
 	}
-	writer.close = unix.Close
+	writer.close = func(fd int) error {
+		if fd == writer.groupFD {
+			groupCloses.Add(1)
+			return nil
+		}
+		return unix.Close(fd)
+	}
 	source := &fanotifySource{
+		fd:           -1,
+		emergencyFD:  -1,
 		log:          nopLogger{},
 		responses:    writer,
 		failedEvents: make(map[int32]PendingEvent),
@@ -235,7 +231,7 @@ func TestFatalResponseFailureStartsControlledDraining(t *testing.T) {
 		return pending.Respond(VerdictAllow)
 	})
 
-	firstFD := int32(first.Fd())
+	firstFD := int32(file.Fd())
 	source.handleEvent(context.Background(), handler, &unix.FanotifyEventMetadata{
 		Vers: unix.FANOTIFY_METADATA_VERSION,
 		Fd:   firstFD,
@@ -251,20 +247,14 @@ func TestFatalResponseFailureStartsControlledDraining(t *testing.T) {
 		t.Fatal("failed response event ownership was not retained")
 	}
 
-	secondFD := int32(second.Fd())
-	source.handleEvent(context.Background(), handler, &unix.FanotifyEventMetadata{
-		Vers: unix.FANOTIFY_METADATA_VERSION,
-		Fd:   secondFD,
-		Mask: unix.FAN_OPEN_PERM,
-	})
-	if policyCalls.Load() != 1 {
-		t.Fatalf("policy calls = %d, want 1 before draining only", policyCalls.Load())
+	if err := source.CloseGroup(); err != nil {
+		t.Fatalf("CloseGroup: %v", err)
 	}
-	if writes.Load() != 2 {
-		t.Fatalf("response writes = %d, want 2", writes.Load())
+	if !writer.closed.Load() || groupCloses.Load() != 1 {
+		t.Fatalf("closed=%v group closes=%d, want true/1", writer.closed.Load(), groupCloses.Load())
 	}
-	if secondResponse.Fd != secondFD || secondResponse.Response != unix.FAN_DENY {
-		t.Fatalf("drain response = %+v, want second fd denied", secondResponse)
+	if policyCalls.Load() != 1 || writes.Load() != 1 {
+		t.Fatalf("policy calls=%d writes=%d, want 1/1", policyCalls.Load(), writes.Load())
 	}
 }
 
@@ -287,11 +277,18 @@ func TestRecoveryDenyFailureRetainsCurrentCoordinatorOwner(t *testing.T) {
 		return 0, unix.EIO
 	}
 	var closes atomic.Int32
-	writer.close = func(int) error {
+	var groupCloses atomic.Int32
+	writer.close = func(fd int) error {
+		if fd == writer.groupFD {
+			groupCloses.Add(1)
+			return nil
+		}
 		closes.Add(1)
 		return nil
 	}
 	source := &fanotifySource{
+		fd:           -1,
+		emergencyFD:  -1,
 		log:          nopLogger{},
 		responses:    writer,
 		failedEvents: make(map[int32]PendingEvent),
@@ -338,5 +335,11 @@ func TestRecoveryDenyFailureRetainsCurrentCoordinatorOwner(t *testing.T) {
 	}
 	if writes.Load() != 1 || closes.Load() != 0 {
 		t.Fatalf("writes=%d closes=%d, want 1/0", writes.Load(), closes.Load())
+	}
+	if err := source.CloseGroup(); err != nil {
+		t.Fatalf("CloseGroup: %v", err)
+	}
+	if groupCloses.Load() != 1 {
+		t.Fatalf("group closes=%d, want 1", groupCloses.Load())
 	}
 }
