@@ -53,9 +53,10 @@ profile-UI confirmation. Complete those remaining runbook steps before calling
 `RecordRootAskRolloutEvidence`.
 
 The backend-only verifier now performs the interactive notification exchange
-without a browser. Its first temporary-scope helper access received an approved
-`Allow always` response and produced a matching filequery observation. Its
-restart check then received a second prompt instead of reusing the durable
-rule. This is a real failed persistence/identity verification, not a host
-capability skip: do not record trusted evidence or open root Ask mode until the
-same systemd helper resolves to a durable profile identity after restart.
+without a browser. It uses one stable temporary helper executable and one
+reusable transient helper unit. The first temporary-scope access receives an
+approved `Allow always` response and produces a matching filequery observation;
+a daemon restart then reuses the same durable profile identity and exact rule
+without another prompt. Root scope verification is explicitly deferred from
+Phase 8: do not record root-scope evidence or open root Ask from this confined
+verification alone.

@@ -32,6 +32,31 @@ func newReaderTestSource(limit int64) *fanotifySource {
 	return source
 }
 
+func TestDecisionLatencyDiagnosticsTrackOnlyAcceptedResponses(t *testing.T) {
+	source := newReaderTestSource(8)
+	accepted := source.newFanotifyPendingEvent(&FileEvent{Op: OpOpen}, 101)
+	if err := accepted.Respond(VerdictAllow); err != nil {
+		t.Fatalf("accept response: %v", err)
+	}
+	diagnostic := source.ReaderDiagnostics()
+	if diagnostic.DecisionResponseCount != 1 {
+		t.Fatalf("accepted response count = %d, want 1", diagnostic.DecisionResponseCount)
+	}
+	if diagnostic.LastDecisionLatencyNanos <= 0 {
+		t.Fatalf("accepted response latency = %d, want positive", diagnostic.LastDecisionLatencyNanos)
+	}
+
+	source.responses.write = func(_ int, _ []byte) (int, error) { return 0, unix.EIO }
+	unaccepted := source.newFanotifyPendingEvent(&FileEvent{Op: OpOpen}, 102)
+	if err := unaccepted.Respond(VerdictDeny); !errors.Is(err, unix.EIO) {
+		t.Fatalf("unaccepted response error = %v, want EIO", err)
+	}
+	diagnostic = source.ReaderDiagnostics()
+	if diagnostic.DecisionResponseCount != 1 {
+		t.Fatalf("unaccepted response changed count to %d", diagnostic.DecisionResponseCount)
+	}
+}
+
 func fanotifyEventBytes(events ...unix.FanotifyEventMetadata) []byte {
 	metadataSize := int(unsafe.Sizeof(unix.FanotifyEventMetadata{}))
 	buf := make([]byte, 0, len(events)*metadataSize)

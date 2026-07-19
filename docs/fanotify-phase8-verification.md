@@ -18,9 +18,9 @@ Host-dependent verification is deliberately not inferred from unit tests.
 | Matching settings UI | Existing dynamic settings renderer, `fileaccess` subsystem registration, and the settings diagnostics panel | component and HTTP endpoint service specs | Focused Karma specs and `npx playwright test playwright/file-access.spec.ts --project=chromium --workers=1 --reporter=line` — **passed** | Dev server compiled successfully; inspected `tmp/fileaccess-settings-live.png` shows live running diagnostics. |
 | Fake-source ownership parity | `socket_source.go` uses `PendingEvent`/`deliverPendingEvent` | socket and pipeline tests | `go test -tags filemaster_test ./service/fileaccess -count=1` | Socket transport lacks kernel-only mount/FD behavior; confined source covers that. |
 | Confined fanotify integration | `fanotify_confined_integration_linux_test.go` | `TestConfinedFanotifyIntegration` | `FM_FANOTIFY_INTEGRATION=1 go test ./service/fileaccess -run '^TestConfinedFanotifyIntegration$' -count=1 -v -timeout=45s` — **passed** | Private mount namespace and temporary bind mount only; `/` is never marked. |
-| Real PID 1 systemd safety | `cmds/fanotify-confined-pipeline`, `docs/fanotify-systemd-host-verification.md` | Explicit host-only verifier drives notifications directly, no browser | `sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core --mode verify` | Real temporary-scope prompt approval and filequery observation passed. The daemon restart check still reprompted the systemd helper, so durable profile identity/persistence evidence remains incomplete. |
-| Confined full pipeline benchmark | `cmds/fanotify-confined-pipeline` | Harness emits one JSON result and can atomically write it mode 0600 | `sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core --mode benchmark --events 25 --json /tmp/filemaster-confined-benchmark.json` | **Incomplete:** it is confined and never marks `/`, but it intentionally fails until the systemd helper's accepted Always decision survives restart. Root Ask evidence cannot be recorded from it. |
-| Root scope Ask gate | `rollout_gate_linux.go`, `profile_handler.go` | `phase8_test.go` | `go test ./service/fileaccess -run TestRootAskGate` | Closed: systemd host and root benchmark evidence are absent. Evidence is a private 0600 data-dir record, never a browser setting. |
+| Real PID 1 systemd safety | `cmds/fanotify-confined-pipeline`, `docs/fanotify-systemd-host-verification.md` | Explicit host-only verifier drives notifications directly, no browser | `sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core --mode verify` | Confined temporary-scope prompt approval, durable restart reuse, filequery observation, and controlled shutdown are verified. |
+| Confined full pipeline benchmark | `cmds/fanotify-confined-pipeline` | Harness emits one JSON result and atomically writes it mode 0600 | `sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core --mode benchmark --events 25 --json /tmp/filemaster-confined-benchmark.json` | Accepted Phase 8 host verification. It uses only a temporary bind mount and never marks `/`. |
+| Root scope Ask gate | `rollout_gate_linux.go`, `profile_handler.go` | `phase8_test.go` | `go test ./service/fileaccess -run TestRootAskGate` | **Intentionally deferred:** root scope verification is not part of Phase 8 completion. Root Ask remains closed because no trusted root-scope evidence exists. |
 
 The exact file-access Playwright command,
 `cd desktop/angular && npx playwright test playwright/file-access.spec.ts --project=chromium --workers=1 --reporter=line`,
@@ -33,14 +33,15 @@ packages passed; the overall suite remains blocked only by
 its expected UI `DEFAULT_PORT` constant. That path is not modified by this
 Phase 8 work.
 
-The Phase 8 root Ask gate defaults closed. Its browser-visible request switch
-does not supply verification evidence. A trusted backend host-verification
-recorder calls `FileAccess.RecordRootAskRolloutEvidence`, which atomically
-writes `<data-dir>/fileaccess-root-ask-rollout-evidence.json` with mode 0600;
-there is deliberately no API endpoint or configuration option that can write
-this record. The recorder derives the implementation version, effective worker
-and descriptor settings, and current Linux kernel environment itself. A missing
-record, write/read error, implementation change, settings change, or kernel
-environment change closes the gate again. Trusted verification must provide
-confined integration, systemd PID 1, benchmark, shutdown, persistence, and
-prompt grouping evidence.
+The Phase 8 root Ask gate defaults closed. Root scope testing was explicitly
+dropped from Phase 8 and `/` has not been successfully verified. Phase 8
+completion therefore does not imply root Ask readiness. Its browser-visible
+request switch does not supply verification evidence. A future trusted backend
+root-scope host-verification recorder may call
+`FileAccess.RecordRootAskRolloutEvidence`, which atomically writes
+`<data-dir>/fileaccess-root-ask-rollout-evidence.json` with mode 0600; there
+is deliberately no API endpoint or configuration option that can write this
+record. The recorder derives implementation, effective-settings, and Linux
+kernel fingerprints itself. A missing record, write/read error, implementation
+change, settings change, or kernel environment change keeps the gate closed.
+Normal confined and configured nonroot scopes remain fully usable.

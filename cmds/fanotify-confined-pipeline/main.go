@@ -65,6 +65,7 @@ type result struct {
 	FailedResponses        int            `json:"failed_responses"`
 	UnresolvedOwnership    int            `json:"unresolved_ownership"`
 	DirtyPermanentRules    int            `json:"dirty_permanent_rules"`
+	DecisionLatency        latencySummary `json:"decision_latency"`
 	ResponseLatency        latencySummary `json:"response_latency"`
 	FirstHelper            helperIdentity `json:"first_helper"`
 	SecondHelper           helperIdentity `json:"second_helper,omitempty"`
@@ -80,10 +81,12 @@ type result struct {
 
 type diagnostics struct {
 	Reader struct {
-		OutstandingDescriptors int64 `json:"OutstandingDescriptors"`
-		PeakOutstanding        int64 `json:"PeakOutstandingDescriptors"`
-		Running                bool  `json:"Running"`
-		Fatal                  bool  `json:"Fatal"`
+		OutstandingDescriptors int64  `json:"OutstandingDescriptors"`
+		PeakOutstanding        int64  `json:"PeakOutstandingDescriptors"`
+		DecisionResponses      uint64 `json:"DecisionResponseCount"`
+		LastDecisionLatency    int64  `json:"LastDecisionLatencyNanos"`
+		Running                bool   `json:"Running"`
+		Fatal                  bool   `json:"Fatal"`
 	} `json:"Reader"`
 	Decision struct {
 		QueueDepth              int    `json:"QueueDepth"`
@@ -126,6 +129,15 @@ func main() {
 		return
 	}
 
+	var outputFile *os.File
+	var err error
+	if *output != "" {
+		outputFile, err = preparePrivateJSON(*output)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
 	res, err := run(*core, *mode, *events, *timeout, *rootScope)
 	if err != nil {
 		res.Failure = err.Error()
@@ -136,8 +148,8 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println(string(encoded))
-	if *output != "" {
-		if writeErr := writePrivateJSON(*output, encoded); writeErr != nil {
+	if outputFile != nil {
+		if writeErr := commitPrivateJSON(*output, outputFile, encoded); writeErr != nil {
 			fmt.Fprintln(os.Stderr, writeErr)
 			os.Exit(1)
 		}
@@ -353,17 +365,31 @@ drainPromptMessages:
 	res.Allowed++
 	res.Events++
 
-	var samples []time.Duration
+	var decisionSamples []time.Duration
+	var responseSamples []time.Duration
 	for index := 0; index < events; index++ {
+		before, err := getDiagnostics(ctx, address)
+		if err != nil {
+			return res, err
+		}
 		latency, err := measureHelper(ctx, fmt.Sprintf("%s-bench-%d", unit, index), helperExecutable, probe)
 		if err != nil {
 			return res, err
 		}
-		samples = append(samples, latency)
+		after, err := getDiagnostics(ctx, address)
+		if err != nil {
+			return res, err
+		}
+		if after.Reader.DecisionResponses != before.Reader.DecisionResponses+1 {
+			return res, fmt.Errorf("decision latency sample contaminated by %d concurrent responses", after.Reader.DecisionResponses-before.Reader.DecisionResponses)
+		}
+		decisionSamples = append(decisionSamples, time.Duration(after.Reader.LastDecisionLatency))
+		responseSamples = append(responseSamples, latency)
 		res.Allowed++
 		res.Events++
 	}
-	res.ResponseLatency = summarize(samples)
+	res.DecisionLatency = summarize(decisionSamples)
+	res.ResponseLatency = summarize(responseSamples)
 	diagnostic, err := getDiagnostics(ctx, address)
 	if err != nil {
 		return res, err
@@ -692,15 +718,32 @@ func summarize(samples []time.Duration) latencySummary {
 	return latencySummary{Count: int64(len(ordered)), P50MS: toMS(ordered[(len(ordered)-1)/2]), P95MS: toMS(ordered[(len(ordered)*95+99)/100-1]), MaxMS: toMS(ordered[len(ordered)-1])}
 }
 
-func writePrivateJSON(path string, data []byte) error {
+func preparePrivateJSON(path string) (*os.File, error) {
 	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, append(data, '\n'), 0o600); err != nil {
+	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func commitPrivateJSON(path string, file *os.File, data []byte) error {
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		_ = file.Close()
 		return err
 	}
-	if err := os.Chmod(temporary, 0o600); err != nil {
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
 		return err
 	}
-	return os.Rename(temporary, path)
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(path+".tmp", path)
 }
 
 func kernelRelease() string {

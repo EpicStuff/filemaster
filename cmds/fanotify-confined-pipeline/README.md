@@ -24,10 +24,11 @@ sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core --mode verify
 
 Run a confined, full daemon pipeline measurement. The result is one JSON
 object on stdout; `--json` atomically writes the same object with mode 0600.
-The `response_latency` measurement starts immediately before the reusable helper
-opens the probe and ends when that open returns. It excludes `systemd-run`
-service startup while exercising the real reader, descriptor, queue, lookup,
-rule, response, and post-response observation path.
+`decision_latency` is measured in the daemon from creation of the owned kernel
+permission event through acceptance of its response. `response_latency` starts
+immediately before the reusable helper opens the probe and ends when that open
+returns. Both exclude `systemd-run` service startup; the verifier rejects a
+sample if another response races it, rather than reporting ambiguous latency.
 
 ```bash
 sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core \
@@ -41,22 +42,10 @@ temporary files on every exit path. It intentionally does **not** call
 `RecordRootAskRolloutEvidence`: root-scope benchmark acknowledgement and the
 remaining trusted-evidence review are separate safety requirements.
 
-## Disposable-container root benchmark
+## Root scope status
 
-The verifier refuses to mark `/` unless both `--root-scope` and the explicit
-acknowledgement below are supplied. It also requires `/run/.containerenv`, PID
-1 systemd, effective `CAP_SYS_ADMIN`, and its bounded `--timeout`; it prints
-the container and mount-namespace identifiers before starting Filemaster.
-
-Only run this inside a disposable rootful Podman container:
-
-```bash
-FM_ROOT_BENCHMARK_ACK=I_UNDERSTAND_ROOT_MARKING \
-  sudo /tmp/fanotify-confined-pipeline --core /tmp/portmaster-core \
-  --mode benchmark --root-scope --events 1 --timeout 45s \
-  --json /tmp/filemaster-root-benchmark.json
-```
-
-The verifier does not record trusted rollout evidence. A successful confined
-and root result still requires an explicit backend-only evidence record and
-validity check before root-scope Ask can open.
+Root scope testing is explicitly deferred from Phase 8. Do not invoke
+`--root-scope` as part of Phase 8 verification, and do not treat a confined
+result as root-scope evidence. The guarded root mode and Root Ask gate remain
+for a future dedicated verification effort, but Root Ask stays closed until
+that effort records valid backend-only evidence.

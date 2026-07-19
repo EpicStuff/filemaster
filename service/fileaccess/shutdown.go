@@ -73,6 +73,8 @@ type ReaderDiagnostics struct {
 	DescriptorLimit            int64
 	OutstandingDescriptors     int64
 	PeakOutstandingDescriptors int64
+	DecisionResponseCount      uint64
+	LastDecisionLatencyNanos   int64
 	AccountedDescriptors       []int32
 	FailedResponseDescriptors  []int32
 	DescriptorPressure         bool

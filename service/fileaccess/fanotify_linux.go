@@ -44,11 +44,13 @@ type fanotifySource struct {
 	emfileRetry     time.Duration
 	descriptorLimit int64
 
-	accountedMu        sync.Mutex
-	accounted          map[int32]struct{}
-	outstanding        atomic.Int64
-	peakOutstanding    atomic.Int64
-	descriptorReleased chan struct{}
+	accountedMu         sync.Mutex
+	accounted           map[int32]struct{}
+	outstanding         atomic.Int64
+	peakOutstanding     atomic.Int64
+	decisionResponses   atomic.Uint64
+	lastDecisionLatency atomic.Int64
+	descriptorReleased  chan struct{}
 
 	queueOverflows       atomic.Uint64
 	readEMFILEs          atomic.Uint64
@@ -245,8 +247,14 @@ func (s *fanotifySource) resolveAccountedEventForFatal(meta *unix.FanotifyEventM
 }
 
 func (s *fanotifySource) newFanotifyPendingEvent(event *FileEvent, eventFD int32) *pendingEventOwner {
+	started := time.Now()
 	return newPendingEventWithFailureSink(event, func(verdict Verdict) responseResult {
-		return s.responses.respond(eventFD, verdict)
+		result := s.responses.respond(eventFD, verdict)
+		if result.accepted {
+			s.lastDecisionLatency.Store(time.Since(started).Nanoseconds())
+			s.decisionResponses.Add(1)
+		}
+		return result
 	}, func(owner PendingEvent) {
 		s.retainFailedEvent(eventFD, owner)
 	})
@@ -304,6 +312,8 @@ func (s *fanotifySource) ReaderDiagnostics() ReaderDiagnostics {
 		DescriptorLimit:            s.descriptorLimit,
 		OutstandingDescriptors:     s.outstanding.Load(),
 		PeakOutstandingDescriptors: s.peakOutstanding.Load(),
+		DecisionResponseCount:      s.decisionResponses.Load(),
+		LastDecisionLatencyNanos:   s.lastDecisionLatency.Load(),
 		AccountedDescriptors:       accounted,
 		FailedResponseDescriptors:  failed,
 		DescriptorPressure:         s.descriptorPressure.Load(),
