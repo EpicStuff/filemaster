@@ -215,7 +215,12 @@ func TestFatalResponseFailureStartsControlledDraining(t *testing.T) {
 			groupCloses.Add(1)
 			return nil
 		}
-		return unix.Close(fd)
+		// The event fd below is a live *os.File descriptor used only to resolve a
+		// real /proc/self/fd path. Do not actually close it: the source closes
+		// retained event fds asynchronously, which would race with defer
+		// file.Close() and t.TempDir() cleanup on fd reuse (intermittent EBADF).
+		// os.File keeps ownership and its deferred Close releases the fd once.
+		return nil
 	}
 	source := &fanotifySource{
 		fd:           -1,
