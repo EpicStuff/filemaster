@@ -83,7 +83,7 @@ type processMappingRefresher interface {
 }
 
 type pendingDecisionHandler interface {
-	DecidePending(context.Context, PendingEvent) (handled, handedOff bool, verdict Verdict, afterResponse func())
+	DecidePending(context.Context, PendingEvent) (handled, handedOff, decided bool, verdict Verdict, afterResponse func())
 }
 
 type decisionWork struct {
@@ -296,13 +296,19 @@ func (p *DecisionPipeline) decide(ctx context.Context, work *decisionWork) {
 			}
 		}()
 		if handler, ok := p.handler.(pendingDecisionHandler); ok {
-			var handled, handedOff bool
-			handled, handedOff, verdict, afterResponse = handler.DecidePending(ctx, pending)
+			var handled, handedOff, decided bool
+			handled, handedOff, decided, verdict, afterResponse = handler.DecidePending(ctx, pending)
 			if handled {
 				completed = true
 				if handedOff {
 					releaseOutstanding = false
 				}
+				return
+			}
+			if decided {
+				// DecidePending resolved a definitive verdict synchronously;
+				// respond with it directly rather than repeating the full
+				// process/profile lookup via DecideForResponse.
 				return
 			}
 		}

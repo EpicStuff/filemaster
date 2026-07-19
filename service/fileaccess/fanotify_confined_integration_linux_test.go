@@ -284,12 +284,13 @@ func (h *confinedFanotifyHandler) Decide(_ context.Context, event *FileEvent) Ve
 	return VerdictAllow
 }
 
-func (h *confinedFanotifyHandler) DecidePending(ctx context.Context, pending PendingEvent) (bool, bool, Verdict, func()) {
+func (h *confinedFanotifyHandler) DecidePending(ctx context.Context, pending PendingEvent) (bool, bool, bool, Verdict, func()) {
 	event := pending.Event()
 	if event == nil || filepath.Base(event.Path) != "prompt" {
-		return false, false, VerdictDeny, nil
+		return false, false, false, VerdictDeny, nil
 	}
-	return h.coordinator.Admit(ctx, pending, confinedRuleStore{}, h.snapshot)
+	handled, handedOff, verdict, afterResponse := h.coordinator.Admit(ctx, pending, confinedRuleStore{}, h.snapshot)
+	return handled, handedOff, false, verdict, afterResponse
 }
 
 type confinedRuleStore struct{}

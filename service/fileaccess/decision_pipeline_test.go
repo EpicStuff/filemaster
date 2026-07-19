@@ -254,8 +254,10 @@ func TestDecisionPipelineProfileHandlerExecUsesLaunchingProfile(t *testing.T) {
 	lookup.mu.Lock()
 	calls := lookup.calls
 	lookup.mu.Unlock()
-	if calls == 0 {
-		t.Fatal("pipeline did not consult launching PID profile for exec")
+	// Exactly one lookup: DecidePending resolves the block default and reports
+	// it as decided, so the pipeline responds without re-running DecideForResponse.
+	if calls != 1 {
+		t.Fatalf("pipeline consulted launching PID profile %d times for exec, want 1 (no double lookup)", calls)
 	}
 }
 

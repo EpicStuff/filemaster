@@ -390,9 +390,12 @@ func TestProfileHandlerDecidePendingExecUsesLaunchingProfile(t *testing.T) {
 		return responseResult{accepted: true}
 	})
 
-	handled, handedOff, verdict, afterResponse := h.DecidePending(context.Background(), pending)
+	handled, handedOff, decided, verdict, afterResponse := h.DecidePending(context.Background(), pending)
 	if handled || handedOff {
 		t.Fatalf("exec pending decision = handled=%t handedOff=%t, want direct rule response", handled, handedOff)
+	}
+	if !decided {
+		t.Fatal("exec permit-default decision was not reported as decided; pipeline would re-lookup")
 	}
 	if verdict != VerdictAllow {
 		t.Fatalf("exec pending verdict = %s, want allow from permit default", verdict)

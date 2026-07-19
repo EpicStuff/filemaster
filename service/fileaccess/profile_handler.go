@@ -548,10 +548,16 @@ func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (V
 // DecidePending routes Ask decisions to the prompt coordinator. It is used by
 // DecisionPipeline only; the older synchronous DecideForResponse entry point
 // remains available to callers outside the owned-event pipeline.
-func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent) (handled, handedOff bool, verdict Verdict, afterResponse func()) {
+// The returns are: handled — DecidePending fully owns the outcome (either the
+// coordinator now owns it asynchronously when handedOff, or it already
+// responded); decided — DecidePending resolved a definitive verdict
+// synchronously and the pipeline should respond with it directly rather than
+// repeating the lookup via DecideForResponse. When neither is set the pipeline
+// falls back to DecideForResponse.
+func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent) (handled, handedOff, decided bool, verdict Verdict, afterResponse func()) {
 	e := pending.Event()
 	if e == nil {
-		return false, false, VerdictDeny, nil
+		return false, false, false, VerdictDeny, nil
 	}
 	// OpExec follows the same path as OpRead/OpWrite: the launching
 	// (predecessor) process's profile decides whether it may execute e.Path,
@@ -570,13 +576,14 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 			}
 			if coordinator := h.coordinator(); coordinator != nil {
 				if !h.rootAskAllowed() {
-					return false, false, VerdictDeny, nil
+					return false, false, true, VerdictDeny, nil
 				}
 				store, snapshot := h.fallbackSnapshot(e)
-				return coordinator.Admit(ctx, pending, store, snapshot)
+				handled, handedOff, verdict, afterResponse = coordinator.Admit(ctx, pending, store, snapshot)
+				return
 			}
 			verdict, afterResponse = h.fallbackDecision(ctx, e)
-			return false, false, verdict, afterResponse
+			return false, false, true, verdict, afterResponse
 		}
 	}
 
@@ -589,13 +596,14 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 	if res.Store == nil {
 		if coordinator := h.coordinator(); coordinator != nil {
 			if !h.rootAskAllowed() {
-				return false, false, VerdictDeny, nil
+				return false, false, true, VerdictDeny, nil
 			}
 			store, snapshot := h.fallbackSnapshot(e)
-			return coordinator.Admit(ctx, pending, store, snapshot)
+			handled, handedOff, verdict, afterResponse = coordinator.Admit(ctx, pending, store, snapshot)
+			return
 		}
 		verdict, afterResponse = h.fallbackDecision(ctx, e)
-		return false, false, verdict, afterResponse
+		return false, false, true, verdict, afterResponse
 	}
 
 	e.ProfileID = res.Store.ID()
@@ -612,19 +620,23 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 			Rules:         res.ParsedRules,
 		}
 	}
+	// A definitive rule or default action resolves the verdict without a
+	// prompt. Return it as decided so the pipeline responds directly instead of
+	// re-running the full process/profile lookup in DecideForResponse.
 	if decision, ask := decisionFromSnapshot(snapshot, e.Path, e.Op, e.IsDir); !ask {
-		return false, false, decision, nil
+		return false, false, true, decision, nil
 	}
 	if !h.rootAskAllowed() {
-		return false, false, VerdictDeny, nil
+		return false, false, true, VerdictDeny, nil
 	}
 
 	coordinator := h.coordinator()
 	if coordinator == nil {
 		verdict, afterResponse = h.DecideForResponse(ctx, e)
-		return false, false, verdict, afterResponse
+		return false, false, true, verdict, afterResponse
 	}
-	return coordinator.Admit(ctx, pending, res.Store, snapshot)
+	handled, handedOff, verdict, afterResponse = coordinator.Admit(ctx, pending, res.Store, snapshot)
+	return
 }
 
 func (h *ProfileHandler) fallbackSnapshot(event *FileEvent) (RuleStore, *DecisionSnapshot) {

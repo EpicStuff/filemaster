@@ -276,10 +276,11 @@ type shutdownAskHandler struct {
 
 func (handler *shutdownAskHandler) Decide(context.Context, *FileEvent) Verdict { return VerdictDeny }
 
-func (handler *shutdownAskHandler) DecidePending(ctx context.Context, pending PendingEvent) (bool, bool, Verdict, func()) {
+func (handler *shutdownAskHandler) DecidePending(ctx context.Context, pending PendingEvent) (bool, bool, bool, Verdict, func()) {
 	close(handler.started)
 	<-handler.release
-	return handler.coordinator.Admit(ctx, pending, handler.store, handler.snapshot)
+	handled, handedOff, verdict, afterResponse := handler.coordinator.Admit(ctx, pending, handler.store, handler.snapshot)
+	return handled, handedOff, false, verdict, afterResponse
 }
 
 func TestShutdownAskTransferRecheckDeniesWithoutPrompt(t *testing.T) {
