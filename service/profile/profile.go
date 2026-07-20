@@ -286,14 +286,27 @@ func (profile *Profile) IsOutdated() bool {
 	return profile.outdated.IsSet()
 }
 
-// GetFileAccessRules returns the per-profile file-access rule list as
-// raw strings; parsing into PathRules lives in service/fileaccess.
+// GetFileAccessReadRules / WriteRules / ExecRules return the per-profile,
+// per-operation file-access rule lists as raw strings; parsing into PathRules
+// (and stamping the operation implied by the list) lives in service/fileaccess.
 // Requires the profile to be read-locked.
-func (profile *Profile) GetFileAccessRules() []string {
+func (profile *Profile) GetFileAccessReadRules() []string {
+	return profile.getStringArray(CfgOptionFileAccessReadRulesKey)
+}
+
+func (profile *Profile) GetFileAccessWriteRules() []string {
+	return profile.getStringArray(CfgOptionFileAccessWriteRulesKey)
+}
+
+func (profile *Profile) GetFileAccessExecRules() []string {
+	return profile.getStringArray(CfgOptionFileAccessExecRulesKey)
+}
+
+func (profile *Profile) getStringArray(cfgKey string) []string {
 	if profile.configPerspective == nil {
 		return nil
 	}
-	list, ok := profile.configPerspective.GetAsStringArray(CfgOptionFileAccessRulesKey)
+	list, ok := profile.configPerspective.GetAsStringArray(cfgKey)
 	if !ok {
 		return nil
 	}
@@ -307,32 +320,11 @@ func (profile *Profile) DefaultAction() uint8 {
 	return profile.defaultAction
 }
 
-// AddFileAccessRule appends an entry (e.g. "+ /tmp/foo" or "- /etc/shadow")
-// to the per-profile file-access rule list, saves the profile, and reloads
-// the configuration. Duplicate entries are dropped.
-func (profile *Profile) AddFileAccessRule(newEntry string) {
-	if err := profile.PersistFileAccessRule(newEntry); err != nil {
-		log.Warningf("profile: failed to save profile %s after add rule: %s", profile.ScopedID(), err)
-	}
-}
-
-// PersistFileAccessRule prepends one canonical file-access rule and returns a
-// storage failure to its caller. Filemaster's durable rule worker uses this
-// instead of the fire-and-forget compatibility helper above.
-func (profile *Profile) PersistFileAccessRule(newEntry string) error {
-	return PersistCurrentFileAccessRule(profile.Source, profile.ID, newEntry, nil)
-}
-
-// PersistFileAccessRuleIfCurrent aborts before storage when the caller's
-// profile authority changed while it prepared this update.
-func (profile *Profile) PersistFileAccessRuleIfCurrent(newEntry string, current func() bool) error {
-	return PersistCurrentFileAccessRule(profile.Source, profile.ID, newEntry, current)
-}
-
 // PersistCurrentFileAccessRule updates the current durable profile record, not
 // a profile object retained by an earlier lookup. The profile write lock also
-// serializes concurrent ordinary Profile.Save calls for this record.
-func PersistCurrentFileAccessRule(source ProfileSource, id, newEntry string, current func() bool) error {
+// serializes concurrent ordinary Profile.Save calls for this record. cfgKey
+// selects which per-operation rule list (read/write/exec) the entry lands in.
+func PersistCurrentFileAccessRule(source ProfileSource, id, cfgKey, newEntry string, current func() bool) error {
 	if id == "" || source == "" {
 		return errors.New("profile: file access rule requires a scoped profile ID")
 	}
@@ -344,13 +336,13 @@ func PersistCurrentFileAccessRule(source ProfileSource, id, newEntry string, cur
 		return err
 	}
 	profile.Lock()
-	list, ok := profile.configPerspective.GetAsStringArray(CfgOptionFileAccessRulesKey)
+	list, ok := profile.configPerspective.GetAsStringArray(cfgKey)
 	if !ok {
 		list = []string{newEntry}
 	} else {
 		list = coalesceFileAccessRuleEntries(list, newEntry)
 	}
-	config.PutValueIntoHierarchicalConfig(profile.Config, CfgOptionFileAccessRulesKey, list)
+	config.PutValueIntoHierarchicalConfig(profile.Config, cfgKey, list)
 	profile.dataParsed = false
 	err = profile.parseConfig()
 	profile.Unlock()

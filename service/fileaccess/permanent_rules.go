@@ -290,6 +290,9 @@ func (p *RulePersistence) ApplyEvent(snapshot *DecisionSnapshot, store RuleStore
 }
 
 func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pattern string, operation FileOp, directory, scoped bool, verdict Verdict, allowBinding bool) (*DecisionSnapshot, bool) {
+	// Opens are governed by the read-rule list, so a learned Always rule for an
+	// open persists and matches as a read rule.
+	operation = ruleScopeOp(operation)
 	rule, ok := canonicalPermanentRule(pattern, operation, directory, scoped, verdict)
 	if !ok || snapshot == nil || store == nil {
 		return snapshot, false

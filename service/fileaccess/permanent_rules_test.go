@@ -576,8 +576,13 @@ func TestPermanentRulesKeepAlwaysRulesOperationScoped(t *testing.T) {
 	if verdict, ok := merged.Rules.LookupEvent("/tmp/data", OpRead, false); !ok || verdict != VerdictAllow {
 		t.Fatalf("read rule lookup = (%v, %t), want (allow, true)", verdict, ok)
 	}
-	if _, ok := merged.Rules.LookupEvent("/tmp/data", OpOpen, false); ok {
-		t.Fatal("read Always rule matched open")
+	// Opens are governed by the read list, so the read rule also matches opens.
+	if verdict, ok := merged.Rules.LookupEvent("/tmp/data", OpOpen, false); !ok || verdict != VerdictAllow {
+		t.Fatalf("open lookup = (%v, %t), want (allow, true); opens fold to reads", verdict, ok)
+	}
+	// It must not leak to writes.
+	if _, ok := merged.Rules.LookupEvent("/tmp/data", OpWrite, false); ok {
+		t.Fatal("read Always rule matched write")
 	}
 	waitRule(t, func() bool {
 		entries, _ := store.snapshot()

@@ -45,7 +45,7 @@ func (r PathRule) MatchesEvent(path string, op FileOp, isDir bool) bool {
 	if !r.Matches(path) {
 		return false
 	}
-	if r.OperationScoped && r.Operation != op {
+	if r.OperationScoped && ruleScopeOp(r.Operation) != ruleScopeOp(op) {
 		return false
 	}
 	return !r.DirectoryOnly || isDir

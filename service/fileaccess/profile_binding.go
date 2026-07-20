@@ -30,10 +30,10 @@ var refreshProcessMapping = func(ctx context.Context, pid int) error {
 
 // NewProcessProfileLookup returns a ProfileLookup that maps a PID to
 // the matched portmaster Profile via process.GetProcessWithProfile.
-// LookupResult.Store reads and writes CfgOptionFileAccessRulesKey
-// ("fileaccess/rules") on the local Profile underneath the
-// LayeredProfile, which transparently carries the existing persistence
-// (profile database) and sync paths.
+// LookupResult.Store reads and writes the per-operation file-access rule
+// lists (fileaccess/readRules, /writeRules, /execRules) on the local
+// Profile underneath the LayeredProfile, which transparently carries the
+// existing persistence (profile database) and sync paths.
 //
 // Profile auto-creation for unknown processes is fully delegated to
 // portmaster's existing code:
@@ -102,7 +102,7 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	// returned snapshot never retains the raw rule slice.
 	local.RLock()
 	id := local.ID
-	rawRules := append([]string(nil), local.GetFileAccessRules()...)
+	rawRules := combineScopedRules(local.GetFileAccessReadRules(), local.GetFileAccessWriteRules(), local.GetFileAccessExecRules())
 	defaultAction := local.DefaultAction()
 	source := string(local.Source)
 	name := local.Name
@@ -242,9 +242,17 @@ func (s *profileRuleStore) AppendRule(entry string) error {
 	if entry == "" {
 		return errors.New("empty rule entry")
 	}
-	return profile.PersistCurrentFileAccessRule(s.source, s.id, entry, nil)
+	op, stored, ok := splitScopedRuleEntry(entry)
+	if !ok {
+		return errors.New("unroutable rule entry: " + entry)
+	}
+	return profile.PersistCurrentFileAccessRule(s.source, s.id, fileAccessRuleKey(op), stored, nil)
 }
 
 func (s *profileRuleStore) AppendRuleIfCurrent(entry string, current func() bool) error {
-	return profile.PersistCurrentFileAccessRule(s.source, s.id, entry, current)
+	op, stored, ok := splitScopedRuleEntry(entry)
+	if !ok {
+		return errors.New("unroutable rule entry: " + entry)
+	}
+	return profile.PersistCurrentFileAccessRule(s.source, s.id, fileAccessRuleKey(op), stored, current)
 }

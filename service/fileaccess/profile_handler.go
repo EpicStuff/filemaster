@@ -284,7 +284,7 @@ func (h *ProfileHandler) setSelfProfileRunning(p *profile.Profile, pid int32) {
 
 	p.RLock()
 	id := p.ID
-	rawRules := append([]string(nil), p.GetFileAccessRules()...)
+	rawRules := combineScopedRules(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
 	defaultAction := p.DefaultAction()
 	source := string(p.Source)
 	name := p.Name
@@ -394,7 +394,7 @@ func (h *ProfileHandler) PublishProfileSnapshot(p *profile.Profile) {
 func (h *ProfileHandler) publishProfileSnapshotRunning(p *profile.Profile) {
 	p.RLock()
 	id := p.ID
-	rawRules := append([]string(nil), p.GetFileAccessRules()...)
+	rawRules := combineScopedRules(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
 	defaultAction := p.DefaultAction()
 	source := string(p.Source)
 	p.RUnlock()
@@ -737,6 +737,15 @@ func ParseRule(entry string) (PathRule, bool) {
 			}
 			scoped = true
 			payload = payload[colon+1:]
+		}
+		// An operation-scoped entry whose payload is not a quoted literal is a
+		// glob pattern (the list carries the operation; the pattern stays plain).
+		if scoped && !strings.HasPrefix(payload, `"`) {
+			pattern := strings.TrimSpace(payload)
+			if pattern == "" {
+				return PathRule{}, false
+			}
+			return PathRule{Pattern: pattern, Verdict: v, Operation: op, OperationScoped: true, DirectoryOnly: directory}, true
 		}
 		path, err := strconv.Unquote(payload)
 		path = filepath.Clean(path)

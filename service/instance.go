@@ -184,8 +184,9 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	// Wire the file-access verdict chain:
 	//   1. ProfileHandler -- per-profile rules read/written via the
 	//      profile package, so persistence and sync ride on the
-	//      existing portmaster infrastructure (one rule list per
-	//      LocalProfile under cfgKey "fileaccess/rules").
+	//      existing portmaster infrastructure (per-operation rule lists
+	//      on the LocalProfile: fileaccess/readRules, /writeRules,
+	//      /execRules).
 	//   2. On profile-lookup failure (process gone, detection disabled,
 	//      etc.), fall back to the exe-keyed PromptHandler with its
 	//      JSON file under the data dir so unidentified processes still

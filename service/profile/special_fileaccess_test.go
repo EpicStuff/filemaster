@@ -39,8 +39,15 @@ func TestFilemasterSpecialProfileSeedsEditableRules(t *testing.T) {
 		"+ /opt/filemaster/**",
 		"+ /var/lib/filemaster/**",
 	}
-	if got := p.GetFileAccessRules(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("seed rules = %#v, want %#v", got, want)
+	// Trusted paths are seeded into every per-operation list.
+	for name, got := range map[string][]string{
+		"read":  p.GetFileAccessReadRules(),
+		"write": p.GetFileAccessWriteRules(),
+		"exec":  p.GetFileAccessExecRules(),
+	} {
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s seed rules = %#v, want %#v", name, got, want)
+		}
 	}
 }
 
@@ -53,7 +60,7 @@ func TestSystemdSpecialProfileSeedsRulesWithoutDefaultAction(t *testing.T) {
 	if got := p.DefaultAction(); got != DefaultActionNotSet {
 		t.Fatalf("default action = %d, want unset", got)
 	}
-	if len(p.GetFileAccessRules()) == 0 {
+	if len(p.GetFileAccessReadRules()) == 0 {
 		t.Fatal("expected editable systemd seed rules")
 	}
 }

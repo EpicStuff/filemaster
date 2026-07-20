@@ -32,7 +32,6 @@ import { DashboardPageComponent } from './pages/dashboard/dashboard.component';
 import { FeatureCardComponent } from './pages/dashboard/feature-card/feature-card.component';
 import { MonitorPageComponent } from './pages/monitor';
 import { SettingsComponent } from './pages/settings/settings';
-import { FileAccessDiagnosticsComponent } from './pages/settings/fileaccess-diagnostics.component';
 import { SupportPageComponent } from './pages/support';
 import { SupportFormComponent } from './pages/support/form';
 import { NotificationsService } from './services';
@@ -133,7 +132,6 @@ const localeConfig = {
     AppComponent,
     NotificationComponent,
     SettingsComponent,
-    FileAccessDiagnosticsComponent,
     MonitorPageComponent,
     SideDashComponent,
     NavigationComponent,

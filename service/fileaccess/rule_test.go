@@ -81,16 +81,20 @@ func TestPathRulesScopeRulesToOperationAndDirectory(t *testing.T) {
 	rules := PathRules{
 		Rules: []PathRule{
 			{Pattern: "/tmp/report", Verdict: VerdictDeny, Exact: true, Operation: OpRead, OperationScoped: true},
-			{Pattern: "/tmp/report", Verdict: VerdictAllow, Exact: true, Operation: OpOpen, OperationScoped: true},
 			{Pattern: "/tmp/folder", Verdict: VerdictDeny, Exact: true, Operation: OpRead, OperationScoped: true, DirectoryOnly: true},
 		},
 		Default: VerdictAllow,
 	}
-	if got := rules.Decide(context.Background(), &FileEvent{Path: "/tmp/report", Op: OpOpen}); got != VerdictAllow {
-		t.Fatalf("open verdict = %v, want allow", got)
-	}
+	// A read rule governs both reads and opens: FAN_OPEN_PERM opens fold to reads.
 	if got := rules.Decide(context.Background(), &FileEvent{Path: "/tmp/report", Op: OpRead}); got != VerdictDeny {
 		t.Fatalf("read verdict = %v, want deny", got)
+	}
+	if got := rules.Decide(context.Background(), &FileEvent{Path: "/tmp/report", Op: OpOpen}); got != VerdictDeny {
+		t.Fatalf("open verdict = %v, want deny (opens are governed by read rules)", got)
+	}
+	// But it must not leak to other operations.
+	if got := rules.Decide(context.Background(), &FileEvent{Path: "/tmp/report", Op: OpWrite}); got != VerdictAllow {
+		t.Fatalf("write verdict = %v, want allow (read rule must not govern writes)", got)
 	}
 	if got := rules.Decide(context.Background(), &FileEvent{Path: "/tmp/folder", Op: OpRead, IsDir: false}); got != VerdictAllow {
 		t.Fatalf("file read should bypass directory-only rule, got %v", got)

@@ -672,7 +672,7 @@ func TestPublishProfileSnapshotIsAtomicWithClosing(t *testing.T) {
 		ID:     "atomic-publication",
 		Source: profile.SourceLocal,
 		Name:   "first",
-		Config: map[string]interface{}{profile.CfgOptionFileAccessRulesKey: []string{"+ /tmp/first"}},
+		Config: map[string]interface{}{profile.CfgOptionFileAccessReadRulesKey: []string{"+ /tmp/first"}},
 	})
 	published := make(chan struct{})
 	go func() {
@@ -721,7 +721,7 @@ func TestPublishProfileSnapshotIsAtomicWithClosing(t *testing.T) {
 		ID:     first.ID,
 		Source: first.Source,
 		Name:   "second",
-		Config: map[string]interface{}{profile.CfgOptionFileAccessRulesKey: []string{"- /tmp/second"}},
+		Config: map[string]interface{}{profile.CfgOptionFileAccessReadRulesKey: []string{"- /tmp/second"}},
 	})
 	handler.beforeProfilePublication = nil
 	handler.PublishProfileSnapshot(second)

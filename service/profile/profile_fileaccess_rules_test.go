@@ -104,17 +104,17 @@ func TestPersistCurrentFileAccessRuleUsesCurrentDurableRecord(t *testing.T) {
 	if err := profileDB.Put(old); !errors.Is(err, ErrProfileRevisionConflict) {
 		t.Fatalf("stale generic profile put error = %v, want revision conflict", err)
 	}
-	if err := PersistCurrentFileAccessRule(SourceLocal, id, `+ @"/tmp/stale"`, func() bool { return false }); err == nil {
+	if err := PersistCurrentFileAccessRule(SourceLocal, id, CfgOptionFileAccessReadRulesKey, `+ @"/tmp/stale"`, func() bool { return false }); err == nil {
 		t.Fatal("stale authority was allowed to write a permanent rule")
 	}
 	staleCheck, err := getProfile(MakeScopedID(SourceLocal, id))
 	if err != nil {
 		t.Fatalf("load profile after stale conflict: %v", err)
 	}
-	if staleCheck.Name != "replacement" || len(staleCheck.GetFileAccessRules()) != 0 {
-		t.Fatalf("stale update changed replacement record: %+v", staleCheck.GetFileAccessRules())
+	if staleCheck.Name != "replacement" || len(staleCheck.GetFileAccessReadRules()) != 0 {
+		t.Fatalf("stale update changed replacement record: %+v", staleCheck.GetFileAccessReadRules())
 	}
-	if err := PersistCurrentFileAccessRule(SourceLocal, id, `+ @"/tmp/literal*path"`, func() bool { return true }); err != nil {
+	if err := PersistCurrentFileAccessRule(SourceLocal, id, CfgOptionFileAccessReadRulesKey, `+ @"/tmp/literal*path"`, func() bool { return true }); err != nil {
 		t.Fatalf("persist current file access rule: %v", err)
 	}
 	loaded, err := getProfile(MakeScopedID(SourceLocal, id))
@@ -127,7 +127,7 @@ func TestPersistCurrentFileAccessRuleUsesCurrentDurableRecord(t *testing.T) {
 	if loaded.Revision != 3 {
 		t.Fatalf("rule update durable revision = %d, want 3", loaded.Revision)
 	}
-	if rules := loaded.GetFileAccessRules(); !reflect.DeepEqual(rules, []string{`+ @"/tmp/literal*path"`}) {
+	if rules := loaded.GetFileAccessReadRules(); !reflect.DeepEqual(rules, []string{`+ @"/tmp/literal*path"`}) {
 		t.Fatalf("stored rules = %v", rules)
 	}
 	first, err := getProfile(MakeScopedID(SourceLocal, id))
@@ -153,7 +153,7 @@ func TestPersistCurrentFileAccessRuleUsesCurrentDurableRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load concurrent result: %v", err)
 	}
-	if rules := concurrent.GetFileAccessRules(); !reflect.DeepEqual(rules, []string{`+ @"/tmp/literal*path"`}) {
+	if rules := concurrent.GetFileAccessReadRules(); !reflect.DeepEqual(rules, []string{`+ @"/tmp/literal*path"`}) {
 		t.Fatalf("concurrent profile update lost durable rule: %v", rules)
 	}
 	if err := old.delete(); !errors.Is(err, ErrProfileRevisionConflict) {

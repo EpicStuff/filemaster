@@ -285,23 +285,31 @@ func createSpecialProfile(profileID string, path string) *Profile {
 		})
 
 	case SystemdProfileID:
+		systemdRules := systemdFileAccessRules()
 		return New(&Profile{
 			ID:               SystemdProfileID,
 			Source:           SourceLocal,
 			PresentationPath: path,
 			Config: map[string]interface{}{
-				CfgOptionFileAccessRulesKey: systemdFileAccessRules(),
+				// Trust these paths for every operation: seed all three lists.
+				CfgOptionFileAccessReadRulesKey:  systemdRules,
+				CfgOptionFileAccessWriteRulesKey: systemdRules,
+				CfgOptionFileAccessExecRulesKey:  systemdRules,
 			},
 		})
 
 	case PortmasterProfileID:
+		filemasterRules := filemasterFileAccessRules(path)
 		return New(&Profile{
 			ID:               PortmasterProfileID,
 			Source:           SourceLocal,
 			PresentationPath: path,
 			Config: map[string]interface{}{
-				CfgOptionDefaultActionKey:   DefaultActionPermitValue,
-				CfgOptionFileAccessRulesKey: filemasterFileAccessRules(path),
+				CfgOptionDefaultActionKey: DefaultActionPermitValue,
+				// Trust these paths for every operation: seed all three lists.
+				CfgOptionFileAccessReadRulesKey:  filemasterRules,
+				CfgOptionFileAccessWriteRulesKey: filemasterRules,
+				CfgOptionFileAccessExecRulesKey:  filemasterRules,
 			},
 		})
 

@@ -133,11 +133,14 @@ func TestOperationExactRuleRoundTripAndProfileDecision(t *testing.T) {
 	if !ok || !rule.Exact || !rule.OperationScoped || rule.Operation != OpRead || rule.DirectoryOnly {
 		t.Fatalf("parsed operation rule = %#v, ok=%t", rule, ok)
 	}
-	if rule.MatchesEvent("/tmp/data", OpOpen, false) {
-		t.Fatal("read rule matched open")
+	if !rule.MatchesEvent("/tmp/data", OpOpen, false) {
+		t.Fatal("read rule did not match open (opens are governed by read rules)")
 	}
 	if !rule.MatchesEvent("/tmp/data", OpRead, false) {
 		t.Fatal("read rule did not match read")
+	}
+	if rule.MatchesEvent("/tmp/data", OpWrite, false) {
+		t.Fatal("read rule matched write")
 	}
 	directoryEntry := FormatExactOperationRule("/tmp/folder", OpRead, true, VerdictDeny)
 	directoryRule, ok := ParseRule(directoryEntry)
@@ -198,8 +201,11 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 	if err := h.FlushPermanentRules(flushCtx); err != nil {
 		t.Fatalf("FlushPermanentRules: %v", err)
 	}
+	// The event carries no operation (OpOpen), which folds to a read: the
+	// overlay emits a read-scoped exact rule (the real store then routes it,
+	// untagged, into the read-rule list).
 	got := lookup.appendedFor(99)
-	if len(got) != 1 || got[0] != `+ @open:"/home/alice/notes.txt"` {
+	if len(got) != 1 || got[0] != `+ @read:"/home/alice/notes.txt"` {
 		t.Fatalf("rule not persisted in profile store: %v", got)
 	}
 

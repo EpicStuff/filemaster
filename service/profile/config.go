@@ -23,13 +23,24 @@ var (
 	DefaultActionAskValue    = "ask"
 )
 
-// File-access rules option. Each entry is "<verdict> <path-pattern>",
-// where verdict is "+" (allow) or "-" (deny) and pattern follows the
+// File-access rules options. Rules are split by filesystem operation —
+// read, write, and execute — mirroring how upstream Portmaster keeps
+// separate incoming/outgoing rule lists. Each entry is "<verdict> <pattern>",
+// where verdict is "+" (allow) or "-" (deny). The list an entry lives in
+// determines the operation it governs; the pattern follows the
 // service/fileaccess PathRule syntax.
 var (
-	CfgOptionFileAccessRulesKey   = "fileaccess/rules"
-	cfgOptionFileAccessRules      config.StringArrayOption
-	cfgOptionFileAccessRulesOrder = 50
+	CfgOptionFileAccessReadRulesKey  = "fileaccess/readRules"
+	CfgOptionFileAccessWriteRulesKey = "fileaccess/writeRules"
+	CfgOptionFileAccessExecRulesKey  = "fileaccess/execRules"
+
+	cfgOptionFileAccessReadRules  config.StringArrayOption
+	cfgOptionFileAccessWriteRules config.StringArrayOption
+	cfgOptionFileAccessExecRules  config.StringArrayOption
+
+	cfgOptionFileAccessReadRulesOrder  = 50
+	cfgOptionFileAccessWriteRulesOrder = 51
+	cfgOptionFileAccessExecRulesOrder  = 52
 )
 
 func registerConfiguration() error { //nolint:maintidx
@@ -38,16 +49,16 @@ func registerConfiguration() error { //nolint:maintidx
 	// network-rule UX users coming from Portmaster still applies:
 	// permit / block / ask, settable per-app, ask is the default.
 	err := config.Register(&config.Option{
-		Name:         "Default Action",
+		Name:         "Default File Access Action",
 		Key:          CfgOptionDefaultActionKey,
-		Description:  `Applied when no rule explicitly allows or blocks a file-access request. "ask" prompts the user; "permit" allows; "block" denies.`,
+		Description:  `Applied when no rule explicitly allows or blocks a file-access request. Governs read, write, and execute alike. "ask" prompts the user; "permit" allows; "block" denies.`,
 		OptType:      config.OptTypeString,
 		DefaultValue: DefaultActionAskValue,
 		Annotations: config.Annotations{
 			config.SettablePerAppAnnotation: true,
 			config.DisplayHintAnnotation:    config.DisplayHintOneOf,
 			config.DisplayOrderAnnotation:   cfgOptionDefaultActionOrder,
-			config.CategoryAnnotation:       "General",
+			config.CategoryAnnotation:       "File Access",
 		},
 		PossibleValues: []config.PossibleValue{
 			{
@@ -73,32 +84,46 @@ func registerConfiguration() error { //nolint:maintidx
 	cfgOptionDefaultAction = config.Concurrent.GetAsString(CfgOptionDefaultActionKey, DefaultActionAskValue)
 	cfgStringOptions[CfgOptionDefaultActionKey] = cfgOptionDefaultAction
 
-	// File-Access Rules
-	err = config.Register(&config.Option{
-		Name:         "File Access Rules",
-		Key:          CfgOptionFileAccessRulesKey,
-		Description:  "Rules governing file-access requests from this application. Each entry is `<+|-> <pattern>`; `+` allows, `-` denies, and `pattern` follows the same syntax as the global file-access rules.",
-		Sensitive:    true,
-		OptType:      config.OptTypeStringArray,
-		DefaultValue: []string{},
-		Annotations: config.Annotations{
-			config.SettablePerAppAnnotation: true,
-			config.StackableAnnotation:      true,
-			config.DisplayOrderAnnotation:   cfgOptionFileAccessRulesOrder,
-			config.CategoryAnnotation:       "Rules",
-			// Render via the +/- rule-list editor in the UI. The
-			// hint is a frontend-only string; the value matches
-			// ExternalOptionHint.EndpointList in the Angular config
-			// types so the same component (app-rule-list) draws our
-			// path-rule list with Allow/Block prefix labels.
-			config.DisplayHintAnnotation: "endpoint list",
-		},
-	})
-	if err != nil {
-		return err
+	// File-Access Rules, split by operation. One list per operation mirrors
+	// upstream Portmaster's separate Incoming/Outgoing rule lists: the list an
+	// entry lives in decides which operation it governs, so the pattern stays a
+	// plain path/glob with no operation tag. All three render via the same +/-
+	// rule-list editor in the UI (the "endpoint list" hint matches
+	// ExternalOptionHint.EndpointList in the Angular config types, drawing our
+	// path-rule list with Allow/Block prefix labels).
+	fileAccessRuleOptions := []struct {
+		name  string
+		key   string
+		verb  string
+		order int
+		into  *config.StringArrayOption
+	}{
+		{"Read Rules", CfgOptionFileAccessReadRulesKey, "reads", cfgOptionFileAccessReadRulesOrder, &cfgOptionFileAccessReadRules},
+		{"Write Rules", CfgOptionFileAccessWriteRulesKey, "writes", cfgOptionFileAccessWriteRulesOrder, &cfgOptionFileAccessWriteRules},
+		{"Execute Rules", CfgOptionFileAccessExecRulesKey, "executions", cfgOptionFileAccessExecRulesOrder, &cfgOptionFileAccessExecRules},
 	}
-	cfgOptionFileAccessRules = config.Concurrent.GetAsStringArray(CfgOptionFileAccessRulesKey, []string{})
-	cfgStringArrayOptions[CfgOptionFileAccessRulesKey] = cfgOptionFileAccessRules
+	for _, opt := range fileAccessRuleOptions {
+		err = config.Register(&config.Option{
+			Name:         opt.name,
+			Key:          opt.key,
+			Description:  "Rules governing file " + opt.verb + " by this application. Each entry is `<+|-> <pattern>`; `+` allows, `-` denies, and `pattern` is a path or glob.",
+			Sensitive:    true,
+			OptType:      config.OptTypeStringArray,
+			DefaultValue: []string{},
+			Annotations: config.Annotations{
+				config.SettablePerAppAnnotation: true,
+				config.StackableAnnotation:      true,
+				config.DisplayOrderAnnotation:   opt.order,
+				config.CategoryAnnotation:       "Rules",
+				config.DisplayHintAnnotation:    "endpoint list",
+			},
+		})
+		if err != nil {
+			return err
+		}
+		*opt.into = config.Concurrent.GetAsStringArray(opt.key, []string{})
+		cfgStringArrayOptions[opt.key] = *opt.into
+	}
 
 	return nil
 }
