@@ -27,7 +27,6 @@ const (
 	CfgOptionDecisionQueueCapacityKey = "fileaccess/decisionQueueCapacity"
 	CfgOptionOutstandingLimitKey      = "fileaccess/outstandingEventLimit"
 	CfgOptionProfileAskLimitKey       = "fileaccess/perProfileAskLimit"
-	CfgOptionRootAskGateKey           = "fileaccess/rootAskRequested"
 )
 
 const (
@@ -37,7 +36,6 @@ const (
 	cfgOptionOutstandingOrder     = 40
 	cfgOptionProfileAskOrder      = 50
 	cfgOptionInterceptReadsOrder  = 60
-	cfgOptionRootAskGateOrder     = 70
 )
 
 var (
@@ -47,7 +45,6 @@ var (
 	cfgOptionDecisionQueue   config.IntOption
 	cfgOptionOutstanding     config.IntOption
 	cfgOptionProfileAsk      config.IntOption
-	cfgOptionRootAskGate     config.BoolOption
 )
 
 const (
@@ -167,22 +164,6 @@ func registerConfig() error {
 		return err
 	}
 	cfgOptionInterceptReads = config.Concurrent.GetAsBool(CfgOptionInterceptReadsKey, false)
-
-	err = config.Register(&config.Option{
-		Name:         "Allow Ask Rules for Root Scope",
-		Key:          CfgOptionRootAskGateKey,
-		Description:  "Requests root-scope Ask mode. It remains blocked until the backend rollout gate has current confined integration, systemd host, benchmark, shutdown, and persistence evidence. Changing this switch never opens the gate by itself.",
-		OptType:      config.OptTypeBool,
-		DefaultValue: false,
-		Annotations: config.Annotations{
-			config.DisplayOrderAnnotation: cfgOptionRootAskGateOrder,
-			config.CategoryAnnotation:     "File Access",
-		},
-	})
-	if err != nil {
-		return err
-	}
-	cfgOptionRootAskGate = config.Concurrent.GetAsBool(CfgOptionRootAskGateKey, false)
 
 	return nil
 }

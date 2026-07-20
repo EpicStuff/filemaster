@@ -14,7 +14,6 @@ import (
 type FileAccessSettingsDiagnostics struct {
 	WatchPaths              []string
 	InterceptReads          bool
-	RequestedRootAsk        bool
 	EffectivePipelineConfig DecisionPipelineConfig
 }
 
@@ -41,7 +40,6 @@ type FileAccessDiagnostics struct {
 	PermanentRules      map[string]RulePersistenceDiagnostics
 	Shutdown            ShutdownDiagnostics
 	LifecycleState      string
-	RootAskGate         RootAskGateStatus
 	Warnings            []DegradedWarning
 }
 
@@ -69,7 +67,6 @@ func (fa *FileAccess) Diagnostics() FileAccessDiagnostics {
 		Settings: FileAccessSettingsDiagnostics{
 			WatchPaths:              append([]string(nil), resolveWatchPaths()...),
 			InterceptReads:          cfgOptionInterceptReads != nil && cfgOptionInterceptReads(),
-			RequestedRootAsk:        cfgOptionRootAskGate != nil && cfgOptionRootAskGate(),
 			EffectivePipelineConfig: fa.effectivePipelineConfig,
 		},
 		Shutdown: cloneShutdownDiagnostics(fa.ShutdownDiagnostics()),
@@ -104,7 +101,6 @@ func (fa *FileAccess) Diagnostics() FileAccessDiagnostics {
 		diagnostics.PermanentRules = make(map[string]RulePersistenceDiagnostics)
 	}
 	diagnostics.LifecycleState = diagnostics.Shutdown.State.String()
-	diagnostics.RootAskGate = fa.rootAskGateStatus(diagnostics)
 	diagnostics.Warnings = diagnosticsWarnings(diagnostics)
 	return diagnostics
 }
@@ -152,9 +148,6 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 	// current unsuccessful final removal state and clears after verified recovery.
 	if len(diagnostics.Shutdown.Marks.Failures) > 0 || (diagnostics.Shutdown.State != LifecycleRunning && !diagnostics.Shutdown.Marks.Complete) {
 		appendWarning("shutdown-mark-removal-failed", "error", "Controlled shutdown could not remove every fanotify mark; enforcement coverage was not cleanly released.")
-	}
-	if diagnostics.RootAskGate.Requested && !diagnostics.RootAskGate.Open {
-		appendWarning("root-ask-gate", "warning", "Root scope Ask mode remains blocked until all rollout evidence is current.")
 	}
 	sort.Slice(warnings, func(i, j int) bool { return warnings[i].ID < warnings[j].ID })
 	return warnings

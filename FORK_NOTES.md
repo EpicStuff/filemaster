@@ -142,3 +142,26 @@ Net diff for the strip: ~2700 lines removed, ~70 added.
 - `service/profile/endpoints/endpoints_test.go` and `endpoint_test.go` —
   required `intel/geoip`.
 - `service/debug_test.go` — referenced `SpnGroup`.
+
+## filemaster-added features removed
+
+- **Root-scope Ask rollout gate** (a filemaster addition, not upstream) —
+  removed entirely. It suppressed interactive prompting under whole-system
+  (`/`) watch until a trusted host-verification harness wrote fingerprinted
+  rollout evidence; a closed gate denied would-be prompts. It gated *prompting*,
+  never *watching*. Prompts now flow through the normal
+  rule/default-action/prompt path at every scope. Deleted:
+  - `service/fileaccess/rollout_gate_linux.go`, `rollout_gate_other.go`
+    (`RootAskGateStatus`, `RootAskRolloutEvidence`, evidence store,
+    `rootScopeConfigured`, fingerprints, `RecordRootAskRolloutEvidence`).
+  - `cmds/fanotify-confined-pipeline/` — the host verifier/benchmark that
+    produced the gate's evidence (its only consumer).
+  - `docs/fanotify-systemd-host-verification.md` — the gate's manual procedure;
+    root-gate rows/section trimmed from `docs/fanotify-phase8-verification.md`.
+  - Config option `fileaccess/rootAskRequested` ("Allow Ask Rules for Root
+    Scope"); the `root-ask-gate` degraded warning; the `RootAskGate` and
+    `Settings.RequestedRootAsk` diagnostics fields; the `ProfileHandler`
+    `rootAskGate`/`setRootAskGate`/`rootAskAllowed` wiring and its three
+    prompt-admission deny sites; `module.configureRootAskRolloutEvidence`.
+  - Gate tests in `service/fileaccess/phase8_test.go`
+    (`TestRootAskGate*`, `rootAskEvidenceTestInstance`, `rootAskGateReason`).

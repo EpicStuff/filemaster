@@ -182,9 +182,6 @@ func (fa *FileAccess) Start() error {
 		return fmt.Errorf("fileaccess outstanding event limit has no descriptor headroom")
 	}
 	fa.effectivePipelineConfig = config
-	if fa.profileHandler != nil {
-		fa.profileHandler.setRootAskGate(fa.RootAskGateStatus)
-	}
 	fa.pipeline = newDecisionPipeline(fa.handler, config, fa.lifecycle)
 	fa.pipeline.Activate()
 	if source, ok := src.(descriptorBudgetSource); ok {
@@ -295,7 +292,6 @@ func New(instance instance) (*FileAccess, error) {
 		states:            m.NewStateMgr(),
 		warningStates:     make(map[string]DegradedWarning),
 	}
-	module.configureRootAskRolloutEvidence()
 	if err := registerFileAccessAPI(); err != nil {
 		return nil, fmt.Errorf("register fileaccess API: %w", err)
 	}

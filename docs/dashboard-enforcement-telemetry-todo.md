@@ -32,7 +32,7 @@ Any re-add should read the same still-present API.
 | Mount coverage | `Mount.ActiveMountIDs`, `Mount.MissingMountIDs`, `Mount.PartialCoverage` |
 | Permanent rules | dirty-rule count, persistence failure |
 | Shutdown | `Shutdown.Marks.Pending`/`Complete`, `Shutdown.Unresolved` |
-| Root-scope Ask rollout | `RootAskGate.Open`, `RootAskGate.Reasons` |
+| ~~Root-scope Ask rollout~~ | ~~`RootAskGate.Open`, `RootAskGate.Reasons`~~ — **gone:** the root-Ask rollout gate was removed entirely (see `FORK_NOTES.md`); these fields no longer exist. |
 | Warnings | `Warnings[]` (with `Severity`) |
 
 ## Backend fields that exist but were never surfaced (also worth a tile)
