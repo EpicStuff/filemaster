@@ -166,6 +166,9 @@ fn main() {
 
     let cli_args = cli::parse(std::env::args());
 
+    // Set before the websocket thread / API clients start (in portmaster::setup).
+    portmaster::set_api_address(cli_args.api_address.clone());
+
     // TODO(vladimir): Support for other log targets?
     #[cfg(target_os = "linux")]
     let log_target = tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout);

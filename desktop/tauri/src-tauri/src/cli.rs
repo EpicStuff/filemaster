@@ -22,7 +22,14 @@ pub struct CliArguments {
 
     // Enable experimental prompt support via Tauri. Replaces the notifier app.
     pub with_notifications: bool,
+
+    // host:port of the daemon API the UI connects to. Mirrors the daemon's
+    // --api-address flag; defaults to the daemon's default listen address.
+    pub api_address: String,
 }
+
+// Keep in sync with the daemon default in service/core/base/module.go.
+const DEFAULT_API_ADDRESS: &str = "127.0.0.1:818";
 
 impl CliArguments {
     fn parse_log(&mut self, level: String) {
@@ -45,6 +52,7 @@ pub fn parse(raw: impl IntoIterator<Item = impl Into<std::ffi::OsString>>) -> Cl
         background: false,
         with_prompts: true,
         with_notifications: true,
+        api_address: DEFAULT_API_ADDRESS.to_string(),
     };
 
     let raw = clap_lex::RawArgs::new(raw);
@@ -57,6 +65,15 @@ pub fn parse(raw: impl IntoIterator<Item = impl Into<std::ffi::OsString>>) -> Cl
                 Ok("data") => {
                     if let Some(value) = value {
                         cli.data = Some(value.to_string_lossy().into_owned());
+                    }
+                }
+                Ok("api-address") => {
+                    // Accept both --api-address=host:port and --api-address host:port,
+                    // matching the daemon's flag.
+                    if let Some(value) = value {
+                        cli.api_address = value.to_string_lossy().into_owned();
+                    } else if let Some(next) = raw.next(&mut cursor) {
+                        cli.api_address = next.to_value_os().to_string_lossy().into_owned();
                     }
                 }
                 Ok("log") => {
@@ -104,4 +121,27 @@ pub fn parse(raw: impl IntoIterator<Item = impl Into<std::ffi::OsString>>) -> Cl
     }
 
     cli
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_daemon_default_port() {
+        let cli = parse(["filemaster"]);
+        assert_eq!(cli.api_address, "127.0.0.1:818");
+    }
+
+    #[test]
+    fn parses_api_address_flag() {
+        let cli = parse(["filemaster", "--api-address=127.0.0.1:9999"]);
+        assert_eq!(cli.api_address, "127.0.0.1:9999");
+    }
+
+    #[test]
+    fn parses_api_address_flag_space_separated() {
+        let cli = parse(["filemaster", "--api-address", "127.0.0.1:9999"]);
+        assert_eq!(cli.api_address, "127.0.0.1:9999");
+    }
 }

@@ -33,9 +33,32 @@ use std::{
 
 use log::{debug, error};
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-const PORTMASTER_BASE_URL: &str = "http://127.0.0.1:818/api/v1/";
+// Default matches the daemon's default listen address (service/core/base/module.go).
+const DEFAULT_API_ADDRESS: &str = "127.0.0.1:818";
+
+static API_ADDRESS: OnceLock<String> = OnceLock::new();
+
+/// Sets the host:port used to reach the daemon API. Call once at startup,
+/// before the websocket thread starts.
+pub fn set_api_address(address: String) {
+    let _ = API_ADDRESS.set(address);
+}
+
+/// Returns the configured API host:port, e.g. "127.0.0.1:818".
+pub fn api_address() -> &'static str {
+    API_ADDRESS
+        .get()
+        .map(String::as_str)
+        .unwrap_or(DEFAULT_API_ADDRESS)
+}
+
+/// Returns the API base URL, e.g. "http://127.0.0.1:818/api/v1/".
+fn api_base_url() -> String {
+    format!("http://{}/api/v1/", api_address())
+}
 
 pub trait Handler {
     fn on_connect(&mut self, cli: PortAPI);
@@ -210,7 +233,7 @@ impl<R: Runtime> PortmasterInterface<R> {
         tauri::async_runtime::spawn(async move {
             let client = reqwest::Client::new();
             match client
-                .post(format!("{}core/shutdown", PORTMASTER_BASE_URL))
+                .post(format!("{}core/shutdown", api_base_url()))
                 .send()
                 .await
             {
@@ -228,7 +251,7 @@ impl<R: Runtime> PortmasterInterface<R> {
         tauri::async_runtime::spawn(async move {
             let client = reqwest::Client::new();
             match client
-                .post(format!("{}control/resume", PORTMASTER_BASE_URL))
+                .post(format!("{}control/resume", api_base_url()))
                 .send()
                 .await
             {
@@ -247,7 +270,7 @@ impl<R: Runtime> PortmasterInterface<R> {
         tauri::async_runtime::spawn(async move {
             let client = reqwest::Client::new();
             match client
-                .post(format!("{}control/pause", PORTMASTER_BASE_URL))
+                .post(format!("{}control/pause", api_base_url()))
                 .json(&serde_json::json!({
                 "duration": duration_seconds,
                 "onlySPN": spn_only

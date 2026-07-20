@@ -32,7 +32,7 @@ pub fn create_main_window(app: &AppHandle) -> Result<WebviewWindow> {
 
         do_before_any_window_create(); // required operations before window creation
         let res = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-            .title("Portmaster")
+            .title("Filemaster")
             .visible(false)
             .inner_size(1200.0, 700.0)
             .min_inner_size(800.0, 600.0)
@@ -112,7 +112,7 @@ pub fn create_splash_window(app: &AppHandle) -> Result<WebviewWindow> {
             .focused(true)
             .resizable(false)
             .visible(true)
-            .title("Portmaster")
+            .title("Filemaster")
             .inner_size(600.0, 250.0)
             .zoom_hotkeys_enabled(true)
             .build()?;
@@ -232,7 +232,8 @@ pub fn open_window(app: &AppHandle) -> Result<WebviewWindow> {
 ///
 /// In #[cfg(debug_assertions)] the TAURI_PM_URL environment variable will be used
 /// if set.
-/// Otherwise or in release builds, it will be navigated to http://127.0.0.1:818.
+/// Otherwise or in release builds, it will be navigated to the configured API
+/// origin (--api-address, default http://127.0.0.1:818).
 pub fn may_navigate_to_ui(win: &mut WebviewWindow, force: bool) {
     if !win.app_handle().portmaster().is_reachable() && !force {
         error!("[tauri] portmaster API is not reachable, not navigating");
@@ -262,7 +263,14 @@ pub fn may_navigate_to_ui(win: &mut WebviewWindow, force: bool) {
 
         #[cfg(not(debug_assertions))]
         {
-            _ = win.navigate("http://127.0.0.1:818".parse().unwrap());
+            let origin = format!("http://{}", crate::portmaster::api_address());
+            // Grant the main window's capability on the configured API origin so
+            // Tauri IPC still works when the daemon runs on a non-default port.
+            let capabilities = include_str!("../capabilities/default.json")
+                .replace("http://127.0.0.1:818", &origin);
+            let _ = win.add_capability(capabilities);
+            debug!("[tauri] navigating to {}", origin);
+            _ = win.navigate(origin.parse().unwrap());
         }
     } else {
         error!(

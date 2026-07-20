@@ -39,7 +39,7 @@
     }
   },
   "productName": "Portmaster",
-  "identifier": "io.safing.portmaster", // this is added as a property to the shortcut on windows (ApplicationUserModelID). Used for notifications.
+  "identifier": "io.safing.filemaster", // distinct from upstream Portmaster so the single-instance lock does not collide; lets filemaster run side-by-side. Also the shortcut/notification ApplicationUserModelID.
   "app": {
     "withGlobalTauri": true,
     "enableGTKAppId": false,
