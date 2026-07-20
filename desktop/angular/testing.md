@@ -31,6 +31,13 @@ Current meaningful coverage is concentrated in
 - creating notifications from an object
 - creating notifications from parameters
 
+The file-access enforcement diagnostics also have dedicated specs:
+
+- `src/app/services/fileaccess-diagnostics.service.spec.ts` covers the
+  `FileAccessDiagnosticsService` (the `fileaccess/diagnostics` endpoint client).
+- `src/app/pages/settings/fileaccess-diagnostics.component.spec.ts` covers the
+  `FileAccessDiagnosticsComponent` (the enforcement status panel).
+
 There are also smoke tests for:
 
 - `AppComponent` creation and its `title` value
@@ -108,10 +115,14 @@ Real mode requires an environment where `fanotify_init` works, usually
 `CAP_SYS_ADMIN` in the init user namespace.
 
 The file-access test starts a test `portmaster-core`, points Angular at it,
-tries a watched-file write like `echo test > <file>`, clicks `Allow once`,
-checks the file, tries a read like `cat <file>`, clicks `Deny once`, checks the
-read is blocked, then opens `/monitor` and checks the read/write activity is
-shown in the app.
+tries a watched-file write like `echo test > <file>`, clicks `Allow`, checks the
+file was written, and confirms a second write is auto-allowed by the persisted
+per-app rule. It then tries a read like `cat <file>`, clicks `Block`, checks the
+read is denied, then opens `/monitor` and confirms the write and read activity
+rows are shown (and reachable from the per-app "File Events" tab).
+
+The prompt exposes only `Allow` and `Block`; both persist a permanent per-app
+File Access rule (there is no one-time option in the current backend).
 
 ## Legacy Protractor
 

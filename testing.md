@@ -37,8 +37,9 @@ Coverage:
 npx ng test --code-coverage
 ```
 
-Current unit coverage is mostly `NotificationsService`, plus smoke tests for
-`AppComponent` and `StatusService`.
+Current unit coverage: `NotificationsService`, `StatusService`,
+`FileAccessDiagnosticsService`, the `FileAccessDiagnosticsComponent`, and a
+smoke test for `AppComponent`.
 
 ## Playwright
 
@@ -94,10 +95,14 @@ Real mode requires an environment where `fanotify_init` works, usually
 `CAP_SYS_ADMIN` in the init user namespace.
 
 The file-access test starts a test `portmaster-core`, points Angular at it,
-tries a watched-file write like `echo test > <file>`, clicks `Allow once`,
-checks the file, tries a read like `cat <file>`, clicks `Deny once`, checks the
-read is blocked, then opens `/monitor` and checks the read/write activity is
-shown in the app.
+tries a watched-file write like `echo test > <file>`, clicks `Allow`, checks the
+file was written, and confirms a second write is auto-allowed by the persisted
+per-app rule. It then tries a read like `cat <file>`, clicks `Block`, checks the
+read is denied, and finally opens `/monitor` and confirms the write and read
+activity rows are shown (and reachable from the per-app "File Events" tab).
+
+The prompt exposes only `Allow` and `Block`; both persist a permanent per-app
+File Access rule (there is no one-time option in the current backend).
 
 ## Legacy Protractor
 

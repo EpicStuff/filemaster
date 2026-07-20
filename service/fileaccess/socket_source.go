@@ -92,6 +92,9 @@ func (s *socketSource) handleConn(ctx context.Context, conn net.Conn, handler Pe
 			return
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		s.log.Warn("socket source: connection scan ended with error", "err", err)
+	}
 }
 
 func opFromString(s string) FileOp {
