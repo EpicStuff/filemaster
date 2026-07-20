@@ -156,9 +156,9 @@ Replace /destination/existing.txt	Denied
 
 ### Links
 
-1. Creating a link requires Source Write.
-2. Creating a link requires Destination Create.
-3. Both decisions must allow.
+1. Creating a hard link requires Source Read, Write, and Execute (the new name inherits full access to the same inode).
+2. Creating a symbolic link requires no source decision; it requires only Destination Create.
+3. Creating a link requires Destination Create, and for a hard link both source and destination decisions must allow.
 4. Exact rules may match the future link path.
 5. Destination folder rules may authorize new link creation.
 6. Replacing an existing destination with a link requires Destination Write.

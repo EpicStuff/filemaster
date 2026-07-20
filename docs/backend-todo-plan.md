@@ -2,7 +2,7 @@
 
 ## 1. Goals
 
-Filemaster will use the same user facing Read, Write, and Execute rule lists for files and folders. Files and folders may appear together in each ordered list. Rules are checked from highest priority to lowest priority. The first matching rule that applies to the requested operation decides. If no applicable rule matches, the profile default action decides. The current release will expose all three rule lists, but rules that cannot yet be enforced must be clearly shown as inactive.
+Filemaster will use the same user facing Read, Write, and Execute rule lists for files and folders. Files and folders may appear together in each ordered list. Rules are checked from highest priority to lowest priority. The first matching rule that applies to the requested operation decides. If no applicable rule matches, the profile default action decides. The current release exposes only the rule lists it can enforce: file and folder Access (opens) and file and folder Execute. Folder Execute is shown but inactive. Write is hidden until it becomes enforceable with LSM support. The future full model exposes all three lists (see sections 16 and 17).
 
 ## 2. User Facing Rule Model
 
@@ -10,7 +10,7 @@ Filemaster will use the same user facing Read, Write, and Execute rule lists for
 
 | Rule    | File meaning                                | Folder meaning            |
 | ------- | ------------------------------------------- | ------------------------- |
-| Access  | Open the file for reading, writing, or both | List folder entries       |
+| Access  | Open the file for reading, writing, or both | Open the folder           |
 | Write   | Not exposed                                 | Not exposed               |
 | Execute | Launch the file as a program                | Exposed but has no effect |
 
@@ -58,17 +58,21 @@ A rule for `/folder` controls the folder itself and operations involving its ent
 
 File Access maps to `FAN_OPEN_PERM` because the current backend cannot determine whether the file is being opened for Read, Write, or both.
 
+`FAN_ACCESS_PERM` and the `InterceptReads` mode are removed. They only fired on reads through an already open descriptor, could not distinguish Read from Write, and added no enforcement that `FAN_OPEN_PERM` does not already provide. Access is decided once at open time.
+
 ### Folder Access
 
 Folder Access maps to `FAN_OPEN_PERM` for the folder itself.
 
-It represents opening the folder, not necessarily listing its entries or traversing through it.
+It represents opening the folder. `FAN_OPEN_PERM` fires on `open`/`opendir` of the directory; it does not fire on listing entries (`getdents`) or on traversing through the folder to reach a child. Denying it therefore blocks applications that explicitly open the folder, but does not by itself block listing or traversal. Those become enforceable only with LSM support (Folder Read and Folder Execute).
 
 ### Folder Execute
 
 Folder Execute is exposed in the shared Execute list but has no effect in the current release. It becomes folder traversal when LSM support is added.
 
 ## 5. Future Open Freezing
+
+**Future only.** This entire section describes LSM-era behaviour and does not apply to the current release. Splitting an open into separate Read and Write decisions depends on the LSM `file_open` hook exposing the open flags; fanotify cannot do this, because at `FAN_OPEN_PERM` time the descriptor does not yet exist and its access mode cannot be inspected.
 
 Open freezing remains enabled after LSM support is added. When a program requests an open, Filemaster determines whether the request includes Read, Write, or both. Read and Write are decided separately.
 
@@ -80,6 +84,8 @@ Open freezing remains enabled after LSM support is added. When a program request
 | Deny          | Deny           | Open is denied | Neither works                   |
 
 This allows a program to request both Read and Write while Filemaster grants only one. Open freezing remains the interactive prompt point. Later operations are restricted according to the permissions granted during that decision. Operations that modify data immediately, including Create and Truncate, must pass their Write decision before the modification occurs.
+
+Enforcing a granted subset of permissions after the open is not always clean. Blocking Read while allowing Write (or the reverse) must also cover indirect paths such as `mmap`, and how completely it can be enforced depends on the LSM hooks available. This is a future concern and does not affect the current release.
 
 ## 6. Read Behaviour
 
@@ -112,6 +118,8 @@ File Execute means launching the file as a program.
 Folder Execute means traversing the folder to reach a known child path. It is exposed but inactive in the current release and becomes enforceable with LSM support.
 
 ## 9. File Content Modification
+
+> **Future only.** Sections 9 through 15 describe the rule-evaluation semantics for Write, Delete, Create, Rename, Move, Replacement, and Links. The current fanotify backend cannot observe these operations (there are no permission events for write, unlink, rename, or create, and `FAN_MODIFY` is not used), so none of them are enforced or presented as blockable in the current release. They are enforced only with LSM support (Phase 5). The rule-matching logic itself can still be built and unit-tested ahead of enforcement (Phase 3).
 
 Writing, appending, truncating, or changing metadata on an existing file uses the Write rules that apply to that file. A nonrecursive rule for its parent folder does not apply because the folder entry is not being added, removed, renamed, or replaced.
 
@@ -204,7 +212,9 @@ Destination Create or Destination Write is allowed
 ## Stuff
 
 - Temporary files receive no special treatment. Treat it as any other file
-- Link Behaviour: Creating a link requires `Source Read and Write AND Destination Create`. If the destination already exists, destination delete is also required.
+- Link Behaviour:
+  - **Hard link**: creating one requires `Source Read and Write and Execute AND Destination Create`. A hard link is a second name for the same inode, so after linking, reading, writing, or executing through either name affects the same underlying file. The source permissions granted to the new name must therefore match the permissions the source already has. If the destination already exists, Destination Delete is also required.
+  - **Symbolic link**: creating one requires only `Destination Create`. A symlink is an independent object that merely stores a path; creating it does not grant any access to the target, so no source Read, Write, or Execute decision is needed. Access through the symlink is governed by the rules that apply to the resolved target path at use time. If the destination already exists, Destination Delete is also required.
 
 ## 16. Current Release Scope
 
@@ -217,7 +227,11 @@ File Execute
 Folder Execute
 ```
 
-Folder Execute remains visible but inactive. File Write and Folder Write are not exposed because they are not enforced.
+Folder Execute remains visible but inactive.
+
+File Write and Folder Write are not enforced, so the Write rule list is **hidden from the UI** in the current release. It is hidden, not removed: the Write rule storage, config key, and scoping plumbing are retained internally so the future Write evaluation engine (Phase 3) can be built and unit-tested against them before enforcement lands (Phase 5). No runtime write event exists in the current fanotify backend, so nothing populates or consults the Write list at runtime yet.
+
+`FAN_ACCESS_PERM` and its `InterceptReads` toggle are removed outright (see section 4); unlike Write, they carried no future evaluation semantics worth keeping. The test-only fake write event is likewise dropped.
 
 ## 17. Future LSM Scope
 
@@ -256,13 +270,19 @@ Rule priority and ordering must be preserved.
 
 ## 19. Rewrite Phases
 
+### Phase 1: Remove Dead Runtime Paths
+
+1. Delete `FAN_ACCESS_PERM` interception: remove it from the fanotify perm-event mask, remove the `case mask&FAN_ACCESS_PERM` branch in the mask decoder, and remove the `InterceptReads` config option and its diagnostics field. Real fanotify then emits only `OpOpen` and `OpExec`.
+2. Delete the runtime `OpWrite` event, which is only emitted by the test-only fake socket source. No real source produces a write permission event.
+3. Leave the Write rule list, its config key, and the rule-scoping plumbing in place (they are hidden and retained per Phase 2, not deleted here).
+
 ### Phase 2: Rewrite Current Rules
 
 1. Keep File Access for ordinary file opens.
-2. Treat Folder Access as listing entries.
+2. Treat Folder Access as opening the folder (not listing or traversal).
 3. Keep File Execute.
 4. Expose Folder Execute as inactive.
-5. Keep Write hidden until it is enforceable.
+5. Hide the Write rule list from the UI until Write is enforceable; retain its storage and plumbing internally.
 6. Clearly report which rules are active.
 
 ### Phase 3: Rewrite Rule Evaluation
@@ -276,6 +296,8 @@ Rule priority and ordering must be preserved.
 7. Support Source Delete and Destination Create or Write for Rename and Move.
 8. Treat replacement differently from creation.
 9. Preserve rule priority.
+
+Items 5 through 8 build the rule-evaluation engine and its unit tests only. Delete, Create, Rename, Move, and Replacement are not observable by the current fanotify backend and are not enforced until Phase 5. The engine is written now so that enforcement can be wired to it later without reworking rule matching.
 
 ### Phase 4: Prepare Future Permissions
 
@@ -312,7 +334,7 @@ Rule priority and ordering must be preserved.
 | Object | Access                        | Write       | Execute              |
 | ------ | ----------------------------- | ----------- | -------------------- |
 | File   | Open for Read, Write, or both | Not exposed | Launch program       |
-| Folder | List entries                  | Not exposed | Exposed but inactive |
+| Folder | Open the folder               | Not exposed | Exposed but inactive |
 
 ### Future
 
@@ -331,4 +353,5 @@ Rule priority and ordering must be preserved.
 | Rename                        | Source Delete and Destination Create or Destination Write        |
 | Move                          | Source Delete and Destination Create or Destination Write        |
 | Replace existing destination  | Source Delete and Existing Destination Write                     |
-| Create link                   | Source File Write and Destination Create                         |
+| Create hard link              | Source File Read, Write, and Execute and Destination Create      |
+| Create symbolic link          | Destination Create only                                          |
