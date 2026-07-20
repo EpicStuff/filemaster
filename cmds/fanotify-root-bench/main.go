@@ -1,5 +1,11 @@
 // fanotify-root-bench measures the transport cost of a temporary mount mark on /.
 // It intentionally has no Filemaster policy, persistence, logging, or prompts.
+//
+// The -mask flag selects the permission mask: "open" (the default, matching the
+// mask filemaster marks without the interceptReads option), "read"
+// (FAN_ACCESS_PERM alone), or "both". read/both fire one blocking permission
+// event per read() syscall across the entire marked mount, so on a busy system
+// they can stall every reader until this process responds — use a short timeout.
 package main
 
 import (
@@ -72,6 +78,7 @@ func (h *histogram) add(d time.Duration) {
 
 type result struct {
 	Mode              mode      `json:"mode"`
+	Mask              string    `json:"mask"`
 	Workers           int       `json:"workers"`
 	Scope             string    `json:"scope"`
 	Command           []string  `json:"command"`
@@ -110,8 +117,8 @@ func response(fd, eventFD int32) error {
 	}
 }
 
-func benchmark(runMode mode, workers int, scope string, timeout time.Duration, dir string, command []string) result {
-	res := result{Mode: runMode, Workers: workers, Scope: scope, Command: command}
+func benchmark(runMode mode, maskName string, mask uint64, workers int, scope string, timeout time.Duration, dir string, command []string) result {
+	res := result{Mode: runMode, Mask: maskName, Workers: workers, Scope: scope, Command: command}
 	started := time.Now()
 	fd, err := unix.FanotifyInit(unix.FAN_CLASS_CONTENT|unix.FAN_CLOEXEC|unix.FAN_NONBLOCK, unix.O_RDONLY|unix.O_LARGEFILE|unix.O_CLOEXEC)
 	if err != nil {
@@ -120,7 +127,6 @@ func benchmark(runMode mode, workers int, scope string, timeout time.Duration, d
 	}
 	defer unix.Close(fd)
 
-	mask := uint64(unix.FAN_OPEN_PERM | unix.FAN_OPEN_EXEC_PERM)
 	if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD|unix.FAN_MARK_MOUNT, mask, unix.AT_FDCWD, "/"); err != nil {
 		res.Failure = fmt.Sprintf("fanotify_mark /: %v", err)
 		return res
@@ -315,6 +321,7 @@ func main() {
 
 	flags := flag.NewFlagSet("fanotify-root-bench", flag.ExitOnError)
 	runMode := flags.String("mode", "baseline", "baseline, raw, or classified")
+	maskName := flags.String("mask", "open", "permission mask: open (FAN_OPEN_PERM|FAN_OPEN_EXEC_PERM), read (FAN_ACCESS_PERM, one event per read() syscall), or both. read/both fire per read() across the whole marked mount and can stall a busy system.")
 	workers := flags.Int("workers", 1, "response workers")
 	scope := flags.String("scope", "/root/filemaster", "classified in-scope path prefix")
 	timeout := flags.Duration("timeout", 2*time.Minute, "hard workload timeout")
@@ -334,6 +341,19 @@ func main() {
 		os.Exit(2)
 	}
 
+	var mask uint64
+	switch *maskName {
+	case "open":
+		mask = uint64(unix.FAN_OPEN_PERM | unix.FAN_OPEN_EXEC_PERM)
+	case "read":
+		mask = uint64(unix.FAN_ACCESS_PERM)
+	case "both":
+		mask = uint64(unix.FAN_OPEN_PERM | unix.FAN_OPEN_EXEC_PERM | unix.FAN_ACCESS_PERM)
+	default:
+		fmt.Fprintln(os.Stderr, "mask must be open, read, or both")
+		os.Exit(2)
+	}
+
 	var res result
 	if *runMode == "baseline" {
 		res = runBaseline(*timeout, *dir, command)
@@ -342,7 +362,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "workers must be positive")
 			os.Exit(2)
 		}
-		res = benchmark(mode(*runMode), *workers, *scope, *timeout, *dir, command)
+		res = benchmark(mode(*runMode), *maskName, mask, *workers, *scope, *timeout, *dir, command)
 	} else {
 		fmt.Fprintln(os.Stderr, "mode must be baseline, raw, or classified")
 		os.Exit(2)
