@@ -285,6 +285,17 @@ Rule priority and ordering must be preserved.
 5. Hide the Write rule list from the UI until Write is enforceable; retain its storage and plumbing internally.
 6. Clearly report which rules are active.
 
+### Phase 2.5: Expose Mount Attribution for Dashboard Activity
+
+Every persisted File Access and File Execute record must expose the mount that was protected when the decision occurred.
+
+1. Attribute each Access and Execute permission event to its active protected mount using the source's mount-reconciliation state and event path/file descriptor information.
+2. Do **not** use `FAN_REPORT_MNT`: it cannot be combined with `FAN_CLASS_CONTENT`, which Filemaster requires for permission decisions.
+3. Persist a stable mount ID and display mount path with each `FileAccessRecord`.
+4. Add schema migration, retention handling, filequery filter/group-by support, and API fields for mount ID and mount path.
+5. Represent unavailable attribution explicitly as unknown; never infer a mount from an unrelated path after a mount has changed.
+6. Test nested and bind mounts, dynamically discovered mounts, unmounts, and events received while mount reconciliation is pending.
+
 ### Phase 3: Rewrite Rule Evaluation
 
 1. Put file and folder rules in shared ordered lists.
