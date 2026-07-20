@@ -161,8 +161,18 @@ already warns of this). Low priority. Original analysis kept below for reference
   tuning knobs; **higher** for `watchPaths` since it defines protection scope.
 - **Files:** `pages/settings/*`, `shared/config/*`.
 
-### A5. Root-Ask rollout gate — ✅ DONE (verified live)
-**Verified live 2026-07-20:** the removed diagnostics panel used to render
+### A5. Root-Ask rollout gate — ✅ MOOT (feature removed entirely)
+**Superseded 2026-07-20:** the whole root-scope Ask rollout gate was ripped out
+(gate source, the `fileaccess/rootAskRequested` option, the `root-ask-gate`
+warning, the `RootAskGate`/`RequestedRootAsk` diagnostics fields, the
+`cmds/fanotify-confined-pipeline` evidence harness, and the systemd-host doc —
+see `FORK_NOTES.md`). Prompts now flow through the normal
+rule/default-action/prompt path at every scope, including whole-system (`/`)
+watch. There is nothing left to surface, so **no UI work remains for A5**. The
+verification note below is retained only as a record of how the gate behaved
+before removal.
+
+**Verified live 2026-07-20 (pre-removal):** the removed diagnostics panel used to render
 `RootAskGate.Reasons`, but the user-facing gate signal does **not** depend on it.
 `diagnostics_linux.go:156` emits a `root-ask-gate` warning whenever
 `RootAskGate.Requested && !Open`, and `refreshWarningStates()` (module.go:217, 1 s
