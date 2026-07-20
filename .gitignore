@@ -76,3 +76,4 @@ windows_kext/test/_delme/
 .token-savior-cache.json
 fake-fanotify
 portmaster-core
+fanotify-root-bench
