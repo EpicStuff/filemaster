@@ -1,7 +1,9 @@
 # UI changes needed to reflect the backend rewrite
 
-Status: **partial** — **A2 and A3 are done** (see below); A1, A4, A5, A6 and the
-section C network-UI cleanup still remain. This file is the note of what's left.
+Status: **partial** — **A2, A3, A5 are done**, and **A1 is verified working**
+(optional cosmetic polish only); **A4 is largely already covered by generic
+rendering** (optional curation only). **A6 and the section C network-UI cleanup
+still remain.** This file is the note of what's left.
 
 ## How this list was derived
 
@@ -28,7 +30,20 @@ UI reviewed under `desktop/angular/src/app/`.
 
 ## A. Changes required by recent backend features
 
-### A1. Exec is now a real, promptable operation
+### A1. Exec is now a real, promptable operation — ✅ verified working (optional polish)
+**Verified live 2026-07-20:** injecting a real-PID `op:exec` event produces a normal
+prompt (not a hard-deny). The `/prompt` card resolves the profile ("Sleep",
+/usr/bin/sleep) and renders `Op: exec (pid …)` with Allow/Block actions. The template
+does **not** hardcode open/read verbs — it shows `EventData.Subject.Op` dynamically
+(`prompt.html:44`, falling back to `open` only when Op is absent), and exec-scoped
+learned rules route to the Execute list (A3). No functional gap remains.
+**Optional cosmetic polish only:** the card shows the raw wire token `exec` rather than
+the natural verb `execute` (the backend `Message` already says "wants to execute" via
+`opVerb`, but the custom card builds its own field table and ignores that message). A
+one-line op→verb map in the template would make it read `execute`. Original analysis
+kept below for reference.
+
+
 - **Backend commit:** `eee4db60` (decide exec like read/write instead of hard-deny).
 - **What changed:** `OpExec` (`FAN_OPEN_EXEC_PERM`) previously returned an
   unconditional deny before any policy. It now flows through normal rule /
@@ -115,7 +130,20 @@ Original analysis kept below for reference.
 - **Files:** `shared/config/rule-list/*`, `pages/app-view/app-view.html`
   (Settings tab), the generic `settings-view` for scoped config.
 
-### A4. New backend config options need curated settings UI
+### A4. New backend config options need curated settings UI — mostly already covered
+**Verified 2026-07-20 (answers "isn't there already a path-list editor?"):** yes.
+`watchPaths` is a plain `StringArray`, so the generic config renderer already shows it
+as an add/remove **path-list editor** via `<app-ordered-list>`
+(`shared/config/generic-setting/generic-setting.html:135`) — no custom code. The
+restart-required tuning knobs (`decisionWorkers` etc., all `RequiresRestart:true`)
+**already get a "Saved – Restart required" cue** with a click-to-restart affordance
+(`generic-setting.html:20-32`). `interceptReads` renders as a normal bool toggle. So the
+functional part of A4 is **already done by generic rendering**; only *cosmetic curation*
+remains and is optional: a real directory **picker** (vs typing paths) and a prominent
+in-place warning when `/` is entered (whole-system monitoring — the backend Description
+already warns of this). Low priority. Original analysis kept below for reference.
+
+
 - **Backend commit:** `caf4f7fc` (phase-8 diagnostics and rollout controls),
   registered in `config.go:26-31`, `:97-188`.
 - **What changed:** new options — `fileaccess/watchPaths`,
@@ -133,7 +161,26 @@ Original analysis kept below for reference.
   tuning knobs; **higher** for `watchPaths` since it defines protection scope.
 - **Files:** `pages/settings/*`, `shared/config/*`.
 
-### A5. Root-Ask rollout gate — verify, mostly done
+### A5. Root-Ask rollout gate — ✅ DONE (verified live)
+**Verified live 2026-07-20:** the removed diagnostics panel used to render
+`RootAskGate.Reasons`, but the user-facing gate signal does **not** depend on it.
+`diagnostics_linux.go:156` emits a `root-ask-gate` warning whenever
+`RootAskGate.Requested && !Open`, and `refreshWarningStates()` (module.go:217, 1 s
+ticker) pushes it into module state as `mgr.State{ID:"fileaccess/root-ask-gate",
+Name:"File Access Enforcement", …}`. Toggling `fileaccess/rootAskRequested` on made the
+security-lock shield flip to **Warning** with a **"File Access Enforcement"**
+notification carrying the message "Root scope Ask mode remains blocked until all rollout
+evidence is current." (screenshot `tmp/a5-rootask-dashboard.png`); toggling it back off
+cleared the state. So "requested but blocked" reaches the user via the shield +
+notifications list, independent of the removed panel.
+**Note:** the detailed `Reasons[]` list (e.g. `environment_evidence_stale`) is no longer
+surfaced anywhere in the UI — only the single generic warning is. That is acceptable
+(the reasons are internal rollout-evidence tokens, not user-actionable) and can be
+re-added later alongside the Dashboard enforcement-health tile
+(`docs/dashboard-enforcement-telemetry-todo.md`) if desired.
+
+Original note kept below for reference.
+
 - **Backend commits:** `84be0cb0`, `caf4f7fc` (rollout evidence + gate).
 - **State:** the diagnostics panel already renders `RootAskGate{Requested, Open,
   Reasons}` and there's a `root-ask-gate` warning. This appears **aligned**;
@@ -141,18 +188,6 @@ Original analysis kept below for reference.
   list. No new work expected beyond A2's interface extension if any RootAskGate
   sub-field changed.
 
-### A6. Prompt offers only permanent actions (product decision to confirm)
-- **Backend:** the coordinator supports four actions (`ActionAllow`,
-  `ActionDeny`, `ActionAllowAlways`, `ActionDenyAlways`,
-  `prompt_coordinator.go` waitForPrompt), but the production prompter advertises
-  only two — **both permanent**: `Allow → allow-always`, `Block → deny-always`
-  (`prompt_notifications.go:85-88`). The UI faithfully mirrors this
-  (`prompt-list.component.ts` looks for `allow-always`/`deny-always`).
-- **Gap:** there is no one-time (session-only) Allow/Deny in either layer.
-- **UI change needed (only if one-time decisions are wanted):** add "Allow
-  once"/"Block once" actions — requires the backend prompter to advertise
-  `ActionAllow`/`ActionDeny` first, then the UI to render them. Flag for a
-  product decision; not required for correctness.
 
 ---
 
