@@ -22,7 +22,7 @@ func (pm *ProcessModule) Manager() *mgr.Manager {
 }
 
 func (pm *ProcessModule) Start() error {
-	identifier := "portmaster"
+	identifier := "filemaster"
 	if runtime.GOOS == "windows" {
 		identifier += ".exe"
 	}
