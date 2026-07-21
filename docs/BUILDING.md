@@ -87,3 +87,13 @@ core's `--bin-dir` and `--data-dir` arguments. This Start action requires a
 running systemd host and a graphical polkit agent. On a system without systemd,
 the UI cannot manage the core; run it directly with `sudo
 /opt/filemaster/portmaster-core --log info` and start the UI with `filemaster`.
+
+`--bin-dir` must point at `INSTALL_DIR` (the application directory), **not**
+`BIN_DIR`. The API authenticator only trusts clients whose executable lives
+under `--bin-dir`, and the real desktop binary lives in `INSTALL_DIR` (the
+`BIN_DIR` launcher `exec`s it, so the connecting process resolves to
+`INSTALL_DIR/filemaster`). Pointing `--bin-dir` at the launcher directory
+instead denies the UI with a 403. The bundled systemd unit already passes
+`--bin-dir /opt/filemaster`; only manual invocations need care. For local
+development you can instead enable Development Mode (`core/devMode`), which
+disables API authentication entirely.

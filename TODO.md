@@ -30,6 +30,7 @@ allow/deny, not redirect.
 - maybe add warning popup when you enter / to watch path
 - maybe add file picker for watch path and rules
 - maybe add warning when add rule for path outside watch
+- try to make is so a root virus cant stop filemaster without user noticing
 
 ## Potential Future Features
 

@@ -1,5 +1,6 @@
 import { OnInit, Component, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { listen } from '@tauri-apps/api/event';
 import { ServiceManagerStatus, TauriIntegrationService } from 'src/app/integration/taur-app';
 
 @Component({
@@ -48,5 +49,11 @@ export class AppComponent implements OnInit {
 
   ngOnInit() {
     this.getStatus();
+
+    // The daemon is running but refused our connection at the API authenticator
+    // (403). Show a "blocked" state instead of the misleading "not running".
+    listen('connection-blocked', () => {
+      this.status = 'Blocked';
+    });
   }
 }

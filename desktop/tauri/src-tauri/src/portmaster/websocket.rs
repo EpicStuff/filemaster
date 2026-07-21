@@ -2,7 +2,7 @@ use super::PortmasterExt;
 use crate::portapi::client::connect;
 use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 use tokio::time::{sleep, Duration};
 
 static WEBSOCKET_SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -68,6 +68,16 @@ pub fn start_websocket_thread<R: Runtime>(app: AppHandle<R>) {
                 }
                 Err(err) => {
                     error!("failed to create portapi client: {}", err);
+
+                    // A 403 means the daemon is up and reachable but refused the
+                    // connection at the API authenticator (unauthorized client
+                    // binary), which is a different failure than the service being
+                    // down. Signal the splash so it can say "blocked" instead of
+                    // "not running". Re-emitted on every retry, so the splash still
+                    // catches it if it loads after the first attempt.
+                    if err.to_string().contains("403") {
+                        let _ = app.emit("connection-blocked", ());
+                    }
 
                     app.portmaster().on_disconnect();
 
