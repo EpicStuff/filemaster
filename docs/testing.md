@@ -94,7 +94,7 @@ npm run e2e:fileaccess:real
 Real mode requires an environment where `fanotify_init` works, usually
 `CAP_SYS_ADMIN` in the init user namespace.
 
-The file-access test starts a test `portmaster-core`, points Angular at it,
+The file-access test starts a test `filemaster-core`, points Angular at it,
 tries a watched-file write like `echo test > <file>`, clicks `Allow`, checks the
 file was written, and confirms a second write is auto-allowed by the persisted
 per-app rule. It then tries a read like `cat <file>`, clicks `Block`, checks the

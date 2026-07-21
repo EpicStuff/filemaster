@@ -9,7 +9,7 @@ TAURI_DIR := desktop/tauri/src-tauri
 ARCHIVER := bsdtar
 NODE_BIN ?=
 NODE_PATH := $(if $(NODE_BIN),$(NODE_BIN):)
-CORE := $(DIST)/$(PLATFORM)/portmaster-core
+CORE := $(DIST)/$(PLATFORM)/filemaster-core
 APP := $(DIST)/$(PLATFORM)/portmaster
 UI_ZIP := $(DIST)/all/filemaster.zip
 ASSETS_ZIP := $(DIST)/all/assets.zip
@@ -37,7 +37,7 @@ build: core ui assets tauri
 
 install: build
 	sudo install -d -m 0755 "$(INSTALL_DIR)" "$(BIN_DIR)" "$(SERVICE_DIR)"
-	sudo install -m 0755 "$(CORE)" "$(INSTALL_DIR)/portmaster-core"
+	sudo install -m 0755 "$(CORE)" "$(INSTALL_DIR)/filemaster-core"
 	sudo install -m 0755 "$(APP)" "$(INSTALL_DIR)/filemaster"
 	sudo install -m 0644 "$(UI_ZIP)" "$(INSTALL_DIR)/filemaster.zip"
 	sudo install -m 0644 "$(ASSETS_ZIP)" "$(INSTALL_DIR)/assets.zip"
@@ -70,6 +70,7 @@ verify-ui-archive:
 	@test -f "$(UI_ZIP)" || { echo "missing required UI archive: $(UI_ZIP)" >&2; exit 1; }
 	@"$(ARCHIVER)" -tf "$(UI_ZIP)" | grep -Eq '^\.?/?index\.html$$' || { echo "required UI archive entry missing: index.html in $(UI_ZIP)" >&2; exit 1; }
 	@{ "$(ARCHIVER)" -xOf "$(UI_ZIP)" ./index.html >/dev/null 2>&1 || "$(ARCHIVER)" -xOf "$(UI_ZIP)" index.html >/dev/null 2>&1; } || { echo "required UI archive entry is unreadable: index.html in $(UI_ZIP)" >&2; exit 1; }
+	@{ "$(ARCHIVER)" -xOf "$(UI_ZIP)" ./index.html 2>/dev/null || "$(ARCHIVER)" -xOf "$(UI_ZIP)" index.html 2>/dev/null; } | grep -Fq '<base href="/ui/modules/filemaster/">' || { echo "UI archive index.html must use the /ui/modules/filemaster/ base path" >&2; exit 1; }
 
 assets:
 	@mkdir -p "$(dir $(ASSETS_ZIP))"
@@ -90,7 +91,7 @@ tauri: tauri-ui
 
 stage: core ui assets intel tauri-ui
 	@mkdir -p "$(TAURI_DIR)/binary"
-	cp "$(CORE)" "$(TAURI_DIR)/binary/portmaster-core"
+	cp "$(CORE)" "$(TAURI_DIR)/binary/filemaster-core"
 	cp "$(UI_ZIP)" "$(TAURI_DIR)/binary/filemaster.zip"
 	cp "$(ASSETS_ZIP)" "$(TAURI_DIR)/binary/assets.zip"
 	@mkdir -p "$(TAURI_DIR)/intel"

@@ -114,7 +114,7 @@ func GenerateMockFolder(dir, name, version string, published time.Time) error {
 		return err
 	}
 	_ = file.Close()
-	file, err = os.Create(filepath.Join(dir, "portmaster-core"))
+	file, err = os.Create(filepath.Join(dir, "filemaster-core"))
 	if err != nil {
 		return err
 	}

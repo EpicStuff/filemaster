@@ -9,12 +9,12 @@ if [ "$1" = "upgrade" ] || [ "$1" = "1" ] ; then
 fi
 
 #
-# Remove selinux permissions for portmaster-core if we have semanage available.
+# Remove selinux permissions for filemaster-core if we have semanage available.
 #
 if command -V semanage >/dev/null 2>&1; then
     echo "[ ] Removing SELinux permissions"
-    semanage fcontext --delete /opt/filemaster/portmaster-core || :
-    restorecon -R /opt/filemaster/portmaster-core 2>/dev/null >&2 || :
+    semanage fcontext --delete /opt/filemaster/filemaster-core || :
+    restorecon -R /opt/filemaster/filemaster-core 2>/dev/null >&2 || :
 fi
 
 echo "[ ] Stopping and disabling service"

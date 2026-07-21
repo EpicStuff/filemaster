@@ -3,19 +3,19 @@
 echo "[ ] Post-Install script [arg1='$1' arg2='$2']"
 
 #
-# Fix selinux permissions for portmaster-core if we have semanage available.
+# Fix selinux permissions for filemaster-core if we have semanage available.
 #
 if command -V semanage >/dev/null 2>&1; then
     echo "[ ] Fixing SELinux permissions"
-    semanage fcontext -a -t bin_t -s system_u /opt/filemaster/portmaster-core || :
-    restorecon -R /opt/filemaster/portmaster-core 2>/dev/null >&2 || :
+    semanage fcontext -a -t bin_t -s system_u /opt/filemaster/filemaster-core || :
+    restorecon -R /opt/filemaster/filemaster-core 2>/dev/null >&2 || :
 fi
 
 echo "[ ] Initializing binary files"
 mv /usr/bin/portmaster /opt/filemaster/portmaster
 ln -s /opt/filemaster/portmaster /usr/bin/portmaster
 
-chmod +x /opt/filemaster/portmaster-core
+chmod +x /opt/filemaster/filemaster-core
 
 echo "[ ] Enabling service"
 systemctl daemon-reload

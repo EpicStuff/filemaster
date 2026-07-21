@@ -12,7 +12,7 @@ import (
 var (
 	scanConfig = updates.IndexScanConfig{
 		Name:            configure.DefaultBinaryIndexName,
-		PrimaryArtifact: "linux_amd64/portmaster-core",
+		PrimaryArtifact: "linux_amd64/filemaster-core",
 		BaseURL:         "https://updates.safing.io/",
 		IgnoreFiles: []string{
 			// Indexes, checksums, latest symlinks.

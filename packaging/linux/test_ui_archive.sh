@@ -23,10 +23,22 @@ if "$make_command" --no-print-directory verify-ui-archive UI_ZIP="$test_dir/miss
 fi
 
 mkdir -p "$test_dir/with-index"
-printf '%s\n' '<!doctype html><title>Filemaster</title>' >"$test_dir/with-index/index.html"
+printf '%s\n' '<!doctype html><base href="/ui/modules/filemaster/"><title>Filemaster</title>' >"$test_dir/with-index/index.html"
 (
 	cd "$test_dir/with-index"
 	"$archiver" -a -cf "$test_dir/with-index.zip" .
 )
 
 "$make_command" --no-print-directory verify-ui-archive UI_ZIP="$test_dir/with-index.zip" ARCHIVER="$archiver"
+
+mkdir -p "$test_dir/wrong-base"
+printf '%s\n' '<!doctype html><base href="/ui/modules/portmaster/"><title>Portmaster</title>' >"$test_dir/wrong-base/index.html"
+(
+	cd "$test_dir/wrong-base"
+	"$archiver" -a -cf "$test_dir/wrong-base.zip" .
+)
+
+if "$make_command" --no-print-directory verify-ui-archive UI_ZIP="$test_dir/wrong-base.zip" ARCHIVER="$archiver"; then
+	echo 'expected archive using the portmaster base path to fail validation' >&2
+	exit 1
+fi

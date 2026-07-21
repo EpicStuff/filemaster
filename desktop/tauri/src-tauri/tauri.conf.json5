@@ -62,7 +62,7 @@
           "/usr/lib/systemd/system/filemaster.service": "../../../packaging/linux/filemaster.service",
 
           // Binary files
-          "/opt/filemaster/portmaster-core": "binary/portmaster-core",
+          "/opt/filemaster/filemaster-core": "binary/filemaster-core",
           "/opt/filemaster/filemaster.zip": "binary/filemaster.zip",
           "/opt/filemaster/assets.zip": "binary/assets.zip",
 
@@ -96,7 +96,7 @@
           "/usr/lib/systemd/system/filemaster.service": "../../../packaging/linux/filemaster.service",
 
           // Binary files
-          "/opt/filemaster/portmaster-core": "binary/portmaster-core",
+          "/opt/filemaster/filemaster-core": "binary/filemaster-core",
           "/opt/filemaster/filemaster.zip": "binary/filemaster.zip",
           "/opt/filemaster/assets.zip": "binary/assets.zip",
 

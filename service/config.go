@@ -162,7 +162,7 @@ func MakeUpdateConfigs(svcCfg *ServiceConfig) (binaryUpdateConfig, intelUpdateCo
 		if binPath, err := getCurrentBinaryPath(); err == nil {
 			binaryUpdateConfig.PostUpgradeCommands = []updates.UpdateCommandConfig{
 				// Restore SELinux context for the new core binary after upgrade
-				// (`restorecon /opt/filemaster/portmaster-core`)
+				// (`restorecon /opt/filemaster/filemaster-core`)
 				{
 					Command:              "restorecon",
 					Args:                 []string{binPath},
