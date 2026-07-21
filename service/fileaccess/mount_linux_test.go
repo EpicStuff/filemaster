@@ -191,11 +191,17 @@ func TestMountReconciliationRetainsPartialCoverageAndRetries(t *testing.T) {
 	}
 	if got := s.MountDiagnostics(); !got.PartialCoverage || !reflect.DeepEqual(got.MissingMountIDs, []int{2}) {
 		t.Fatalf("partial diagnostics = %#v", got)
-	} else if !got.ScopeActivationPending || !reflect.DeepEqual(got.PendingScopes, []string{root}) {
-		t.Fatalf("pending scope diagnostics = %#v, want %q pending", got, root)
+	} else if got.ScopeActivationPending || len(got.PendingScopes) != 0 {
+		t.Fatalf("partial coverage must not leave successful mounts pending: %#v", got)
 	}
-	if snapshotContains(s.activeScopes.Load(), root) {
-		t.Fatal("scope became active despite a failed required mark")
+	if !snapshotContains(s.activeScopes.Load(), root) {
+		t.Fatal("scope did not activate on its successfully marked mount")
+	}
+	if s.pathInPendingScope(root) {
+		t.Fatal("partial coverage left the scope in fail-closed pending state")
+	}
+	if id, path := s.attributeMount(filepath.Join(root, "covered")); id != 1 || path != "/" {
+		t.Fatalf("successful mount was not active for attribution: got (%d, %q)", id, path)
 	}
 
 	failNested = false
@@ -245,12 +251,10 @@ func TestScopeTransitionPublishesOnlyVerifiedNewScope(t *testing.T) {
 	}
 }
 
-// TestUnverifiedNewScopeDoesNotDenyVerifiedUnchangedScopes is the regression
-// test for the scope over-deny blast radius: when a newly added scope fails to
-// mark, only that scope must be denied-until-verified. Accesses to an
-// already-active, unchanged scope must stay on the normal policy path, not be
-// fail-closed for as long as the unrelated scope stays unmarkable.
-func TestUnverifiedNewScopeDoesNotDenyVerifiedUnchangedScopes(t *testing.T) {
+// TestUnmarkableNewScopeActivatesMarkedMounts ensures a mount-mark failure
+// does not fail-close all paths in the new scope. Successfully marked mounts
+// enforce policy while the missing mount remains a visible coverage gap.
+func TestUnmarkableNewScopeActivatesMarkedMounts(t *testing.T) {
 	stableRoot := t.TempDir()
 	newRoot := t.TempDir()
 	failNew := false
@@ -274,17 +278,20 @@ func TestUnverifiedNewScopeDoesNotDenyVerifiedUnchangedScopes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !s.pending {
-		t.Fatal("scope activation should stay pending while the new mount is unmarkable")
+	if s.pending {
+		t.Fatal("completed mark attempt must not leave the new scope pending")
 	}
-	if !s.pathInPendingScope(newRoot) {
-		t.Fatal("the unverified new scope must be denied-until-verified")
+	if s.pathInPendingScope(newRoot) {
+		t.Fatal("the unmarkable mount left the new scope fail-closed")
 	}
-	if s.pathInPendingScope(stableRoot) {
-		t.Fatal("the unchanged, already-verified scope must NOT be denied by pending")
+	if !s.pathInActiveScope(newRoot) {
+		t.Fatal("the new scope did not activate on its successfully marked mounts")
 	}
 	if !s.pathInActiveScope(stableRoot) {
 		t.Fatal("the unchanged scope lost its active-policy path")
+	}
+	if diagnostics := s.MountDiagnostics(); !diagnostics.PartialCoverage || !reflect.DeepEqual(diagnostics.MissingMountIDs, []int{3}) {
+		t.Fatalf("unmarkable new mount lost its partial-coverage warning: %#v", diagnostics)
 	}
 }
 

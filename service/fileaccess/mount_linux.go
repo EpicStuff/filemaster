@@ -221,11 +221,10 @@ func snapshotFromScopes(scopes map[string]*policyScope) *scopeSnapshot {
 }
 
 // pendingScopesFrom returns only the scopes in next that are not already active
-// (by canonical path) in the current snapshot. A partially marked candidate is
-// denied wholesale by handleEvent while its mount marks are verified; scoping
-// that deny to newly added or changed scopes keeps already-verified, unchanged
-// scopes on their normal policy path. Otherwise one unmarkable new scope would
-// fail-closed every access to every configured scope until reconcile completes.
+// (by canonical path) in the current snapshot. A candidate is denied only while
+// its current reconciliation pass verifies mount marks. Once that pass ends,
+// any successfully marked mounts activate the candidate policy; missing marks
+// remain a reported coverage gap rather than blocking unrelated marked mounts.
 func pendingScopesFrom(next map[string]*policyScope, active *scopeSnapshot) *scopeSnapshot {
 	activeCanonical := make(map[string]struct{})
 	if active != nil {
@@ -407,6 +406,9 @@ func (s *fanotifySource) reconcileLocked() {
 			if _, marked := s.marks[id]; marked {
 				continue
 			}
+			if _, requiredPreviously := s.previousRequiredMountIDs[id]; requiredPreviously {
+				continue
+			}
 			if s.dynamicMountCoverageGaps == nil {
 				s.dynamicMountCoverageGaps = make(map[int]mountInfo)
 			}
@@ -467,7 +469,7 @@ func (s *fanotifySource) reconcileLocked() {
 			complete = false
 		}
 	}
-	if complete && s.pending {
+	if s.pending {
 		if !s.lifecycle.whileRunning(func() {
 			s.activeScopes.Store(desiredSnapshot)
 			s.pendingScopes.Store(nil)
@@ -490,6 +492,10 @@ func (s *fanotifySource) reconcileLocked() {
 		}
 	}
 	s.markMask = newMask
+	s.previousRequiredMountIDs = make(map[int]struct{}, len(required))
+	for id := range required {
+		s.previousRequiredMountIDs[id] = struct{}{}
+	}
 	s.publishMountAttributionLocked()
 	s.updateDiagnostics(required, errs)
 }

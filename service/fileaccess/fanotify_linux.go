@@ -29,6 +29,7 @@ type fanotifySource struct {
 	scopes                   map[string]*policyScope
 	retiredScopes            []*policyScope
 	marks                    map[int]mountedMark
+	previousRequiredMountIDs map[int]struct{}
 	dynamicMountCoverageGaps map[int]mountInfo
 	markMask                 uint64
 	pending                  bool
@@ -509,12 +510,12 @@ func (s *fanotifySource) SetWatchPaths(paths []string) error {
 			}
 		}
 		s.pending = true
-		// Candidate scopes are intentionally not active until every required
-		// mount mark has been verified. Events from a partially marked
-		// candidate are denied by handleEvent rather than silently allowed.
-		// Only newly added or changed scopes are pending; scopes already active
-		// stay on their policy path so one unmarkable scope cannot fail-closed
-		// unrelated, already-verified scopes.
+		// Candidate scopes stay pending only while this reconciliation pass is
+		// adding their mount marks. Once the pass finishes, successfully marked
+		// mounts enforce the candidate policy even if another required mount
+		// remains unmarkable. The latter remains visible as partial coverage.
+		// Only newly added or changed scopes are pending, so an in-progress
+		// update cannot fail-close unrelated, already-active scopes.
 		s.pendingScopes.Store(pendingScopesFrom(next, s.activeScopes.Load()))
 	})
 	if !published {
