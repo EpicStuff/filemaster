@@ -19,8 +19,10 @@ func TestDefaultAPIPortMatchesUIConstants(t *testing.T) {
 	}
 
 	root := filepath.Join("..", "..", "..")
+	// websocket.rs is intentionally excluded: it derives the address from the
+	// shared portmaster::api_address() helper (whose default lives in mod.rs)
+	// rather than hardcoding a literal, so there is no port constant to sync.
 	assertRustAPIPorts(t, root, port, []string{
-		"desktop/tauri/src-tauri/src/portmaster/websocket.rs",
 		"desktop/tauri/src-tauri/src/portmaster/mod.rs",
 		"desktop/tauri/src-tauri/src/window.rs",
 	})
@@ -90,12 +92,16 @@ func assertAngularDefaultPort(t *testing.T, root, wantPort string) {
 	if err != nil {
 		t.Fatalf("read environment.ts: %v", err)
 	}
-	re := regexp.MustCompile(`const DEFAULT_PORT = '(\d+)';`)
+	// environment.ts resolves the API host dynamically (URL param → localStorage
+	// → current page host) and only falls back to a hardcoded 127.0.0.1:<port>
+	// when no window context is available. That default fallback is what must
+	// stay in sync with the daemon's default port.
+	re := regexp.MustCompile(`return '127\.0\.0\.1:(\d+)';`)
 	match := re.FindSubmatch(data)
 	if match == nil {
-		t.Fatal("environment.ts DEFAULT_PORT constant not found")
+		t.Fatal("environment.ts default 127.0.0.1:<port> fallback not found")
 	}
 	if string(match[1]) != wantPort {
-		t.Fatalf("environment.ts DEFAULT_PORT = %s, want %s", match[1], wantPort)
+		t.Fatalf("environment.ts default port = %s, want %s", match[1], wantPort)
 	}
 }
