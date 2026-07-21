@@ -63,14 +63,14 @@ ui-deps:
 ui: ui-deps
 	cd "$(UI_DIR)" && PATH="$(NODE_PATH)$$PATH" npm run build
 	@mkdir -p "$(dir $(UI_ZIP))"
-	(cd "$(UI_DIR)/dist" && "$(ARCHIVER)" -a -cf "$(abspath $(UI_ZIP))" .)
+	(cd "$(UI_DIR)/dist" && "$(ARCHIVER)" -a -cf "$(abspath $(UI_ZIP))" -- *)
 	$(MAKE) --no-print-directory verify-ui-archive
 
 verify-ui-archive:
 	@test -f "$(UI_ZIP)" || { echo "missing required UI archive: $(UI_ZIP)" >&2; exit 1; }
-	@"$(ARCHIVER)" -tf "$(UI_ZIP)" | grep -Eq '^\.?/?index\.html$$' || { echo "required UI archive entry missing: index.html in $(UI_ZIP)" >&2; exit 1; }
-	@{ "$(ARCHIVER)" -xOf "$(UI_ZIP)" ./index.html >/dev/null 2>&1 || "$(ARCHIVER)" -xOf "$(UI_ZIP)" index.html >/dev/null 2>&1; } || { echo "required UI archive entry is unreadable: index.html in $(UI_ZIP)" >&2; exit 1; }
-	@{ "$(ARCHIVER)" -xOf "$(UI_ZIP)" ./index.html 2>/dev/null || "$(ARCHIVER)" -xOf "$(UI_ZIP)" index.html 2>/dev/null; } | grep -Fq '<base href="/ui/modules/filemaster/">' || { echo "UI archive index.html must use the /ui/modules/filemaster/ base path" >&2; exit 1; }
+	@"$(ARCHIVER)" -tf "$(UI_ZIP)" | grep -Fxq 'index.html' || { echo "required UI archive entry missing: exact index.html in $(UI_ZIP)" >&2; exit 1; }
+	@"$(ARCHIVER)" -xOf "$(UI_ZIP)" index.html >/dev/null 2>&1 || { echo "required UI archive entry is unreadable: index.html in $(UI_ZIP)" >&2; exit 1; }
+	@"$(ARCHIVER)" -xOf "$(UI_ZIP)" index.html | grep -Fq '<base href="/ui/modules/filemaster/">' || { echo "UI archive index.html must use the /ui/modules/filemaster/ base path" >&2; exit 1; }
 
 assets:
 	@mkdir -p "$(dir $(ASSETS_ZIP))"
