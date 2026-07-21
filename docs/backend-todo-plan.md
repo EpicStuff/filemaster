@@ -296,27 +296,29 @@ Every persisted File Access and File Execute record must expose the mount that w
 5. Represent unavailable attribution explicitly as unknown; never infer a mount from an unrelated path after a mount has changed.
 6. Test nested and bind mounts, dynamically discovered mounts, unmounts, and events received while mount reconciliation is pending.
 
-### Phase 3: Rewrite Rule Evaluation
+### Phase 3: Rewrite Rule Evaluation — ✅ Done (engine + unit tests; enforcement deferred to Phase 5)
 
-1. Put file and folder rules in shared ordered lists.
-2. Determine rule applicability based on the operation.
-3. Make the first applicable matching rule decisive.
-4. Use the profile default only when no applicable rule matches.
-5. Support Delete decisions.
-6. Support Create decisions for nonexistent paths.
-7. Support Source Delete and Destination Create or Write for Rename and Move.
-8. Treat replacement differently from creation.
-9. Preserve rule priority.
+Implemented in `service/fileaccess/rule_decision.go` (engine) and `rule_decision_test.go` (unit tests covering the worked examples in sections 3, 9-12, and Links). Layered additively on the existing `PathRule`/`PathRules` matching so the current runtime open/exec prompt path is untouched; `DecideOperation` is the verdict-or-default engine future non-prompt enforcement will call.
+
+1. ✅ Put file and folder rules in shared ordered lists. (Per-operation lists each mix files and folders; applicability is operation-scoped so within-list order is decisive.)
+2. ✅ Determine rule applicability based on the operation. (`ruleAppliesToDecision` + `DecisionOp.scopeOp`/`entryOp`.)
+3. ✅ Make the first applicable matching rule decisive.
+4. ✅ Use the profile default only when no applicable rule matches.
+5. ✅ Support Delete decisions. (`DecisionDelete`; folder rule applies to the entry.)
+6. ✅ Support Create decisions for nonexistent paths. (`DecisionCreate`.)
+7. ✅ Support Source Delete and Destination Create or Write for Rename and Move. (`DecideRename`.)
+8. ✅ Treat replacement differently from creation. (`RenameRequest.DestExists` → Write on existing dest.)
+9. ✅ Preserve rule priority. (Engine iterates rules in stored order.)
 
 Items 5 through 8 build the rule-evaluation engine and its unit tests only. Delete, Create, Rename, Move, and Replacement are not observable by the current fanotify backend and are not enforced until Phase 5. The engine is written now so that enforcement can be wired to it later without reworking rule matching.
 
-### Phase 4: Prepare Future Permissions
+### Phase 4: Prepare Future Permissions — ✅ Done (structural prep folded into Phase 3)
 
-1. Preserve Access rules for future migration.
-2. Define future Read, Write, and Execute meanings.
-3. Prepare for source and destination decisions.
-4. Prepare for Create, Delete, Rename, Move, Replacement, Links, Metadata, Truncate, Append, and file mappings.
-5. Keep unsupported rules clearly inactive.
+1. ✅ Preserve Access rules for future migration. (Rule storage/plumbing retained from Phase 1; `OpRead`/`OpWrite` scope identities kept.)
+2. ✅ Define future Read, Write, and Execute meanings. (Documented on the `DecisionOp` constants.)
+3. ✅ Prepare for source and destination decisions. (`RenameRequest`, `LinkRequest`, `DecideRename`.)
+4. ✅ Prepare for Create, Delete, Rename, Move, Replacement, Links, Metadata, Truncate, Append, and file mappings. (Create/Delete/Rename/Move/Replacement/Links modeled; Metadata/Truncate/Append/mappings are Write-semantic and covered by `DecisionWrite`.)
+5. ✅ Keep unsupported rules clearly inactive. (`DecisionOp.RuntimeObservable` marks Access/Execute as the only runtime-active operations.)
 
 ### Phase 5: Add Future LSM Enforcement
 
