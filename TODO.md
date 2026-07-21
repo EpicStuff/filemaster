@@ -21,6 +21,19 @@ allow/deny, not redirect.
 - [ ] Build a launcher shim that applies the ruleset before `execve` (Landlock
 	must be set up by the parent).
 
+## known bugs
+
+- [ ] **Profile revision conflict on startup.** Worker `retry updating global
+	config profile` fails with `profile revision conflict: profile
+	special/global-config expected revision 0, current revision 1`, and Status
+	raises `profile:global-profile-error` ("Internal Settings Failure — some
+	global settings might not be applied"). Looks like a write race between
+	seeding `special/global-config` at rev 0 and a concurrent update that already
+	bumped it to rev 1. Investigate the global-config init/update path in
+	`service/profile`; the retry likely needs to re-read the current revision
+	before writing. Restarting the daemon clears it, so it's a startup race, not
+	persistent corruption.
+
 ## other stuff
 
 - make sure user is notified of failed fan mark

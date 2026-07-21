@@ -165,7 +165,7 @@ func registerAPIEndpoints() error {
 		return err
 	}
 
-	return api.SetAuthenticator(localhostAuthenticator)
+	return api.SetAuthenticator(apiAuthenticator)
 }
 
 // shutdown shuts the Portmaster down.
