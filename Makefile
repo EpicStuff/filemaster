@@ -22,7 +22,7 @@ SERVICE_DIR ?= /etc/systemd/system
 SERVICE_FILE := $(SERVICE_DIR)/filemaster.service
 
 .DEFAULT_GOAL := build
-.PHONY: assets build clean core help install intel package stage tauri tauri-ui test test-fake ui ui-deps
+.PHONY: assets build clean core help install intel package stage tauri tauri-ui test test-fake test-ui-archive ui ui-deps verify-ui-archive
 
 help:
 	@printf '%s\n' 'Filemaster native build targets:' \
@@ -64,6 +64,12 @@ ui: ui-deps
 	cd "$(UI_DIR)" && PATH="$(NODE_PATH)$$PATH" npm run build
 	@mkdir -p "$(dir $(UI_ZIP))"
 	(cd "$(UI_DIR)/dist" && "$(ARCHIVER)" -a -cf "$(abspath $(UI_ZIP))" .)
+	$(MAKE) --no-print-directory verify-ui-archive
+
+verify-ui-archive:
+	@test -f "$(UI_ZIP)" || { echo "missing required UI archive: $(UI_ZIP)" >&2; exit 1; }
+	@"$(ARCHIVER)" -tf "$(UI_ZIP)" | grep -Eq '^\.?/?index\.html$$' || { echo "required UI archive entry missing: index.html in $(UI_ZIP)" >&2; exit 1; }
+	@{ "$(ARCHIVER)" -xOf "$(UI_ZIP)" ./index.html >/dev/null 2>&1 || "$(ARCHIVER)" -xOf "$(UI_ZIP)" index.html >/dev/null 2>&1; } || { echo "required UI archive entry is unreadable: index.html in $(UI_ZIP)" >&2; exit 1; }
 
 assets:
 	@mkdir -p "$(dir $(ASSETS_ZIP))"
@@ -98,9 +104,13 @@ package: stage
 test:
 	go test ./...
 	$(MAKE) test-fake
+	$(MAKE) test-ui-archive
 
 test-fake:
 	go test -tags filemaster_test ./service/fileaccess
+
+test-ui-archive:
+	packaging/linux/test_ui_archive.sh "$(MAKE)" "$(ARCHIVER)"
 
 clean:
 	rm -rf "$(DIST)" "$(TAURI_DIR)/binary" "$(TAURI_DIR)/target"
