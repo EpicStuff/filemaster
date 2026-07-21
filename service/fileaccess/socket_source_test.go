@@ -38,7 +38,7 @@ func TestSocketSource(t *testing.T) {
 	}
 	defer conn.Close()
 
-	if _, err := fmt.Fprintln(conn, `{"pid":123,"exe":"/usr/bin/cat","path":"/tmp/secret.txt","op":"read"}`); err != nil {
+	if _, err := fmt.Fprintln(conn, `{"pid":123,"exe":"/usr/bin/cat","path":"/tmp/secret.txt","op":"open"}`); err != nil {
 		t.Fatalf("write event: %v", err)
 	}
 
@@ -55,7 +55,7 @@ func TestSocketSource(t *testing.T) {
 		// The socket source mirrors the real kernel source: PID, Path and
 		// Op come off the wire, but Exe is left empty (resolved from the
 		// PID downstream). Any "exe" key in the JSON is ignored.
-		if event.PID != 123 || event.Exe != "" || event.Path != "/tmp/secret.txt" || event.Op != OpRead {
+		if event.PID != 123 || event.Exe != "" || event.Path != "/tmp/secret.txt" || event.Op != OpOpen {
 			t.Fatalf("event = %+v, want pid/path/op from socket JSON and empty exe", event)
 		}
 	case <-time.After(time.Second):
@@ -103,7 +103,7 @@ func TestSocketSourceCloseFromHandler(t *testing.T) {
 	}
 	defer conn.Close()
 
-	if _, err := fmt.Fprintln(conn, `{"pid":456,"exe":"/usr/bin/tee","path":"/tmp/out.txt","op":"write"}`); err != nil {
+	if _, err := fmt.Fprintln(conn, `{"pid":456,"exe":"/usr/bin/tee","path":"/tmp/out.txt","op":"open"}`); err != nil {
 		t.Fatalf("write event: %v", err)
 	}
 	line, err := bufio.NewReader(conn).ReadString('\n')

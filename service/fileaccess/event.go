@@ -2,28 +2,34 @@ package fileaccess
 
 import "context"
 
-// FileOp is the kind of file access being requested. The fanotify
-// source decodes the perm-event mask into one of these; the Linux
-// kernel itself doesn't surface a "write" distinction at perm-event
-// time (the syscall hasn't completed yet, so we can't inspect open
-// flags on the new fd). The fake socket source can still emit OpWrite
-// for end-to-end tests that model a write attempt explicitly.
+// FileOp is the kind of file access being requested. In the current release the
+// fanotify source only ever produces OpOpen (FAN_OPEN_PERM) and OpExec
+// (FAN_OPEN_EXEC_PERM); the kernel cannot surface a Read/Write distinction at
+// perm-event time (the syscall hasn't completed, so open flags on the new fd
+// can't be inspected -- that split is future, LSM-only).
+//
+// OpRead and OpWrite are retained as internal rule-scope identities, not as
+// runtime events: OpRead is the scope of the Access (Read) rule list that
+// governs opens (see ruleScopeOp), and OpWrite is the scope of the Write rule
+// list, whose storage and plumbing are kept for the future Write engine even
+// though nothing emits a write event yet.
 type FileOp uint8
 
 const (
-	// OpOpen is fired by FAN_OPEN_PERM -- any open() the kernel
-	// reports that isn't matched by a more-specific perm event.
+	// OpOpen is fired by FAN_OPEN_PERM -- any open()/opendir() the kernel
+	// reports that isn't an exec open. It is the current File/Folder Access
+	// event and is scoped to the Access (Read) rule list.
 	OpOpen FileOp = iota
-	// OpRead is fired by FAN_ACCESS_PERM -- a read() against the
-	// watched file. Only enabled when the InterceptReads config
-	// option is on, because FAN_ACCESS_PERM fires per syscall and
-	// can be very chatty.
+	// OpRead is the scope identity of the Access (Read) rule list. No runtime
+	// source emits it now (FAN_ACCESS_PERM was removed); OpOpen folds to it for
+	// rule matching and persistence. With LSM it becomes a distinct Read event.
 	OpRead
-	// OpWrite is emitted by test/fake sources that model a user-level
-	// write attempt explicitly.
+	// OpWrite is the scope identity of the (currently hidden) Write rule list.
+	// No runtime source emits it; it is retained so the future Write evaluation
+	// engine can be built and unit-tested before LSM enforcement lands.
 	OpWrite
-	// OpExec is fired by FAN_OPEN_EXEC_PERM -- the kernel opening
-	// a file for execve(). Always enabled.
+	// OpExec is fired by FAN_OPEN_EXEC_PERM -- the kernel opening a file for
+	// execve(). Always enabled.
 	OpExec
 )
 

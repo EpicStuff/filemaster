@@ -270,11 +270,11 @@ Rule priority and ordering must be preserved.
 
 ## 19. Rewrite Phases
 
-### Phase 1: Remove Dead Runtime Paths
+### Phase 1: Remove Dead Runtime Paths — ✅ Done
 
-1. Delete `FAN_ACCESS_PERM` interception: remove it from the fanotify perm-event mask, remove the `case mask&FAN_ACCESS_PERM` branch in the mask decoder, and remove the `InterceptReads` config option and its diagnostics field. Real fanotify then emits only `OpOpen` and `OpExec`.
-2. Delete the runtime `OpWrite` event, which is only emitted by the test-only fake socket source. No real source produces a write permission event.
-3. Leave the Write rule list, its config key, and the rule-scoping plumbing in place (they are hidden and retained per Phase 2, not deleted here).
+1. ✅ Delete `FAN_ACCESS_PERM` interception: remove it from the fanotify perm-event mask, remove the `case mask&FAN_ACCESS_PERM` branch in the mask decoder, and remove the `InterceptReads` config option and its diagnostics field. Real fanotify then emits only `OpOpen` and `OpExec`.
+2. ✅ Delete the runtime `OpWrite` event, which is only emitted by the test-only fake socket source. No real source produces a write permission event. (Dropped both the fake `write` and `read` socket ops; `opFromString` now yields only `OpExec`/`OpOpen`.)
+3. ✅ Leave the Write rule list, its config key, and the rule-scoping plumbing in place (they are hidden and retained per Phase 2, not deleted here). `OpRead`/`OpWrite` `FileOp` constants retained as internal rule-scope identities.
 
 ### Phase 2: Rewrite Current Rules
 

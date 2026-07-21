@@ -96,10 +96,6 @@ func testConfinedFanotifyIntegrationChild(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = unix.Unmount(nested, unix.MNT_DETACH) })
 
-	previousInterceptReads := cfgOptionInterceptReads
-	cfgOptionInterceptReads = func() bool { return true }
-	t.Cleanup(func() { cfgOptionInterceptReads = previousInterceptReads })
-
 	filePath := filepath.Join(root, "file")
 	promptPath := filepath.Join(root, "prompt")
 	denyPath := filepath.Join(root, "deny")

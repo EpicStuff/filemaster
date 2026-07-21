@@ -137,7 +137,7 @@ func TestPromptCoordinatorSeparatesDifferentKeysAndUnidentifiedProcesses(t *test
 	}{
 		{FileEvent{Path: "/tmp/one", Op: OpOpen}, profileA},
 		{FileEvent{Path: "/tmp/two", Op: OpOpen}, profileA},
-		{FileEvent{Path: "/tmp/one", Op: OpRead}, profileA},
+		{FileEvent{Path: "/tmp/one", Op: OpExec}, profileA},
 		{FileEvent{Path: "/tmp/one", Op: OpOpen}, profileB},
 		{FileEvent{PID: 10, ProcessIdentity: "10-1", Path: "/tmp/unknown", Op: OpOpen}, unidentified},
 		{FileEvent{PID: 10, ProcessIdentity: "10-1", Path: "/tmp/unknown", Op: OpOpen}, unidentified},

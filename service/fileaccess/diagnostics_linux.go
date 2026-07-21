@@ -13,7 +13,6 @@ import (
 // Effective records the limits that currently own descriptors and workers.
 type FileAccessSettingsDiagnostics struct {
 	WatchPaths              []string
-	InterceptReads          bool
 	EffectivePipelineConfig DecisionPipelineConfig
 }
 
@@ -66,7 +65,6 @@ func (fa *FileAccess) Diagnostics() FileAccessDiagnostics {
 	diagnostics := FileAccessDiagnostics{
 		Settings: FileAccessSettingsDiagnostics{
 			WatchPaths:              append([]string(nil), resolveWatchPaths()...),
-			InterceptReads:          cfgOptionInterceptReads != nil && cfgOptionInterceptReads(),
 			EffectivePipelineConfig: fa.effectivePipelineConfig,
 		},
 		Shutdown: cloneShutdownDiagnostics(fa.ShutdownDiagnostics()),

@@ -26,7 +26,7 @@ func TestRecordingHandlerRecordsEnrichedProfile(t *testing.T) {
 
 	h := NewRecordingHandler(inner, feed)
 
-	v := h.Decide(context.Background(), &FileEvent{PID: 42, Path: "/tmp/secret.txt", Op: OpWrite})
+	v := h.Decide(context.Background(), &FileEvent{PID: 42, Path: "/tmp/secret.txt", Op: OpOpen})
 	if v != VerdictDeny {
 		t.Fatalf("verdict = %s, want deny", v)
 	}
@@ -42,8 +42,8 @@ func TestRecordingHandlerRecordsEnrichedProfile(t *testing.T) {
 		if rec.Exe != "/usr/bin/sleep" {
 			t.Errorf("record exe = %q, want /usr/bin/sleep (resolved by inner)", rec.Exe)
 		}
-		if rec.Op != "write" || rec.Verdict != "deny" {
-			t.Errorf("record op/verdict = %q/%q, want write/deny", rec.Op, rec.Verdict)
+		if rec.Op != "open" || rec.Verdict != "deny" {
+			t.Errorf("record op/verdict = %q/%q, want open/deny", rec.Op, rec.Verdict)
 		}
 	default:
 		t.Fatal("no record was fed to filequery")
@@ -65,7 +65,7 @@ func TestRecordingHandlerCountsDroppedObservations(t *testing.T) {
 
 	// First record fills the buffer; the next three have nowhere to go.
 	for range 4 {
-		h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/x", Op: OpRead})
+		h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/x", Op: OpOpen})
 	}
 
 	diag := source.ObservationDiagnostics()

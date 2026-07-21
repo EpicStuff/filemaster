@@ -381,30 +381,25 @@ func (s *fanotifySource) ReaderDiagnostics() ReaderDiagnostics {
 	}
 }
 
-// resolveMarkMask builds the perm-event mask. OPEN_PERM and
-// OPEN_EXEC_PERM are always on; ACCESS_PERM is gated behind the
-// InterceptReads config option (off by default because it fires per
-// read() syscall and can be very chatty).
+// resolveMarkMask builds the perm-event mask. The current release intercepts
+// only opens: OPEN_PERM (File/Folder Access) and OPEN_EXEC_PERM (File Execute).
+// FAN_ACCESS_PERM was removed with the InterceptReads option -- it only fired on
+// reads through an already-open descriptor, could not distinguish Read from
+// Write, and added no enforcement over the open decision (see backend-todo-plan
+// section 4). Read vs Write splitting is a future, LSM-only capability.
 func resolveMarkMask() uint64 {
-	mask := uint64(unix.FAN_OPEN_PERM | unix.FAN_OPEN_EXEC_PERM | unix.FAN_ONDIR)
-	if cfgOptionInterceptReads != nil && cfgOptionInterceptReads() {
-		mask |= uint64(unix.FAN_ACCESS_PERM)
-	}
-	return mask
+	return uint64(unix.FAN_OPEN_PERM | unix.FAN_OPEN_EXEC_PERM | unix.FAN_ONDIR)
 }
 
-// opFromMask decodes a perm-event mask into the matching FileOp,
-// most-specific first. The kernel only ever sets one perm-event bit
-// per event, but a stray combination still maps deterministically.
+// opFromMask decodes a perm-event mask into the matching FileOp. Real fanotify
+// now emits only OpExec (FAN_OPEN_EXEC_PERM) and OpOpen (FAN_OPEN_PERM); the
+// kernel sets one perm-event bit per event, and anything that is not an exec
+// open is an ordinary open.
 func opFromMask(mask uint64) FileOp {
-	switch {
-	case mask&unix.FAN_OPEN_EXEC_PERM != 0:
+	if mask&unix.FAN_OPEN_EXEC_PERM != 0 {
 		return OpExec
-	case mask&unix.FAN_ACCESS_PERM != 0:
-		return OpRead
-	default:
-		return OpOpen
 	}
+	return OpOpen
 }
 
 // resolveWatchPaths returns the configured watch paths. An empty

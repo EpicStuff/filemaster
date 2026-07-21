@@ -851,9 +851,6 @@ func TestFanotifyFileAndDirectoryOpenReadAndReaddir(t *testing.T) {
 	if err := os.WriteFile(path, []byte("contents"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previous := cfgOptionInterceptReads
-	cfgOptionInterceptReads = func() bool { return true }
-	t.Cleanup(func() { cfgOptionInterceptReads = previous })
 
 	source := newFanotifyIntegrationSource(t, []string{root})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -910,11 +907,12 @@ func TestFanotifyFileAndDirectoryOpenReadAndReaddir(t *testing.T) {
 		t.Fatal("file and directory fanotify operations timed out")
 	}
 
+	// Reads through an already-open descriptor no longer produce perm events
+	// (FAN_ACCESS_PERM was removed); only the opens of the file and directory
+	// are intercepted, both as OpOpen.
 	want := map[string]int{
 		fmt.Sprintf("%s:%s", path, OpOpen): 1,
-		fmt.Sprintf("%s:%s", path, OpRead): 1,
 		fmt.Sprintf("%s:%s", root, OpOpen): 1,
-		fmt.Sprintf("%s:%s", root, OpRead): 1,
 	}
 	deadline := time.After(2 * time.Second)
 	for len(want) > 0 {
@@ -944,9 +942,6 @@ func TestFanotifyEventPathResolutionDoesNotRecurse(t *testing.T) {
 	if err := os.WriteFile(path, []byte("event"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previous := cfgOptionInterceptReads
-	cfgOptionInterceptReads = func() bool { return false }
-	t.Cleanup(func() { cfgOptionInterceptReads = previous })
 
 	source := newFanotifyIntegrationSource(t, []string{root})
 	ctx, cancel := context.WithCancel(context.Background())

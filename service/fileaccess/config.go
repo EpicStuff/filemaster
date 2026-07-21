@@ -12,13 +12,6 @@ import (
 // initializes; it just has no marks to issue).
 const CfgOptionWatchPathsKey = "fileaccess/watchPaths"
 
-// CfgOptionInterceptReadsKey toggles FAN_ACCESS_PERM in the fanotify
-// mask. Off by default: read events fire per read() syscall and a
-// chatty consumer (cat, grep) can produce thousands of prompts before
-// a rule is in place. Turn on when you specifically want read-vs-open
-// rule granularity.
-const CfgOptionInterceptReadsKey = "fileaccess/interceptReads"
-
 // Pipeline limits intentionally require restart. The queue and worker count
 // own goroutines and buffered ownership; replacing either live would make the
 // configured value disagree with the active enforcement limits.
@@ -35,12 +28,10 @@ const (
 	cfgOptionDecisionQueueOrder   = 30
 	cfgOptionOutstandingOrder     = 40
 	cfgOptionProfileAskOrder      = 50
-	cfgOptionInterceptReadsOrder  = 60
 )
 
 var (
 	cfgOptionWatchPaths      config.StringArrayOption
-	cfgOptionInterceptReads  config.BoolOption
 	cfgOptionDecisionWorkers config.IntOption
 	cfgOptionDecisionQueue   config.IntOption
 	cfgOptionOutstanding     config.IntOption
@@ -148,22 +139,6 @@ func registerConfig() error {
 	cfgOptionDecisionQueue = config.Concurrent.GetAsInt(CfgOptionDecisionQueueCapacityKey, int64(defaults.QueueCapacity))
 	cfgOptionOutstanding = config.Concurrent.GetAsInt(CfgOptionOutstandingLimitKey, defaults.OutstandingLimit)
 	cfgOptionProfileAsk = config.Concurrent.GetAsInt(CfgOptionProfileAskLimitKey, int64(defaults.PerProfileAskLimit))
-
-	err = config.Register(&config.Option{
-		Name:         "Intercept Read Syscalls",
-		Key:          CfgOptionInterceptReadsKey,
-		Description:  "Also intercept read() syscalls, including directory reads such as readdir(), against watched paths. Off by default because FAN_ACCESS_PERM can fire for every read and generate high event volume.",
-		OptType:      config.OptTypeBool,
-		DefaultValue: false,
-		Annotations: config.Annotations{
-			config.DisplayOrderAnnotation: cfgOptionInterceptReadsOrder,
-			config.CategoryAnnotation:     "Other",
-		},
-	})
-	if err != nil {
-		return err
-	}
-	cfgOptionInterceptReads = config.Concurrent.GetAsBool(CfgOptionInterceptReadsKey, false)
 
 	return nil
 }

@@ -107,7 +107,7 @@ qsubReady:
 		PID:  1234,
 		Exe:  "/usr/bin/cat",
 		Path: "/tmp/filemaster-test/ws-secret.txt",
-		Op:   OpRead,
+		Op:   OpOpen,
 	}
 	source := newFakeSource([]FileEvent{event})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -126,7 +126,7 @@ waitForPrompt:
 			if msg.Type == apiclient.MsgError || msg.Type == apiclient.MsgWarning {
 				t.Fatalf("notification qsub returned %s: %s", msg.Type, msg.Key)
 			}
-			if msg.Type != apiclient.MsgNew || !strings.HasPrefix(msg.Key, "notifications:all/fileaccess:read:") {
+			if msg.Type != apiclient.MsgNew || !strings.HasPrefix(msg.Key, "notifications:all/fileaccess:open:") {
 				continue
 			}
 			if !strings.Contains(string(msg.RawValue), event.Path) || !strings.Contains(string(msg.RawValue), event.Exe) {

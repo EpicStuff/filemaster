@@ -288,43 +288,6 @@ func TestUnverifiedNewScopeDoesNotDenyVerifiedUnchangedScopes(t *testing.T) {
 	}
 }
 
-func TestMountMaskChangesOnlyChangedBits(t *testing.T) {
-	root := t.TempDir()
-	var calls []struct {
-		flags uint
-		mask  uint64
-	}
-	s := newReconciliationTestSource([]mountInfo{{ID: 1, MountPoint: "/"}}, func(flags uint, mask uint64, _ string) error {
-		calls = append(calls, struct {
-			flags uint
-			mask  uint64
-		}{flags, mask})
-		return nil
-	})
-	previous := cfgOptionInterceptReads
-	cfgOptionInterceptReads = func() bool { return false }
-	t.Cleanup(func() { cfgOptionInterceptReads = previous })
-	if err := s.SetWatchPaths([]string{root}); err != nil {
-		t.Fatal(err)
-	}
-	calls = nil
-	cfgOptionInterceptReads = func() bool { return true }
-	if err := s.SetWatchPaths([]string{root}); err != nil {
-		t.Fatal(err)
-	}
-	if len(calls) != 1 || calls[0].flags&uint(unix.FAN_MARK_ADD) == 0 || calls[0].mask != uint64(unix.FAN_ACCESS_PERM) {
-		t.Fatalf("read-mask add calls = %#v", calls)
-	}
-	calls = nil
-	cfgOptionInterceptReads = func() bool { return false }
-	if err := s.SetWatchPaths([]string{root}); err != nil {
-		t.Fatal(err)
-	}
-	if len(calls) != 1 || calls[0].flags&uint(unix.FAN_MARK_REMOVE) == 0 || calls[0].mask != uint64(unix.FAN_ACCESS_PERM) {
-		t.Fatalf("read-mask remove calls = %#v", calls)
-	}
-}
-
 func newReconciliationTestSource(mounts []mountInfo, mark func(uint, uint64, string) error) *fanotifySource {
 	if mark == nil {
 		mark = func(uint, uint64, string) error { return nil }
@@ -506,10 +469,6 @@ func snapshotContains(snapshot *scopeSnapshot, path string) bool {
 }
 
 func TestPhaseThreeMaskIncludesDirectoryEvents(t *testing.T) {
-	previous := cfgOptionInterceptReads
-	cfgOptionInterceptReads = nil
-	t.Cleanup(func() { cfgOptionInterceptReads = previous })
-
 	mask := resolveMarkMask()
 	if mask&uint64(unix.FAN_ONDIR) == 0 {
 		t.Fatalf("phase 3 mask = 0x%x, must include FAN_ONDIR", mask)
