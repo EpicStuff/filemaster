@@ -36,7 +36,12 @@ type fanotifySource struct {
 
 	activeScopes  atomic.Pointer[scopeSnapshot]
 	pendingScopes atomic.Pointer[scopeSnapshot]
-	diagnostics   MountDiagnostics
+	// activeMounts is a lock-free snapshot of the currently marked mounts, sorted
+	// longest mount point first, used to attribute events to a mount at event
+	// time (backend-todo-plan Phase 2.5). It is nil while reconciliation is
+	// pending so attribution reports unknown rather than trusting a stale mount.
+	activeMounts atomic.Pointer[[]mountInfo]
+	diagnostics  MountDiagnostics
 
 	mountInfo func() ([]mountInfo, error)
 	mark      func(flags uint, mask uint64, path string) error
@@ -838,6 +843,11 @@ func (s *fanotifySource) handleEvent(ctx context.Context, handler PendingHandler
 		Path:  path,
 		Op:    opFromMask(uint64(meta.Mask)),
 		IsDir: uint64(meta.Mask)&uint64(unix.FAN_ONDIR) != 0,
+	}
+	// Attribute the event to the protected mount that was active at decision
+	// time. Unresolved paths stay unknown (0, "") rather than guessed.
+	if resolved {
+		event.MountID, event.MountPath = s.attributeMount(path)
 	}
 	pending := s.newFanotifyPendingEvent(&event, meta.Fd)
 	var responseErr error

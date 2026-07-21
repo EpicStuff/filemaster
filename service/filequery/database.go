@@ -138,6 +138,13 @@ func (db *Database) ApplyMigrations() error {
 		return fmt.Errorf("create schema: %w", err)
 	}
 
+	// CREATE TABLE IF NOT EXISTS never alters an existing table, so databases
+	// created before a column was introduced (e.g. the Phase 2.5 mount_id /
+	// mount_path columns) must gain it via ALTER TABLE ADD COLUMN.
+	if err := db.ensureColumns(); err != nil {
+		return err
+	}
+
 	indexes := []string{
 		`CREATE INDEX IF NOT EXISTS main.filequery_profile_index ON %s (profile)`,
 		`CREATE INDEX IF NOT EXISTS main.filequery_exe_index ON %s (exe)`,
@@ -150,6 +157,62 @@ func (db *Database) ApplyMigrations() error {
 		}
 	}
 	return nil
+}
+
+// ensureColumns adds any schema columns missing from an existing file_events
+// table. It is idempotent: columns already present are skipped. A NOT NULL
+// column is added with a zero-value default so existing rows backfill to the
+// column's zero value (for mount attribution that means unknown: 0 / "").
+func (db *Database) ensureColumns() error {
+	existing := make(map[string]struct{})
+	pragma := fmt.Sprintf("PRAGMA main.table_info(%s)", db.Schema.Name)
+	err := sqlitex.ExecuteTransient(db.writeConn, pragma, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			existing[stmt.GetText("name")] = struct{}{}
+			return nil
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("read table columns: %w", err)
+	}
+	for _, col := range db.Schema.Columns {
+		if _, ok := existing[col.Name]; ok {
+			continue
+		}
+		definition := col.Name + " " + sqliteTypeName(col.Type)
+		if !col.Nullable {
+			definition += " NOT NULL DEFAULT " + sqliteZeroDefault(col.Type)
+		}
+		alter := fmt.Sprintf("ALTER TABLE main.%s ADD COLUMN %s", db.Schema.Name, definition)
+		if err := sqlitex.ExecuteTransient(db.writeConn, alter, nil); err != nil {
+			return fmt.Errorf("add column %s: %w", col.Name, err)
+		}
+	}
+	return nil
+}
+
+func sqliteTypeName(t sqlite.ColumnType) string {
+	switch t {
+	case sqlite.TypeInteger:
+		return "INTEGER"
+	case sqlite.TypeFloat:
+		return "REAL"
+	case sqlite.TypeText:
+		return "TEXT"
+	default:
+		return "BLOB"
+	}
+}
+
+func sqliteZeroDefault(t sqlite.ColumnType) string {
+	switch t {
+	case sqlite.TypeInteger, sqlite.TypeFloat:
+		return "0"
+	case sqlite.TypeText:
+		return "''"
+	default:
+		return "x''"
+	}
 }
 
 func (db *Database) withConn(ctx context.Context, fn func(*sqlite.Conn) error) error {

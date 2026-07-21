@@ -83,6 +83,15 @@ type FileEvent struct {
 	Op    FileOp
 	IsDir bool // FAN_ONDIR for real fanotify sources.
 
+	// MountID / MountPath attribute the event to the protected mount that was
+	// active when the decision occurred (backend-todo-plan Phase 2.5). The
+	// fanotify source fills them from its mount-reconciliation state; other
+	// sources leave them zero. A zero MountID with an empty MountPath means the
+	// mount is unknown (e.g. reconciliation was pending or no active mount
+	// contained the path) -- attribution is never guessed from an unrelated path.
+	MountID   int
+	MountPath string
+
 	// ProcessIdentity is stable for the lifetime of a resolved process. It is
 	// used only for the unidentified prompt bucket, where there is no profile
 	// identity available to safely group requests.

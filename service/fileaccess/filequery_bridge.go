@@ -45,14 +45,16 @@ func (h *recordingHandler) DecisionHandler() Handler {
 func (h *recordingHandler) Observe(e *FileEvent, verdict Verdict) {
 	profile := e.ProfileSource + "/" + e.ProfileID
 	rec := filequery.FileAccessRecord{
-		At:      time.Now(),
-		PID:     e.PID,
-		Exe:     e.Exe,
-		Path:    e.Path,
-		Op:      e.Op.String(),
-		Verdict: verdictString(verdict),
-		Profile: profile,
-		AppName: e.ProfileName,
+		At:        time.Now(),
+		PID:       e.PID,
+		Exe:       e.Exe,
+		Path:      e.Path,
+		Op:        e.Op.String(),
+		Verdict:   verdictString(verdict),
+		Profile:   profile,
+		AppName:   e.ProfileName,
+		MountID:   e.MountID,
+		MountPath: e.MountPath,
 	}
 	select {
 	case h.feed <- rec:

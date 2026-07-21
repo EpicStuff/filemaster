@@ -490,6 +490,7 @@ func (s *fanotifySource) reconcileLocked() {
 		}
 	}
 	s.markMask = newMask
+	s.publishMountAttributionLocked()
 	s.updateDiagnostics(required, errs)
 }
 
@@ -708,4 +709,41 @@ func (s *fanotifySource) pathInActiveScope(path string) bool {
 		}
 	}
 	return false
+}
+
+// publishMountAttributionLocked refreshes the lock-free mount snapshot used for
+// event attribution. While reconciliation is pending the snapshot is cleared so
+// attribution reports unknown instead of trusting a mount set that is changing
+// (backend-todo-plan Phase 2.5). Callers hold marksMu.
+func (s *fanotifySource) publishMountAttributionLocked() {
+	if s.pending {
+		s.activeMounts.Store(nil)
+		return
+	}
+	mounts := make([]mountInfo, 0, len(s.marks))
+	for _, mark := range s.marks {
+		mounts = append(mounts, mark.mount)
+	}
+	// Longest mount point first so a nested or bind mount wins over an ancestor.
+	sort.Slice(mounts, func(i, j int) bool {
+		return len(mounts[i].MountPoint) > len(mounts[j].MountPoint)
+	})
+	s.activeMounts.Store(&mounts)
+}
+
+// attributeMount returns the mount ID and display path of the active protected
+// mount that contains path, or (0, "") when the mount is unknown -- either
+// reconciliation is pending or no active mount contains the path. It never
+// infers a mount from an unrelated path. Safe for concurrent use (lock-free).
+func (s *fanotifySource) attributeMount(path string) (int, string) {
+	mounts := s.activeMounts.Load()
+	if mounts == nil || path == "" {
+		return 0, ""
+	}
+	for _, mount := range *mounts {
+		if pathContains(mount.MountPoint, path) {
+			return mount.ID, mount.MountPoint
+		}
+	}
+	return 0, ""
 }

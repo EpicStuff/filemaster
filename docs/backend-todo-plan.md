@@ -287,16 +287,18 @@ Rule priority and ordering must be preserved.
 
 Deferred to the UI session: relabeling the current "Read Rules" list as "Access" and surfacing the Folder Execute "inactive" state and the hidden Write list in the Angular settings UI.
 
-### Phase 2.5: Expose Mount Attribution for Dashboard Activity
+### Phase 2.5: Expose Mount Attribution for Dashboard Activity — ✅ Done (core; filter/group-by deferred)
 
 Every persisted File Access and File Execute record must expose the mount that was protected when the decision occurred.
 
-1. Attribute each Access and Execute permission event to its active protected mount using the source's mount-reconciliation state and event path/file descriptor information.
-2. Do **not** use `FAN_REPORT_MNT`: it cannot be combined with `FAN_CLASS_CONTENT`, which Filemaster requires for permission decisions.
-3. Persist a stable mount ID and display mount path with each `FileAccessRecord`.
-4. Add schema migration, retention handling, filequery filter/group-by support, and API fields for mount ID and mount path.
-5. Represent unavailable attribution explicitly as unknown; never infer a mount from an unrelated path after a mount has changed.
-6. Test nested and bind mounts, dynamically discovered mounts, unmounts, and events received while mount reconciliation is pending.
+1. ✅ Attribute each Access and Execute permission event to its active protected mount using the source's mount-reconciliation state and event path/file descriptor information. (`fanotifySource.attributeMount` over a lock-free `activeMounts` snapshot published by `publishMountAttributionLocked` at the end of `reconcileLocked`; longest mount point wins for nested/bind mounts.)
+2. ✅ Do **not** use `FAN_REPORT_MNT`. (Attribution is derived from the source's own mark/reconciliation state and the resolved event path; `FAN_REPORT_MNT` is not used.)
+3. ✅ Persist a stable mount ID and display mount path with each `FileAccessRecord`. (`FileEvent.MountID/MountPath` → `FileAccessRecord.MountID/MountPath`, `sqlite:"mount_id"`/`"mount_path"`.)
+4. ⏳ Partial: **schema migration** done (`Database.ensureColumns` idempotently ALTERs missing columns into existing DBs, backfilling old rows to unknown) and mount ID/path are carried in query results (`SELECT *`). **Retention:** no retention subsystem exists in filequery yet (cleanup was removed in the port); time-based retention is column-agnostic, so nothing to change now. **filequery filter/group-by on mount:** deferred — it is self-contained in the query handler, works off the already-persisted columns, and can be added later without rework.
+5. ✅ Represent unavailable attribution explicitly as unknown; never infer a mount from an unrelated path after a mount has changed. (Pending reconciliation or no containing mount → `(0, "")`; snapshot is cleared while pending.)
+6. ✅ Test nested and bind mounts, dynamically discovered mounts, unmounts, and events received while mount reconciliation is pending. (`mount_attribution_linux_test.go`, `mount_migration_test.go`.)
+
+Deferred to a later session: filequery filter + group-by on mount ID/path, and the Angular dashboard display of the mount column (UI).
 
 ### Phase 3: Rewrite Rule Evaluation — ✅ Done (engine + unit tests; enforcement deferred to Phase 5)
 
