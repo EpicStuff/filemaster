@@ -156,7 +156,7 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	if err != nil {
 		return instance, fmt.Errorf("create profile module: %w", err)
 	}
-	profile.SetFilemasterSeedPaths([]string{svcCfg.BinDir, svcCfg.DataDir})
+	profile.SetFilemasterSeedPaths(svcCfg.BinDir, svcCfg.DataDir)
 	instance.status, err = status.New(instance)
 	if err != nil {
 		return instance, fmt.Errorf("create status module: %w", err)

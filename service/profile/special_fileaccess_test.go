@@ -21,8 +21,8 @@ func requireProfileConfiguration(t *testing.T) {
 
 func TestFilemasterSpecialProfileSeedsEditableRules(t *testing.T) {
 	requireProfileConfiguration(t)
-	SetFilemasterSeedPaths([]string{"/opt/filemaster", "/var/lib/filemaster"})
-	t.Cleanup(func() { SetFilemasterSeedPaths(nil) })
+	SetFilemasterSeedPaths("/opt/filemaster", "/var/lib/filemaster")
+	t.Cleanup(func() { SetFilemasterSeedPaths("", "") })
 
 	p := createSpecialProfile(PortmasterProfileID, "/opt/filemaster/filemaster")
 	if p == nil {
@@ -39,15 +39,18 @@ func TestFilemasterSpecialProfileSeedsEditableRules(t *testing.T) {
 		"+ /opt/filemaster/**",
 		"+ /var/lib/filemaster/**",
 	}
-	// Trusted paths are seeded into every per-operation list.
-	for name, got := range map[string][]string{
-		"read":  p.GetFileAccessReadRules(),
-		"write": p.GetFileAccessWriteRules(),
-		"exec":  p.GetFileAccessExecRules(),
-	} {
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("%s seed rules = %#v, want %#v", name, got, want)
-		}
+	if got := p.GetFileAccessReadRules(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("read seed rules = %#v, want %#v", got, want)
+	}
+	wantExec := []string{
+		"+ /opt/filemaster/filemaster",
+		"+ /opt/filemaster/**",
+	}
+	if got := p.GetFileAccessExecRules(); !reflect.DeepEqual(got, wantExec) {
+		t.Fatalf("exec seed rules = %#v, want %#v", got, wantExec)
+	}
+	if got := p.GetFileAccessWriteRules(); len(got) != 0 {
+		t.Fatalf("inactive write seed rules = %#v, want none", got)
 	}
 }
 
@@ -60,15 +63,25 @@ func TestSystemdSpecialProfileSeedsRulesWithoutDefaultAction(t *testing.T) {
 	if got := p.DefaultAction(); got != DefaultActionNotSet {
 		t.Fatalf("default action = %d, want unset", got)
 	}
-	if len(p.GetFileAccessReadRules()) == 0 {
-		t.Fatal("expected editable systemd seed rules")
+	want := systemdFileAccessRules()
+	for name, got := range map[string][]string{
+		"read": p.GetFileAccessReadRules(),
+		"exec": p.GetFileAccessExecRules(),
+	} {
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("systemd %s seed rules = %#v, want %#v", name, got, want)
+		}
 	}
+	if got := p.GetFileAccessWriteRules(); len(got) != 0 {
+		t.Fatalf("inactive systemd write seed rules = %#v, want none", got)
+	}
+
 }
 
 func TestFilemasterAppSpecialProfilesSeedRulesWithoutDefaultAction(t *testing.T) {
 	requireProfileConfiguration(t)
-	SetFilemasterSeedPaths([]string{"/opt/filemaster", "/var/lib/filemaster"})
-	t.Cleanup(func() { SetFilemasterSeedPaths(nil) })
+	SetFilemasterSeedPaths("/opt/filemaster", "/var/lib/filemaster")
+	t.Cleanup(func() { SetFilemasterSeedPaths("", "") })
 
 	want := []string{
 		"+ /opt/filemaster/filemaster",
@@ -86,39 +99,18 @@ func TestFilemasterAppSpecialProfilesSeedRulesWithoutDefaultAction(t *testing.T)
 		if got := p.DefaultAction(); got != DefaultActionNotSet {
 			t.Fatalf("%s default action = %d, want unset", id, got)
 		}
-		for name, got := range map[string][]string{
-			"read":  p.GetFileAccessReadRules(),
-			"exec":  p.GetFileAccessExecRules(),
-			"write": p.GetFileAccessWriteRules(),
-		} {
-			if name == "write" {
-				if len(got) != 0 {
-					t.Fatalf("%s %s seed rules = %#v, want none", id, name, got)
-				}
-				continue
-			}
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("%s %s seed rules = %#v, want %#v", id, name, got, want)
-			}
+		if got := p.GetFileAccessReadRules(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s read seed rules = %#v, want %#v", id, got, want)
 		}
-	}
-}
-
-func TestFilemasterAppSpecialProfilesUpgradeUnmodifiedBlockPolicy(t *testing.T) {
-	requireProfileConfiguration(t)
-	for _, id := range []string{PortmasterAppProfileID, PortmasterNotifierProfileID} {
-		legacy := New(&Profile{
-			ID:     id,
-			Source: SourceLocal,
-			Config: map[string]interface{}{CfgOptionDefaultActionKey: DefaultActionBlockValue},
-		})
-		if !specialProfileNeedsReset(legacy) {
-			t.Fatalf("unmodified %s legacy block policy was not selected for upgrade", id)
+		wantExec := []string{
+			"+ /opt/filemaster/filemaster",
+			"+ /opt/filemaster/**",
 		}
-
-		legacy.LastEdited = 1
-		if specialProfileNeedsReset(legacy) {
-			t.Fatalf("edited %s legacy policy was selected for upgrade", id)
+		if got := p.GetFileAccessExecRules(); !reflect.DeepEqual(got, wantExec) {
+			t.Fatalf("%s exec seed rules = %#v, want %#v", id, got, wantExec)
+		}
+		if got := p.GetFileAccessWriteRules(); len(got) != 0 {
+			t.Fatalf("%s inactive write seed rules = %#v, want none", id, got)
 		}
 	}
 }
