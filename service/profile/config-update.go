@@ -2,10 +2,12 @@ package profile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/safing/portmaster/base/database"
 	"github.com/safing/portmaster/service/mgr"
 )
 
@@ -30,6 +32,20 @@ const globalConfigProfileErrorID = "profile:global-profile-error"
 // LayeredProfile lookups can fall back to them consistently. The
 // network-rule fields are gone post-strip; only DefaultAction remains
 // here for now.
+// prepareGlobalConfigProfileForSave preserves the durable revision of the
+// generated global configuration profile so it can replace an existing record.
+func prepareGlobalConfigProfileForSave(profile *Profile) error {
+	existing, err := getProfile(MakeScopedID(SourceSpecial, profile.ID))
+	if err == nil {
+		profile.Revision = existing.Revision
+		return nil
+	}
+	if errors.Is(err, database.ErrNotFound) {
+		return nil
+	}
+	return fmt.Errorf("load existing global config profile: %w", err)
+}
+
 func updateGlobalConfigProfile(_ context.Context) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -73,10 +89,14 @@ func updateGlobalConfigProfile(_ context.Context) error {
 		Internal: true,
 	})
 
-	// save profile
-	err := profile.Save()
-	if err != nil && lastErr == nil {
+	if err := prepareGlobalConfigProfileForSave(profile); err != nil {
 		lastErr = err
+	}
+
+	if lastErr == nil {
+		if err := profile.Save(); err != nil {
+			lastErr = err
+		}
 	}
 
 	if lastErr == nil {

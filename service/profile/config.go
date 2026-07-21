@@ -47,13 +47,13 @@ func registerConfiguration() error { //nolint:maintidx
 	// Default Action -- inherited from the upstream "Default Network
 	// Action" option. Filemaster reuses the same key + values so the
 	// network-rule UX users coming from Portmaster still applies:
-	// permit / block / ask, settable per-app, ask is the default.
+	// permit / block / ask, settable per-app, permit is the default.
 	err := config.Register(&config.Option{
 		Name:         "Default File Access Action",
 		Key:          CfgOptionDefaultActionKey,
 		Description:  `Applied when no rule explicitly allows or blocks a file-access request. Governs read, write, and execute alike. "ask" prompts the user; "permit" allows; "block" denies.`,
 		OptType:      config.OptTypeString,
-		DefaultValue: DefaultActionAskValue,
+		DefaultValue: DefaultActionPermitValue,
 		Annotations: config.Annotations{
 			config.SettablePerAppAnnotation: true,
 			config.DisplayHintAnnotation:    config.DisplayHintOneOf,
@@ -81,7 +81,7 @@ func registerConfiguration() error { //nolint:maintidx
 	if err != nil {
 		return err
 	}
-	cfgOptionDefaultAction = config.Concurrent.GetAsString(CfgOptionDefaultActionKey, DefaultActionAskValue)
+	cfgOptionDefaultAction = config.Concurrent.GetAsString(CfgOptionDefaultActionKey, DefaultActionPermitValue)
 	cfgStringOptions[CfgOptionDefaultActionKey] = cfgOptionDefaultAction
 
 	// File-Access Rules, split by operation. One list per operation mirrors

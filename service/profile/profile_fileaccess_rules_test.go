@@ -39,6 +39,41 @@ func setupPhase6ProfileDatabase(t *testing.T) {
 	}
 }
 
+func TestUpdateGlobalConfigProfileUsesCurrentRevision(t *testing.T) {
+	setupPhase6ProfileDatabase(t)
+
+	if action := cfgOptionDefaultAction(); action != DefaultActionPermitValue {
+		t.Fatalf("default file access action = %q, want %q", action, DefaultActionPermitValue)
+	}
+	first := New(&Profile{
+		ID:       "global-config",
+		Source:   SourceSpecial,
+		Name:     "Global Configuration",
+		Config:   map[string]interface{}{CfgOptionDefaultActionKey: DefaultActionPermitValue},
+		Internal: true,
+	})
+	if err := first.Save(); err != nil {
+		t.Fatalf("save initial global config profile: %v", err)
+	}
+
+	second := New(&Profile{
+		ID:       "global-config",
+		Source:   SourceSpecial,
+		Name:     "Global Configuration",
+		Config:   map[string]interface{}{CfgOptionDefaultActionKey: DefaultActionPermitValue},
+		Internal: true,
+	})
+	if err := prepareGlobalConfigProfileForSave(second); err != nil {
+		t.Fatalf("prepare global config profile: %v", err)
+	}
+	if err := second.Save(); err != nil {
+		t.Fatalf("update global config profile: %v", err)
+	}
+	if second.Revision != 2 {
+		t.Fatalf("updated global config revision = %d, want 2", second.Revision)
+	}
+}
+
 func TestCoalesceFileAccessRuleEntriesUsesEffectivePrecedence(t *testing.T) {
 	tests := []struct {
 		name  string
