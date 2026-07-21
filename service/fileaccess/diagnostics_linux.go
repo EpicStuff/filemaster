@@ -40,6 +40,10 @@ type FileAccessDiagnostics struct {
 	Shutdown            ShutdownDiagnostics
 	LifecycleState      string
 	Warnings            []DegradedWarning
+	// RuleModel reports which user-facing rule categories the current release
+	// enforces, exposes-but-ignores, or retains hidden. It is static for the
+	// current (non-LSM) release; see CurrentRuleModel.
+	RuleModel []RuleCategoryStatus
 }
 
 type mountDiagnosticSource interface {
@@ -67,7 +71,8 @@ func (fa *FileAccess) Diagnostics() FileAccessDiagnostics {
 			WatchPaths:              append([]string(nil), resolveWatchPaths()...),
 			EffectivePipelineConfig: fa.effectivePipelineConfig,
 		},
-		Shutdown: cloneShutdownDiagnostics(fa.ShutdownDiagnostics()),
+		Shutdown:  cloneShutdownDiagnostics(fa.ShutdownDiagnostics()),
+		RuleModel: CurrentRuleModel(),
 	}
 	if source, ok := fa.source.(mountDiagnosticSource); ok {
 		diagnostics.Mount = source.MountDiagnostics()

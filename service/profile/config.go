@@ -96,20 +96,34 @@ func registerConfiguration() error { //nolint:maintidx
 		key   string
 		verb  string
 		order int
-		into  *config.StringArrayOption
+		// hidden marks a list retained internally but not exposed in the normal
+		// UI. Write is hidden in the current release: no runtime event populates
+		// or consults it (writes need LSM), but its storage and plumbing are kept
+		// so the future Write evaluation engine can be built and unit-tested
+		// against it before enforcement lands (backend-todo-plan sections 2 and 16).
+		hidden bool
+		into   *config.StringArrayOption
 	}{
-		{"Read Rules", CfgOptionFileAccessReadRulesKey, "reads", cfgOptionFileAccessReadRulesOrder, &cfgOptionFileAccessReadRules},
-		{"Write Rules", CfgOptionFileAccessWriteRulesKey, "writes", cfgOptionFileAccessWriteRulesOrder, &cfgOptionFileAccessWriteRules},
-		{"Execute Rules", CfgOptionFileAccessExecRulesKey, "executions", cfgOptionFileAccessExecRulesOrder, &cfgOptionFileAccessExecRules},
+		{"Read Rules", CfgOptionFileAccessReadRulesKey, "reads", cfgOptionFileAccessReadRulesOrder, false, &cfgOptionFileAccessReadRules},
+		{"Write Rules", CfgOptionFileAccessWriteRulesKey, "writes", cfgOptionFileAccessWriteRulesOrder, true, &cfgOptionFileAccessWriteRules},
+		{"Execute Rules", CfgOptionFileAccessExecRulesKey, "executions", cfgOptionFileAccessExecRulesOrder, false, &cfgOptionFileAccessExecRules},
 	}
 	for _, opt := range fileAccessRuleOptions {
+		// Developer expertise hides the option from the normal and expert UIs
+		// while keeping it registered and fully functional -- the idiomatic
+		// Portmaster way to retain a setting without surfacing it.
+		expertise := config.ExpertiseLevelUser
+		if opt.hidden {
+			expertise = config.ExpertiseLevelDeveloper
+		}
 		err = config.Register(&config.Option{
-			Name:         opt.name,
-			Key:          opt.key,
-			Description:  "Rules governing file " + opt.verb + " by this application. Each entry is `<+|-> <pattern>`; `+` allows, `-` denies, and `pattern` is a path or glob.",
-			Sensitive:    true,
-			OptType:      config.OptTypeStringArray,
-			DefaultValue: []string{},
+			Name:           opt.name,
+			Key:            opt.key,
+			Description:    "Rules governing file " + opt.verb + " by this application. Each entry is `<+|-> <pattern>`; `+` allows, `-` denies, and `pattern` is a path or glob.",
+			Sensitive:      true,
+			OptType:        config.OptTypeStringArray,
+			ExpertiseLevel: expertise,
+			DefaultValue:   []string{},
 			Annotations: config.Annotations{
 				config.SettablePerAppAnnotation: true,
 				config.StackableAnnotation:      true,

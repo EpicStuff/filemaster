@@ -14,6 +14,33 @@ import "path/filepath"
 // LookupEvent, while DecideOperation is the verdict-or-default engine future
 // non-prompt enforcement (write, create, delete, rename, move, links) will call.
 
+// RuleCategoryStatus describes a user-facing rule category and whether the
+// current (non-LSM) release actively enforces it. It is the single source of
+// truth for "clearly report which rules are active" (backend-todo-plan Phase 2
+// item 6), so the API and UI need not hardcode the current-release scope.
+type RuleCategoryStatus struct {
+	Category string
+	// Active reports whether the current runtime enforces this category. An
+	// inactive category is still presented (or retained) but has no effect until
+	// LSM support lands.
+	Active bool
+	Note   string
+}
+
+// CurrentRuleModel reports the rule categories the current release presents and
+// whether each is actively enforced. Access (file and folder opens) and File
+// Execute are enforced; Folder Execute is exposed but inactive; Write is hidden
+// and inactive (retained storage only). See backend-todo-plan sections 2 and 16.
+func CurrentRuleModel() []RuleCategoryStatus {
+	return []RuleCategoryStatus{
+		{"File Access", true, "Open a file for reading, writing, or both (FAN_OPEN_PERM)."},
+		{"Folder Access", true, "Open the folder (FAN_OPEN_PERM). Listing and traversal are not enforced until LSM support."},
+		{"File Execute", true, "Launch the file as a program (FAN_OPEN_EXEC_PERM)."},
+		{"Folder Execute", false, "Exposed but inactive; becomes folder traversal with LSM support."},
+		{"Write", false, "Hidden and retained only; no runtime write event exists until LSM support."},
+	}
+}
+
 // DecisionOp is a logical file-access operation the rule engine evaluates. It is
 // distinct from FileOp, which is the runtime perm-event kind the fanotify source
 // decodes; the current backend only ever produces the Access and Execute

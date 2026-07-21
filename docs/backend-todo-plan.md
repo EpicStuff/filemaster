@@ -276,14 +276,16 @@ Rule priority and ordering must be preserved.
 2. ✅ Delete the runtime `OpWrite` event, which is only emitted by the test-only fake socket source. No real source produces a write permission event. (Dropped both the fake `write` and `read` socket ops; `opFromString` now yields only `OpExec`/`OpOpen`.)
 3. ✅ Leave the Write rule list, its config key, and the rule-scoping plumbing in place (they are hidden and retained per Phase 2, not deleted here). `OpRead`/`OpWrite` `FileOp` constants retained as internal rule-scope identities.
 
-### Phase 2: Rewrite Current Rules
+### Phase 2: Rewrite Current Rules — ✅ Done (backend; UI relabeling deferred)
 
-1. Keep File Access for ordinary file opens.
-2. Treat Folder Access as opening the folder (not listing or traversal).
-3. Keep File Execute.
-4. Expose Folder Execute as inactive.
-5. Hide the Write rule list from the UI until Write is enforceable; retain its storage and plumbing internally.
-6. Clearly report which rules are active.
+1. ✅ Keep File Access for ordinary file opens. (`OpOpen` on a file → Access/Read list.)
+2. ✅ Treat Folder Access as opening the folder (not listing or traversal). (Inherent: `FAN_OPEN_PERM` + `FAN_ONDIR` fires on `open`/`opendir` only; listing/traversal are not observed.)
+3. ✅ Keep File Execute. (`OpExec` via `FAN_OPEN_EXEC_PERM`.)
+4. ✅ Expose Folder Execute as inactive. (No source emits exec for a folder, so it is inherently inactive; `CurrentRuleModel` reports it as exposed-but-inactive. UI exposure/labelling is deferred to the UI session.)
+5. ✅ Hide the Write rule list from the UI until Write is enforceable; retain its storage and plumbing internally. (`service/profile/config.go`: Write list registered at `ExpertiseLevelDeveloper` — hidden from normal/expert UI, storage + plumbing intact. Verified by `TestFileAccessWriteRulesHidden`.)
+6. ✅ Clearly report which rules are active. (`CurrentRuleModel` in `rule_decision.go`, surfaced as `FileAccessDiagnostics.RuleModel`.)
+
+Deferred to the UI session: relabeling the current "Read Rules" list as "Access" and surfacing the Folder Execute "inactive" state and the hidden Write list in the Angular settings UI.
 
 ### Phase 2.5: Expose Mount Attribution for Dashboard Activity
 
