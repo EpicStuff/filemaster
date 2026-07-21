@@ -98,7 +98,7 @@ const (
 	fanotifyDescriptorReserve = uint64(256)
 	maxFanotifyReadBuffer     = 4096
 	defaultEMFILERetry        = 250 * time.Millisecond
-	fanotifyPermissionEvents  = uint64(unix.FAN_OPEN_PERM | unix.FAN_ACCESS_PERM | unix.FAN_OPEN_EXEC_PERM)
+	fanotifyPermissionEvents  = uint64(unix.FAN_OPEN_PERM | unix.FAN_OPEN_EXEC_PERM)
 )
 
 // ReaderDiagnostics is a race-safe snapshot of fanotify reader capacity and
