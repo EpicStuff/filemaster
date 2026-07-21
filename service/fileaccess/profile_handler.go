@@ -268,13 +268,12 @@ func (h *ProfileHandler) setSelfProfileRunning(p *profile.Profile, pid int32) {
 	p.RLock()
 	id := p.ID
 	rawRules := combineScopedRules(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
-	defaultAction := p.DefaultAction()
 	source := string(p.Source)
 	name := p.Name
 	linkedPath := p.LinkedPath
 	path := p.PresentationPath
 	p.RUnlock()
-
+	defaultAction := p.EffectiveDefaultAction()
 	if defaultAction == profile.DefaultActionNotSet {
 		defaultAction = profile.DefaultActionAsk
 	}
@@ -378,9 +377,9 @@ func (h *ProfileHandler) publishProfileSnapshotRunning(p *profile.Profile) {
 	p.RLock()
 	id := p.ID
 	rawRules := combineScopedRules(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
-	defaultAction := p.DefaultAction()
 	source := string(p.Source)
 	p.RUnlock()
+	defaultAction := p.EffectiveDefaultAction()
 	if defaultAction == profile.DefaultActionNotSet {
 		defaultAction = profile.DefaultActionAsk
 	}

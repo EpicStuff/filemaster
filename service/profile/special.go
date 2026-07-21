@@ -314,27 +314,27 @@ func createSpecialProfile(profileID string, path string) *Profile {
 		})
 
 	case PortmasterAppProfileID:
+		filemasterRules := filemasterFileAccessRules(path)
 		return New(&Profile{
 			ID:               PortmasterAppProfileID,
 			Source:           SourceLocal,
 			PresentationPath: path,
 			Config: map[string]interface{}{
-				// The UI process: tighten by default. File access
-				// prompts surface through the UI itself, so denying
-				// here lets us tighten the surface without breaking
-				// the prompt loop.
-				CfgOptionDefaultActionKey: DefaultActionBlockValue,
+				CfgOptionFileAccessReadRulesKey: filemasterRules,
+				CfgOptionFileAccessExecRulesKey: filemasterRules,
 			},
 			Internal: true,
 		})
 
 	case PortmasterNotifierProfileID:
+		filemasterRules := filemasterFileAccessRules(path)
 		return New(&Profile{
 			ID:               PortmasterNotifierProfileID,
 			Source:           SourceLocal,
 			PresentationPath: path,
 			Config: map[string]interface{}{
-				CfgOptionDefaultActionKey: DefaultActionBlockValue,
+				CfgOptionFileAccessReadRulesKey: filemasterRules,
+				CfgOptionFileAccessExecRulesKey: filemasterRules,
 			},
 			Internal: true,
 		})
@@ -370,7 +370,9 @@ func specialProfileNeedsReset(profile *Profile) bool {
 		// installations. Edited profiles are preserved by the guard above.
 		return canBeUpgraded(profile, "15.7.2026")
 	case PortmasterAppProfileID:
-		return canBeUpgraded(profile, "22.8.2023")
+		return canBeUpgraded(profile, "21.7.2026") || profile.DefaultAction() == DefaultActionBlock
+	case PortmasterNotifierProfileID:
+		return profile.DefaultAction() == DefaultActionBlock
 	default:
 		// Not a special profile or no upgrade available yet.
 		return false

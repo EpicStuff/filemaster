@@ -18,6 +18,10 @@ import (
 // the default.
 var getProcessWithProfile = process.GetProcessWithProfile
 
+// processLayeredProfile is an indirection point for tests. Production reads
+// the layered profile carried by the process returned by process lookup.
+var processLayeredProfile = func(p *process.Process) *profile.LayeredProfile { return p.Profile() }
+
 var refreshProcessMapping = func(ctx context.Context, pid int) error {
 	p, err := process.GetOrFindProcess(ctx, pid)
 	if err != nil {
@@ -77,10 +81,10 @@ type ruleCacheEntry struct {
 
 func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupResult, error) {
 	p, err := getProcessWithProfile(ctx, int(pid))
-	if err != nil {
-		return LookupResult{}, err
-	}
 	if p == nil {
+		if err != nil {
+			return LookupResult{}, err
+		}
 		return LookupResult{Path: ""}, ErrNoProfile
 	}
 
@@ -89,7 +93,7 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 		res.ProcessIdentity = fmt.Sprintf("%d-%d", p.Pid, p.CreatedAt)
 	}
 
-	lp := p.Profile()
+	lp := processLayeredProfile(p)
 	if lp == nil {
 		return res, nil
 	}
@@ -100,18 +104,14 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 
 	// Copy every profile-owned value while the profile lock is held. The
 	// returned snapshot never retains the raw rule slice.
-	local.RLock()
+	lp.LockForUsage()
 	id := local.ID
 	rawRules := combineScopedRules(local.GetFileAccessReadRules(), local.GetFileAccessWriteRules(), local.GetFileAccessExecRules())
-	defaultAction := local.DefaultAction()
+	defaultAction := lp.DefaultAction()
 	source := string(local.Source)
 	name := local.Name
 	linkedPath := local.LinkedPath
-	local.RUnlock()
-
-	if defaultAction == profile.DefaultActionNotSet {
-		defaultAction = profile.DefaultActionAsk
-	}
+	lp.UnlockForUsage()
 	store := &profileRuleStore{p: local, source: profile.ProfileSource(source), id: id}
 	l.bindPersistentStoreFor(source, id, store)
 	snapshot := l.snapshotFor(id, source, defaultAction, rawRules)

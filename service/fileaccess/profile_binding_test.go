@@ -60,6 +60,42 @@ func TestProcessProfileLookupNilProcessIsErrNoProfile(t *testing.T) {
 	}
 }
 
+func TestProcessProfileLookupUsesUnidentifiedProcessReturnedWithLookupError(t *testing.T) {
+	origLookup := getProcessWithProfile
+	origProfile := processLayeredProfile
+	t.Cleanup(func() {
+		getProcessWithProfile = origLookup
+		processLayeredProfile = origProfile
+	})
+
+	local := profile.New(&profile.Profile{
+		ID:     profile.UnidentifiedProfileID,
+		Source: profile.SourceLocal,
+		Config: map[string]interface{}{profile.CfgOptionDefaultActionKey: profile.DefaultActionPermitValue},
+	})
+	layered := profile.NewLayeredProfile(local)
+	unknown := &process.Process{Path: "unknown"}
+	lookupErr := errors.New("proc lookup failed")
+	getProcessWithProfile = func(context.Context, int) (*process.Process, error) {
+		return unknown, lookupErr
+	}
+	processLayeredProfile = func(*process.Process) *profile.LayeredProfile { return layered }
+
+	result, err := (&processProfileLookup{}).Lookup(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if result.Store == nil || result.Snapshot == nil {
+		t.Fatalf("Lookup result = %+v, want profile store and snapshot", result)
+	}
+	if result.Store.ID() != profile.UnidentifiedProfileID {
+		t.Fatalf("Lookup profile = %s, want %s", result.Store.ID(), profile.UnidentifiedProfileID)
+	}
+	if result.Snapshot.DefaultAction == profile.DefaultActionAsk {
+		t.Fatalf("unidentified snapshot default action = ask, want layered policy")
+	}
+}
+
 func TestProcessProfileLookupReusesPortmasterIdentityStore(t *testing.T) {
 	orig := getProcessWithProfile
 	t.Cleanup(func() { getProcessWithProfile = orig })

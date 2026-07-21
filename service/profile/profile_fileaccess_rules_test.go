@@ -74,6 +74,36 @@ func TestUpdateGlobalConfigProfileUsesCurrentRevision(t *testing.T) {
 	}
 }
 
+func TestEffectiveDefaultActionInheritsGlobalAndKeepsPerAppOverride(t *testing.T) {
+	requireProfileConfiguration(t)
+
+	cfgLock.Lock()
+	previous := cfgDefaultAction
+	cfgDefaultAction = DefaultActionPermit
+	cfgLock.Unlock()
+	t.Cleanup(func() {
+		cfgLock.Lock()
+		cfgDefaultAction = previous
+		cfgLock.Unlock()
+	})
+
+	regular := New(&Profile{ID: "inherit-global-default", Source: SourceLocal})
+	regular.layeredProfile = NewLayeredProfile(regular)
+	if got := regular.EffectiveDefaultAction(); got != DefaultActionPermit {
+		t.Fatalf("regular effective default action = %d, want permit", got)
+	}
+
+	explicitAsk := New(&Profile{
+		ID:     "per-app-ask-default",
+		Source: SourceLocal,
+		Config: map[string]interface{}{CfgOptionDefaultActionKey: DefaultActionAskValue},
+	})
+	explicitAsk.layeredProfile = NewLayeredProfile(explicitAsk)
+	if got := explicitAsk.EffectiveDefaultAction(); got != DefaultActionAsk {
+		t.Fatalf("explicit per-app default action = %d, want ask", got)
+	}
+}
+
 func TestCoalesceFileAccessRuleEntriesUsesEffectivePrecedence(t *testing.T) {
 	tests := []struct {
 		name  string

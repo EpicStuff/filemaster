@@ -230,6 +230,22 @@ func (lp *LayeredProfile) DefaultAction() uint8 {
 	return cfgDefaultAction
 }
 
+// EffectiveDefaultAction returns the profile's per-app default action, falling
+// back to the current global configuration when the local profile leaves it
+// unset. It acquires the layered and profile locks required by DefaultAction.
+func (profile *Profile) EffectiveDefaultAction() uint8 {
+	layeredProfile := profile.LayeredProfile()
+	if layeredProfile == nil {
+		profile.RLock()
+		defer profile.RUnlock()
+		return profile.DefaultAction()
+	}
+
+	layeredProfile.LockForUsage()
+	defer layeredProfile.UnlockForUsage()
+	return layeredProfile.DefaultAction()
+}
+
 // GetProfileSource returns the database key of the first profile in the
 // layers that has the given configuration key set. If it returns an empty
 // string, the global profile can be assumed to have been effective.
