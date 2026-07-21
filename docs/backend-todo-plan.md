@@ -276,16 +276,16 @@ Rule priority and ordering must be preserved.
 2. ✅ Delete the runtime `OpWrite` event, which is only emitted by the test-only fake socket source. No real source produces a write permission event. (Dropped both the fake `write` and `read` socket ops; `opFromString` now yields only `OpExec`/`OpOpen`.)
 3. ✅ Leave the Write rule list, its config key, and the rule-scoping plumbing in place (they are hidden and retained per Phase 2, not deleted here). `OpRead`/`OpWrite` `FileOp` constants retained as internal rule-scope identities.
 
-### Phase 2: Rewrite Current Rules — ✅ Done (backend; UI relabeling deferred)
+### Phase 2: Rewrite Current Rules — ✅ Done
 
 1. ✅ Keep File Access for ordinary file opens. (`OpOpen` on a file → Access/Read list.)
 2. ✅ Treat Folder Access as opening the folder (not listing or traversal). (Inherent: `FAN_OPEN_PERM` + `FAN_ONDIR` fires on `open`/`opendir` only; listing/traversal are not observed.)
 3. ✅ Keep File Execute. (`OpExec` via `FAN_OPEN_EXEC_PERM`.)
-4. ✅ Expose Folder Execute as inactive. (No source emits exec for a folder, so it is inherently inactive; `CurrentRuleModel` reports it as exposed-but-inactive. UI exposure/labelling is deferred to the UI session.)
+4. ✅ Expose Folder Execute as inactive. (No source emits exec for a folder, so it is inherently inactive; `CurrentRuleModel` reports it as exposed-but-inactive. The "Execute Rules" UI description now states folder entries are accepted but have no effect in the current release.)
 5. ✅ Hide the Write rule list from the UI until Write is enforceable; retain its storage and plumbing internally. (`service/profile/config.go`: Write list registered at `ExpertiseLevelDeveloper` — hidden from normal/expert UI, storage + plumbing intact. Verified by `TestFileAccessWriteRulesHidden`.)
 6. ✅ Clearly report which rules are active. (`CurrentRuleModel` in `rule_decision.go`, surfaced as `FileAccessDiagnostics.RuleModel`.)
 
-Deferred to the UI session: relabeling the current "Read Rules" list as "Access" and surfacing the Folder Execute "inactive" state and the hidden Write list in the Angular settings UI.
+UI done: the "Read Rules" list is relabelled "Access Rules" (open semantics), the "Execute Rules" description surfaces the inactive Folder Execute state, and Write stays hidden (developer expertise). Verified on the live Settings page (`Access Rules` + `Execute Rules` shown; `Read Rules`/`Write Rules` absent).
 
 ### Phase 2.5: Expose Mount Attribution for Dashboard Activity — ✅ Done (core; filter/group-by deferred)
 
@@ -298,7 +298,9 @@ Every persisted File Access and File Execute record must expose the mount that w
 5. ✅ Represent unavailable attribution explicitly as unknown; never infer a mount from an unrelated path after a mount has changed. (Pending reconciliation or no containing mount → `(0, "")`; snapshot is cleared while pending.)
 6. ✅ Test nested and bind mounts, dynamically discovered mounts, unmounts, and events received while mount reconciliation is pending. (`mount_attribution_linux_test.go`, `mount_migration_test.go`.)
 
-Deferred to a later session: filequery filter + group-by on mount ID/path, and the Angular dashboard display of the mount column (UI).
+UI done: the mount is surfaced in the Angular monitor event-details panel (a "Mount" row alongside Executable / PID / Path), verified live showing `Mount: /` for a real `cat` under a protected folder. It is shown in the expandable details rather than as a dedicated always-visible grid column to avoid reworking the row's per-breakpoint `grid-template-columns`; a top-level column remains an optional later change.
+
+Still deferred to a later session: filequery filter + group-by on mount ID/path (self-contained in the query handler, works off the already-persisted columns).
 
 ### Phase 3: Rewrite Rule Evaluation — ✅ Done (engine + unit tests; enforcement deferred to Phase 5)
 

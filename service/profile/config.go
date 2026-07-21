@@ -91,10 +91,11 @@ func registerConfiguration() error { //nolint:maintidx
 	// rule-list editor in the UI (the "endpoint list" hint matches
 	// ExternalOptionHint.EndpointList in the Angular config types, drawing our
 	// path-rule list with Allow/Block prefix labels).
+	const ruleSyntax = " Each entry is `<+|-> <pattern>`; `+` allows, `-` denies, and `pattern` is a path or glob."
 	fileAccessRuleOptions := []struct {
 		name  string
 		key   string
-		verb  string
+		desc  string
 		order int
 		// hidden marks a list retained internally but not exposed in the normal
 		// UI. Write is hidden in the current release: no runtime event populates
@@ -104,9 +105,15 @@ func registerConfiguration() error { //nolint:maintidx
 		hidden bool
 		into   *config.StringArrayOption
 	}{
-		{"Read Rules", CfgOptionFileAccessReadRulesKey, "reads", cfgOptionFileAccessReadRulesOrder, false, &cfgOptionFileAccessReadRules},
-		{"Write Rules", CfgOptionFileAccessWriteRulesKey, "writes", cfgOptionFileAccessWriteRulesOrder, true, &cfgOptionFileAccessWriteRules},
-		{"Execute Rules", CfgOptionFileAccessExecRulesKey, "executions", cfgOptionFileAccessExecRulesOrder, false, &cfgOptionFileAccessExecRules},
+		// "Access" (not "Read") because the current backend decides at open time
+		// via FAN_OPEN_PERM and cannot tell read from write; the list governs any
+		// open of a file or folder (backend-todo-plan sections 2 and 4).
+		{"Access Rules", CfgOptionFileAccessReadRulesKey, "Rules governing whether this application may open files and folders — for reading, writing, or both." + ruleSyntax, cfgOptionFileAccessReadRulesOrder, false, &cfgOptionFileAccessReadRules},
+		{"Write Rules", CfgOptionFileAccessWriteRulesKey, "Rules governing content changes to files by this application." + ruleSyntax, cfgOptionFileAccessWriteRulesOrder, true, &cfgOptionFileAccessWriteRules},
+		// Files and folders share one Execute list, so folder entries are accepted,
+		// but folder Execute (traversal) is not enforceable without LSM and has no
+		// effect in the current release (backend-todo-plan section 2).
+		{"Execute Rules", CfgOptionFileAccessExecRulesKey, "Rules governing whether this application may execute files. Folder entries are accepted but have no effect in the current release." + ruleSyntax, cfgOptionFileAccessExecRulesOrder, false, &cfgOptionFileAccessExecRules},
 	}
 	for _, opt := range fileAccessRuleOptions {
 		// Developer expertise hides the option from the normal and expert UIs
@@ -119,7 +126,7 @@ func registerConfiguration() error { //nolint:maintidx
 		err = config.Register(&config.Option{
 			Name:           opt.name,
 			Key:            opt.key,
-			Description:    "Rules governing file " + opt.verb + " by this application. Each entry is `<+|-> <pattern>`; `+` allows, `-` denies, and `pattern` is a path or glob.",
+			Description:    opt.desc,
 			Sensitive:      true,
 			OptType:        config.OptTypeStringArray,
 			ExpertiseLevel: expertise,

@@ -71,7 +71,7 @@
 		<div class="sfng-select-dropdown">
 			<h3 class="px-3 py-0.5 mb-0 border-b border-gray-300 text-xxs text-secondary">Filter by Access</h3>
 			<ul>
-				<li class="px-3" *ngFor="let operation of ['open', 'read', 'write', 'exec']" [class.bg-gray-300]="selectedOperations.includes(operation)">
+				<li class="px-3" *ngFor="let operation of ['open', 'exec']" [class.bg-gray-300]="selectedOperations.includes(operation)">
 					<sfng-select-item (click)="toggleOperation(operation)" class="grid w-full grid-cols-3">
 						<span class="col-span-2">{{ operation | titlecase }}</span>
 						<svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 transition-all duration-200" viewBox="0 0 20 20" fill="currentColor" [class.opacity-0]="!selectedOperations.includes(operation)"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" /></svg>
@@ -137,6 +137,7 @@
 		<span class="text-secondary">Executable</span><span class="break-all">{{ event.exe }}</span>
 		<span class="text-secondary">PID</span><span>{{ event.pid }}</span>
 		<span class="text-secondary">Path</span><span class="break-all">{{ event.path }}</span>
+		<span class="text-secondary">Mount</span><span class="break-all">{{ event.mount_path || 'unknown' }}</span>
 	</div>
 </ng-template>
 
