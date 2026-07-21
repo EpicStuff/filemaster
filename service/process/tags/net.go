@@ -32,7 +32,7 @@ func (h *NetworkHandler) TagDescriptions() []process.TagDescription {
 		{
 			ID:          netIPTagKey,
 			Name:        "IP Address",
-			Description: "The remote IP address of external requests to Portmaster, if enabled.",
+			Description: "The remote IP address of external requests to Filemaster, if enabled.",
 		},
 	}
 }

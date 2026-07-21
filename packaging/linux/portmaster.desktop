@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=Portmaster
+Name=Filemaster
 GenericName=Application Firewall
 Exec={{exec}} --data=/opt/filemaster --with-prompts --with-notifications
 Icon={{icon}}

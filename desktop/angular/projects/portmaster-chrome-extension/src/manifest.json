@@ -1,7 +1,7 @@
 {
-  "name": "Portmaster Browser Extension",
+  "name": "Filemaster Browser Extension",
   "version": "0.1",
-  "description": "Browser Extension for even better Portmaster integration",
+  "description": "Browser Extension for even better Filemaster integration",
   "manifest_version": 2,
   "permissions": [
       "activeTab",

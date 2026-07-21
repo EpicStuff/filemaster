@@ -38,7 +38,7 @@ const (
 // UserAgent is an HTTP User-Agent that is used to add
 // more context to requests made by the registry when
 // fetching resources from the update server.
-var UserAgent = fmt.Sprintf("Portmaster (%s %s)", runtime.GOOS, runtime.GOARCH)
+var UserAgent = fmt.Sprintf("Filemaster (%s %s)", runtime.GOOS, runtime.GOARCH)
 
 // Errors.
 var (
@@ -273,8 +273,8 @@ func (u *Updater) updateAndUpgrade(w *mgr.WorkerCtx, indexURLs []string, ignoreV
 					u.instance.Notifications().Notify(&notifications.Notification{
 						EventID: noNewUpdateNotificationID,
 						Type:    notifications.Info,
-						Title:   "Portmaster Is Up-To-Date",
-						Message: "Portmaster v" + index.Version + " is the newest version.",
+						Title:   "Filemaster Is Up-To-Date",
+						Message: "Filemaster v" + index.Version + " is the newest version.",
 						Expires: time.Now().Add(1 * time.Minute).Unix(),
 						AvailableActions: []*notifications.Action{
 							{
@@ -290,8 +290,8 @@ func (u *Updater) updateAndUpgrade(w *mgr.WorkerCtx, indexURLs []string, ignoreV
 					u.instance.Notifications().Notify(&notifications.Notification{
 						EventID: noNewUpdateNotificationID,
 						Type:    notifications.Info,
-						Title:   "Portmaster Is Up-To-Date*",
-						Message: "While Portmaster v" + index.Version + " is the newest version, there is an internal issue with checking for updates: " + err.Error(),
+						Title:   "Filemaster Is Up-To-Date*",
+						Message: "While Filemaster v" + index.Version + " is the newest version, there is an internal issue with checking for updates: " + err.Error(),
 						Expires: time.Now().Add(1 * time.Minute).Unix(),
 						AvailableActions: []*notifications.Action{
 							{
@@ -314,7 +314,7 @@ func (u *Updater) updateAndUpgrade(w *mgr.WorkerCtx, indexURLs []string, ignoreV
 				EventID: updateAvailableNotificationID,
 				Type:    notifications.Info,
 				Title:   "New Update Available",
-				Message: "Portmaster v" + downloader.index.Version + " is available. Click Upgrade to download and upgrade now.",
+				Message: "Filemaster v" + downloader.index.Version + " is available. Click Upgrade to download and upgrade now.",
 				AvailableActions: []*notifications.Action{
 					{
 						ID:   "ack",
@@ -360,7 +360,7 @@ func (u *Updater) updateAndUpgrade(w *mgr.WorkerCtx, indexURLs []string, ignoreV
 				EventID: updateAvailableNotificationID,
 				Type:    notifications.Info,
 				Title:   "New Update Ready",
-				Message: "Portmaster v" + downloader.index.Version + " is available. Click Upgrade to upgrade now.",
+				Message: "Filemaster v" + downloader.index.Version + " is available. Click Upgrade to upgrade now.",
 				AvailableActions: []*notifications.Action{
 					{
 						ID:   "ack",
@@ -411,7 +411,7 @@ func (u *Updater) updateAndUpgrade(w *mgr.WorkerCtx, indexURLs []string, ignoreV
 				EventID: restartRequiredNotificationID,
 				Type:    notifications.Info,
 				Title:   "Restart Required",
-				Message: "Portmaster v" + downloader.index.Version + " is installed. Restart to use new version.",
+				Message: "Filemaster v" + downloader.index.Version + " is installed. Restart to use new version.",
 				AvailableActions: []*notifications.Action{
 					{
 						ID:   "ack",
@@ -551,7 +551,7 @@ func (u *Updater) Start() error {
 		u.states.Add(mgr.State{
 			ID:      corruptInstallationNotificationID,
 			Name:    "Install Corruption",
-			Message: "Portmaster has detected that one or more of its own files have been corrupted. Please re-install the software. Error: " + u.corruptedInstallation.Error(),
+			Message: "Filemaster has detected that one or more of its own files have been corrupted. Please re-install the software. Error: " + u.corruptedInstallation.Error(),
 			Type:    mgr.StateTypeError,
 			Data:    u.corruptedInstallation,
 		})

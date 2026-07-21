@@ -139,11 +139,11 @@ impl<R: Runtime> PortmasterInterface<R> {
             // we might already be connected or know that the connection failed.
             // Call the respective handler method immediately now.
             if let Some(api) = self.get_api() {
-                debug!("already connected to Portmaster API, calling on_connect()");
+                debug!("already connected to Filemaster API, calling on_connect()");
 
                 handler.on_connect(api);
             } else {
-                debug!("not yet connected to Portmaster API, calling on_disconnect()");
+                debug!("not yet connected to Filemaster API, calling on_disconnect()");
 
                 handler.on_disconnect();
             }
@@ -309,7 +309,7 @@ impl<R: Runtime> PortmasterInterface<R> {
 
     /// Internal method to call all on_connect handlers
     fn on_connect(&self, api: PortAPI) {
-        debug!("connection to portmaster established, calling handlers");
+        debug!("connection to filemaster established, calling handlers");
 
         self.is_reachable.store(true, Ordering::Relaxed);
 

@@ -1,4 +1,4 @@
-# This script builds the Tauri application for Portmaster on Windows.
+# This script builds the Tauri application for Filemaster on Windows.
 # It optionally builds the required Angular tauri-builtin project first.
 # The script assumes that all necessary dependencies (Node.js, Rust, etc.) are installed.
 # Output file: dist/portmaster.exe

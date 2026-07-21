@@ -64,13 +64,13 @@ func mainRun(cmd *cobra.Command, args []string) {
 
 func initializeGlobals(cmd *cobra.Command, args []string) {
 	// Set version info.
-	info.Set("Portmaster", "", "GPLv3")
+	info.Set("Filemaster", "", "GPLv3")
 
 	// Configure metrics.
 	_ = metrics.SetNamespace("portmaster")
 
 	// Configure user agent.
-	updates.UserAgent = fmt.Sprintf("Portmaster Core (%s %s)", runtime.GOOS, runtime.GOARCH)
+	updates.UserAgent = fmt.Sprintf("Filemaster Core (%s %s)", runtime.GOOS, runtime.GOARCH)
 
 	// Configure service.
 	cmdbase.SvcFactory = func(svcCfg *service.ServiceConfig) (cmdbase.ServiceInstance, error) {

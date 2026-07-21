@@ -36,7 +36,7 @@ For i = LBound(arrLines) To UBound(arrLines)
 		arrStatus = Split(Trim(Mid(arrLines(i), InStr(arrLines(i), ":") + 1)), " ")
 		' Anything other the STOPPED consider as running
 		If Not arrStatus(2) = "STOPPED" Then
-			 MsgBox("Portmaster service is running. Stop it and run the installer again.")
+			 MsgBox("Filemaster service is running. Stop it and run the installer again.")
 			 ' Notify the installer that it should fail.
 			 WScript.Quit 1
 		End If

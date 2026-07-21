@@ -3,7 +3,7 @@
   <Fragment>
     <DirectoryRef Id="TARGETDIR">
       <Directory Id="CommonAppDataFolder" Name="CommonAppData">
-        <Directory Id="PortmasterDir" Name="Portmaster">
+        <Directory Id="PortmasterDir" Name="Filemaster">
           <Directory Id="IntelDir" Name="intel" />
         </Directory>
       </Directory>
@@ -38,8 +38,8 @@
           Id="PortmasterServiceInstall"
           Type="ownProcess"
           Name="PortmasterCore"
-          DisplayName="Portmaster Core"
-          Description="Portmaster Application Firewall - Core Service"
+          DisplayName="Filemaster Core"
+          Description="Filemaster Application Firewall - Core Service"
           Start="auto"
           ErrorControl="normal"
           Vital="yes"

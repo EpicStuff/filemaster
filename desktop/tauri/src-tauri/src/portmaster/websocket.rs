@@ -37,7 +37,7 @@ pub fn start_websocket_thread<R: Runtime>(app: AppHandle<R>) {
                 Ok(cli) => {
                     let portmaster = app.portmaster();
 
-                    info!("Successfully connected to portmaster");
+                    info!("Successfully connected to filemaster");
 
                     portmaster.on_connect(cli.clone());
 
@@ -49,7 +49,7 @@ pub fn start_websocket_thread<R: Runtime>(app: AppHandle<R>) {
                         }
                         
                         if cli.is_closed() {
-                            warn!("Connection to portmaster lost");
+                            warn!("Connection to filemaster lost");
                             break;
                         }
                         
@@ -64,7 +64,7 @@ pub fn start_websocket_thread<R: Runtime>(app: AppHandle<R>) {
                         break;
                     }
 
-                    warn!("lost connection to portmaster, retrying ....")
+                    warn!("lost connection to filemaster, retrying ....")
                 }
                 Err(err) => {
                     error!("failed to create portapi client: {}", err);

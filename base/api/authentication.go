@@ -220,7 +220,7 @@ func authenticateRequest(w http.ResponseWriter, r *http.Request, targetHandler h
 		if token.Read == PermitAnyone && token.Write == PermitAnyone {
 			w.Header().Set(
 				"WWW-Authenticate",
-				`Bearer realm="Portmaster API" domain="/"`,
+				`Bearer realm="Filemaster API" domain="/"`,
 			)
 			http.Error(w, "Authorization required.", http.StatusUnauthorized)
 			return nil

@@ -78,6 +78,9 @@ func GenerateBinaryNameFromPath(path string) string {
 		if nameOnly.MatchString(nameParts[i]) {
 			nameParts[i] = strings.Title(nameParts[i]) //nolint:staticcheck
 		}
+		if strings.EqualFold(nameParts[i], "portmaster") {
+			nameParts[i] = "Filemaster"
+		}
 	}
 
 	// Debugging snippet:

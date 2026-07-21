@@ -32,7 +32,7 @@ func registerDebugEndpoints() error {
 		Read:        PermitAnyone,
 		ActionFunc:  ready,
 		Name:        "Ready",
-		Description: "Check if Portmaster has completed starting and is ready.",
+		Description: "Check if Filemaster has completed starting and is ready.",
 	}); err != nil {
 		return err
 	}
@@ -136,9 +136,9 @@ func ping(ar *Request) (msg string, err error) {
 // ready checks if Portmaster has completed starting.
 func ready(ar *Request) (msg string, err error) {
 	if module.instance.Ready() {
-		return "", ErrorWithStatus(errors.New("portmaster is not ready, reload (F5) to try again"), http.StatusTooEarly)
+		return "", ErrorWithStatus(errors.New("filemaster is not ready, reload (F5) to try again"), http.StatusTooEarly)
 	}
-	return "Portmaster is ready.", nil
+	return "Filemaster is ready.", nil
 }
 
 // getStack returns the current goroutine stack.
@@ -181,7 +181,7 @@ func handleCPUProfile(ar *Request) (data []byte, err error) {
 	// Indicate download and filename.
 	ar.ResponseHeader.Set(
 		"Content-Disposition",
-		fmt.Sprintf(`attachment; filename="portmaster-cpu-profile_v%s.pprof"`, info.Version()),
+		fmt.Sprintf(`attachment; filename="filemaster-cpu-profile_v%s.pprof"`, info.Version()),
 	)
 
 	// Start CPU profiling.
@@ -208,7 +208,7 @@ func handleHeapProfile(ar *Request) (data []byte, err error) {
 	// Indicate download and filename.
 	ar.ResponseHeader.Set(
 		"Content-Disposition",
-		fmt.Sprintf(`attachment; filename="portmaster-memory-heap-profile_v%s.pprof"`, info.Version()),
+		fmt.Sprintf(`attachment; filename="filemaster-memory-heap-profile_v%s.pprof"`, info.Version()),
 	)
 
 	buf := new(bytes.Buffer)
@@ -223,7 +223,7 @@ func handleAllocsProfile(ar *Request) (data []byte, err error) {
 	// Indicate download and filename.
 	ar.ResponseHeader.Set(
 		"Content-Disposition",
-		fmt.Sprintf(`attachment; filename="portmaster-memory-allocs-profile_v%s.pprof"`, info.Version()),
+		fmt.Sprintf(`attachment; filename="filemaster-memory-allocs-profile_v%s.pprof"`, info.Version()),
 	)
 
 	buf := new(bytes.Buffer)

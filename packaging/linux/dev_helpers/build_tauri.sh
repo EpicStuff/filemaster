@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This script builds the Tauri application for Portmaster on Linux.
+# This script builds the Tauri application for Filemaster on Linux.
 # It optionally builds the required Angular tauri-builtin project first.
 # The script assumes that all necessary dependencies (Node.js, Angular CLI, Rust, cargo-tauri) are installed.
 # Output file: dist/portmaster

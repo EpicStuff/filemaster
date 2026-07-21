@@ -26,14 +26,14 @@ export interface ModuleConfig {
 export function HttpClientProviderFactory() {
   if (IsTauriEnvironment()) 
   {
-    console.log("[portmaster-api] Running under Tauri - using TauriHttpClient");
+    console.log("[filemaster-api] Running under Tauri - using TauriHttpClient");
     return provideHttpClient(
       withInterceptors([TauriHttpInterceptor])
     );
   } 
   else 
   {
-    console.log("[portmaster-api] Running in browser - using default HttpClient");
+    console.log("[filemaster-api] Running in browser - using default HttpClient");
     return provideHttpClient();
   }
 }
@@ -49,11 +49,11 @@ export class PortmasterAPIModule {
   static forRoot(cfg: ModuleConfig = {}): ModuleWithProviders<PortmasterAPIModule> {
     if (!cfg.httpAPI) {
       cfg.httpAPI = `http://${window.location.host}/api`;
-      console.warn("[portmaster-api] No HTTP API endpoint provided, using default: " + cfg.httpAPI);
+      console.warn("[filemaster-api] No HTTP API endpoint provided, using default: " + cfg.httpAPI);
     }
     if (!cfg.websocketAPI) {
       cfg.websocketAPI = `ws://${window.location.host}/api/database/v1`;
-      console.warn("[portmaster-api] No WebSocket API endpoint provided, using default: " + cfg.websocketAPI);
+      console.warn("[filemaster-api] No WebSocket API endpoint provided, using default: " + cfg.websocketAPI);
     }
 
     return {

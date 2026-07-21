@@ -60,7 +60,7 @@ It requests administrator access only for installation, writes the core, UI,
 and payloads to `/opt/filemaster`, writes mutable state to `/var/lib/filemaster`,
 and installs `filemaster.service`. Start the UI as the normal desktop user with
 `filemaster`. In the UI, click **Start** to start the real fanotify core. The
-existing Portmaster-style service manager invokes `pkexec systemctl start
+Filemaster's service manager invokes `pkexec systemctl start
 filemaster.service`, which displays the graphical administrator-authentication
 prompt.
 

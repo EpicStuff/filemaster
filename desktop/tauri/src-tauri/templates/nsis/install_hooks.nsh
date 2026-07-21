@@ -13,12 +13,12 @@ var dataDir
   ${If} $0 == 0
     ${If} $1 == 0
 
-      DetailPrint "PortmasterCore service is running. Stopping service ..."
+      DetailPrint "Filemaster Core service is running. Stopping service ..."
       SimpleSC::StopService "PortmasterCore" 1 60
       Pop $0
       ${If} $0 != 0
-        DetailPrint "Failed to stop PortmasterCore service. Error: $0"
-        MessageBox MB_OK "PortmasterCore service is running. Stop it and run the installer again."
+        DetailPrint "Failed to stop Filemaster Core service. Error: $0"
+        MessageBox MB_OK "Filemaster Core service is running. Stop it and run the installer again."
         Abort
       ${EndIf}
       
@@ -70,7 +70,7 @@ var dataDir
   ;   4. Start Type: "2" for SERVICE_AUTO_START
   ;   5. Binary Path: Executable with arguments.
   ;   6 & 7. Dependencies and account info (empty uses defaults).
-  SimpleSC::InstallService "PortmasterCore" "Portmaster Core" 16 2 '"$INSTDIR\portmaster-core.exe" --log-dir=%PROGRAMDATA%\Portmaster\logs' "" "" ""
+  SimpleSC::InstallService "PortmasterCore" "Filemaster Core" 16 2 '"$INSTDIR\portmaster-core.exe" --log-dir=%PROGRAMDATA%\Portmaster\logs' "" "" ""
   Pop $0  ; returns error code (0 on success)
   ${If} $0 != 0
     SimpleSC::GetErrorMessage $0
@@ -79,7 +79,7 @@ var dataDir
     Abort
   ${EndIf}
 
-  SimpleSC::SetServiceDescription "PortmasterCore" "Portmaster Application Firewall - Core Service"
+  SimpleSC::SetServiceDescription "PortmasterCore" "Filemaster Application Firewall - Core Service"
 
   ; 
   ; Auto start the UI
@@ -148,18 +148,18 @@ var dataDir
   SimpleSC::StopService "PortmasterCore" 1 60
   Pop $0
   ${If} $0 != 0
-    DetailPrint "Failed to stop PortmasterCore service. Error: $0"
+    DetailPrint "Failed to stop Filemaster Core service. Error: $0"
   ${Else}
-    DetailPrint "Service PortmasterCore stopped successfully."
+    DetailPrint "Filemaster Core service stopped successfully."
   ${EndIf}
 
   DetailPrint "Removing service"
   SimpleSC::RemoveService "PortmasterCore"
   Pop $0
   ${If} $0 != 0
-    DetailPrint "Failed to remove PortmasterCore service. Error: $0"
+    DetailPrint "Failed to remove Filemaster Core service. Error: $0"
   ${Else}
-    DetailPrint "Service PortmasterCore removed successfully."
+    DetailPrint "Filemaster Core service removed successfully."
   ${EndIf}
 !macroend
 

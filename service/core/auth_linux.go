@@ -33,10 +33,10 @@ import (
 const (
 	deniedMsgUnidentified = `%wFailed to identify the requesting process. Reload to try again.`
 
-	deniedMsgSystem = `%wSystem access to the Portmaster API is not permitted.
+	deniedMsgSystem = `%wSystem access to the Filemaster API is not permitted.
 You can enable the Development Mode to disable API authentication for development purposes.`
 
-	deniedMsgUnauthorized = `%wThe requesting process is not authorized to access the Portmaster API.
+	deniedMsgUnauthorized = `%wThe requesting process is not authorized to access the Filemaster API.
 Checked process paths:
 %s
 
@@ -61,7 +61,7 @@ func (ss *stringSliceFlag) Set(value string) error {
 var allowedClients stringSliceFlag
 
 func init() {
-	flag.Var(&allowedClients, "allowed-clients", "A list of binaries that are allowed to connect to the Portmaster API")
+	flag.Var(&allowedClients, "allowed-clients", "A list of binaries that are allowed to connect to the Filemaster API")
 }
 
 // apiAuthenticator grants PermitSelf to API requests coming from a process whose

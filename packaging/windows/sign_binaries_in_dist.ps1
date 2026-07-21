@@ -10,7 +10,7 @@ function Show-Help {
     Write-Host "Usage: sign_binaries_in_dist.ps1 -certSha1 <CERT_SHA1> [-timestampServer <TIMESTAMP_SERVER>]"
     Write-Host ""
     Write-Host "This script signs all binary files located under the '<project root>\dist\' directory recursively."
-    Write-Host "Which should be done before creating the Portmaster installer."
+    Write-Host "Which should be done before creating the Filemaster installer."
     Write-Host ""
     Write-Host "Arguments:"
     Write-Host "  -certSha1        The SHA1 hash of the certificate to use for signing (code signing certificate)."

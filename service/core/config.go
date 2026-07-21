@@ -34,7 +34,7 @@ func registerConfig() error {
 	if err := config.Register(&config.Option{
 		Name:           "Network Service",
 		Key:            CfgNetworkServiceKey,
-		Description:    "Use the Portmaster as a network service, where applicable. You will have to take care of lots of network setup yourself in order to run this properly and securely.",
+		Description:    "Use Filemaster as a network service, where applicable. You will have to take care of lots of network setup yourself in order to run this properly and securely.",
 		OptType:        config.OptTypeBool,
 		ExpertiseLevel: config.ExpertiseLevelExpert,
 		ReleaseLevel:   config.ReleaseLevelExperimental,

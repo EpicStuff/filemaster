@@ -99,7 +99,7 @@ func showConfigLoadingErrors() {
 	module.states.Add(mgr.State{
 		ID:      "config:validation-errors-on-load",
 		Name:    "Invalid Settings",
-		Message: "Some current settings are invalid. Please update them and restart the Portmaster.",
+		Message: "Some current settings are invalid. Please update them and restart Filemaster.",
 		Type:    mgr.StateTypeError,
 	})
 
@@ -110,7 +110,7 @@ func showConfigLoadingErrors() {
 			fmt.Sprintf("Invalid Setting for %s", validationError.Option.Name),
 			fmt.Sprintf(`Your current setting for %s is invalid: %s
 
-Please update the setting and restart the Portmaster, until then the default value is used.`,
+Please update the setting and restart Filemaster, until then the default value is used.`,
 				validationError.Option.Name,
 				validationError.Err.Error(),
 			),

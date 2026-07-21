@@ -142,7 +142,7 @@ fn build_tray_menu(
 
     let open_btn = MenuItemBuilder::with_id(OPEN_KEY, "Open App").build(app)?;
     let exit_ui_btn = MenuItemBuilder::with_id(EXIT_UI_KEY, "Exit UI").build(app)?;
-    let shutdown_btn = MenuItemBuilder::with_id(SHUTDOWN_KEY, "Shut Down Portmaster").build(app)?;
+    let shutdown_btn = MenuItemBuilder::with_id(SHUTDOWN_KEY, "Shut Down Filemaster").build(app)?;
 
     // Global status
     let global_status_text = if pause_info.interception {
@@ -158,8 +158,8 @@ fn build_tray_menu(
     // Pause items
     let (pause_status_item, pause_status_time_item, resume_item) = if pause_info.interception || pause_info.spn {
         let status_text = match (pause_info.interception, pause_info.spn) {
-            (true, true) => "Portmaster and SPN are paused",
-            (true, false) => "Portmaster is paused", 
+            (true, true) => "Filemaster and SPN are paused",
+            (true, false) => "Filemaster is paused",
             (false, true) => "SPN is paused",
             _ => unreachable!(), // We already checked at least one is true
         };
@@ -306,7 +306,7 @@ pub fn setup_tray_menu(
             EXIT_UI_KEY => {
                 let handle = app.clone();
                 app.dialog()
-                    .message("This does not stop the Portmaster system service")
+                    .message("This does not stop the Filemaster system service")
                     .title("Do you really want to quit the user interface?")
                     .buttons(MessageDialogButtons::OkCancelCustom(
                         "Yes, exit".to_owned(),

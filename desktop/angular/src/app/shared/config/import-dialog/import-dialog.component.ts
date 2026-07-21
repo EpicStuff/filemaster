@@ -115,9 +115,9 @@ export class ImportDialogComponent {
         if (result.restartRequired) {
           if (this.triggerRestart) {
             this.portapi.restartPortmaster().subscribe();
-            msg = 'Portmaster will be restarted now.';
+            msg = 'Filemaster will be restarted now.';
           } else {
-            msg = 'Please restart Portmaster to apply the new settings.';
+            msg = 'Please restart Filemaster to apply the new settings.';
           }
         }
 

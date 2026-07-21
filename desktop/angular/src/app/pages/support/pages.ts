@@ -39,15 +39,15 @@ export const supportTypes: PageSections[] = [
     choices: [
       {
         type: 'link',
-        title: '📘 Portmaster Wiki & FAQ',
+        title: '📘 Filemaster Wiki & FAQ',
         url: 'https://wiki.safing.io/?source=Portmaster',
-        shortHelp: 'Search the Portmaster knowledge base and FAQ.',
+        shortHelp: 'Search the Filemaster knowledge base and FAQ.',
       },
       {
         type: 'link',
         title: '🔖 Settings Handbook',
         url: 'https://docs.safing.io/portmaster/settings?source=Portmaster',
-        shortHelp: 'A reference document of all Portmaster settings.'
+        shortHelp: 'A reference document of all Filemaster settings.'
       },
       {
         type: 'link',
@@ -94,7 +94,7 @@ export const supportTypes: PageSections[] = [
       {
         id: "report-bug",
         title: "🐞 Report a Bug",
-        shortHelp: "Found a bug? Report your discovery and make the Portmaster better for everyone.",
+        shortHelp: "Found a bug? Report your discovery and make the Filemaster better for everyone.",
         repoHelp: "Where did the bug take place?",
         sections: [
           {
@@ -122,7 +122,7 @@ export const supportTypes: PageSections[] = [
       {
         id: "give-feedback",
         title: "💡 Suggest an Improvement",
-        shortHelp: "Suggest an enhancement or a new feature for Portmaster.",
+        shortHelp: "Suggest an enhancement or a new feature for Filemaster.",
         repoHelp: "What would you would like to improve?",
         sections: [
           {
@@ -140,7 +140,7 @@ export const supportTypes: PageSections[] = [
       {
         id: "compatibility-report",
         title: "📝 Make a Compatibility Report",
-        shortHelp: "Report Portmaster in/compatibility with Linux Distros, VPN Clients or general Software.",
+        shortHelp: "Report Filemaster in/compatibility with Linux Distros, VPN Clients or general Software.",
         sections: [
           {
             title: "What worked?",

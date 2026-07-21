@@ -1,7 +1,7 @@
 [Desktop Entry]
-Name=Portmaster
+Name=Filemaster
 GenericName=Application Firewall Notifier
-Exec=/usr/bin/portmaster --data=/opt/filemaster --with-prompts --with-notifications --background
+Exec=/usr/bin/filemaster --data=/opt/filemaster --with-prompts --with-notifications --background
 Icon=portmaster
 Terminal=false
 Type=Application

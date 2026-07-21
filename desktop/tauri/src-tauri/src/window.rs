@@ -236,7 +236,7 @@ pub fn open_window(app: &AppHandle) -> Result<WebviewWindow> {
 /// origin (--api-address, default http://127.0.0.1:818).
 pub fn may_navigate_to_ui(win: &mut WebviewWindow, force: bool) {
     if !win.app_handle().portmaster().is_reachable() && !force {
-        error!("[tauri] portmaster API is not reachable, not navigating");
+        error!("[tauri] filemaster API is not reachable, not navigating");
 
         return;
     }

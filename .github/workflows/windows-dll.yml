@@ -1,4 +1,4 @@
-name: Windows Portmaster Core DLL
+name: Windows Filemaster Core DLL
 
 on:
   push:

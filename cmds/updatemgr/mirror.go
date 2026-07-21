@@ -27,7 +27,7 @@ var (
 	// UserAgent is an HTTP User-Agent that is used to add
 	// more context to requests made by the registry when
 	// fetching resources from the update server.
-	UserAgent = fmt.Sprintf("Portmaster Update Mgr (%s %s)", runtime.GOOS, runtime.GOARCH)
+	UserAgent = fmt.Sprintf("Filemaster Update Mgr (%s %s)", runtime.GOOS, runtime.GOARCH)
 
 	client http.Client
 

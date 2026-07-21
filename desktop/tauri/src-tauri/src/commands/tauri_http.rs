@@ -16,7 +16,7 @@ pub fn create_http_client() -> Client {
         .pool_max_idle_per_host(10)
         // Enable cookie support
         .cookie_store(true)
-        .user_agent("Portmaster UI")
+        .user_agent("Filemaster UI")
         .build()
         .expect("failed to build HTTP client")
 }

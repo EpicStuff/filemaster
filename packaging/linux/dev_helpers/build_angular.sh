@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This script builds the Angular project for the Portmaster application and packages it into a zip file.
+# This script builds the Angular project for the Filemaster application and packages it into a zip file.
 # The script assumes that all necessary dependencies are installed and available.
 # Output file: dist/portmaster.zip
 

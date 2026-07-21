@@ -1,10 +1,10 @@
 #------------------------------------------------------------------------------
-# Portmaster Windows Installer Generator
+# Filemaster Windows Installer Generator
 #------------------------------------------------------------------------------
-# This script creates Windows installers (MSI and NSIS) for Portmaster application
+# This script creates Windows installers (MSI and NSIS) for Filemaster application
 # by combining pre-compiled binaries and packaging them with Tauri.
 #
-# ## Workflow for creating Portmaster Windows installers:
+# ## Workflow for creating Filemaster Windows installers:
 #
 # 1. Compile Core Binaries (Linux environment)
 #    ```

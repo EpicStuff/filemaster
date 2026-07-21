@@ -1,6 +1,6 @@
 ---
 name: "💡 Suggest an Improvement or Feature"
-about: Suggest an enhancement or a new feature for the Portmaster
+about: Suggest an enhancement or a new feature for Filemaster
 labels: suggestion
 ---
 

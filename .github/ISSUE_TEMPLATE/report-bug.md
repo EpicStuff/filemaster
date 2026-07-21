@@ -1,6 +1,6 @@
 ---
 name: "🐞 Report a Bug"
-about: Report a bug encountered while using the Portmaster
+about: Report a bug encountered while using Filemaster
 labels: bug
 ---
 
@@ -38,6 +38,6 @@ Paste debug information below:
 This is easiest to do in the preview mode.
 
 Additional logs can be found here:
-- Linux: `/var/lib/portmaster/log`
-- Windows: `%PROGRAMDATA%\Portmaster\logs`
+- Linux: `/var/lib/filemaster/log`
+- Windows: `%PROGRAMDATA%\Filemaster\logs`
 -->

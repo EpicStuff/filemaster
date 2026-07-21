@@ -16,7 +16,7 @@ const (
 	// UnidentifiedProfileDescription is the description used for unidentified processes.
 	UnidentifiedProfileDescription = `Connections that could not be attributed to a specific app.
 
-The Portmaster attributes connections (only TCP/UDP) to specific apps. When attribution for a connection fails, it ends up here.
+Filemaster attributes connections (only TCP/UDP) to specific apps. When attribution for a connection fails, it ends up here.
 
 Connections from unsupported protocols (like ICMP/"ping") are always collected here.
 `
@@ -65,23 +65,23 @@ Additionally, the settings for the System DNS Client are specially pre-configure
 	// PortmasterProfileID is the profile ID used for the Portmaster Core itself.
 	PortmasterProfileID = "_portmaster"
 	// PortmasterProfileName is the name used for the Portmaster Core itself.
-	PortmasterProfileName = "Portmaster Core Service"
+	PortmasterProfileName = "Filemaster Core Service"
 	// PortmasterProfileDescription is the description used for the Portmaster Core itself.
-	PortmasterProfileDescription = `This is the Portmaster itself, which runs in the background as a system service. App specific settings have no effect.`
+	PortmasterProfileDescription = `This is Filemaster itself, which runs in the background as a system service. App specific settings have no effect.`
 
 	// PortmasterAppProfileID is the profile ID used for the Portmaster App.
 	PortmasterAppProfileID = "_portmaster-app"
 	// PortmasterAppProfileName is the name used for the Portmaster App.
-	PortmasterAppProfileName = "Portmaster User Interface"
+	PortmasterAppProfileName = "Filemaster User Interface"
 	// PortmasterAppProfileDescription is the description used for the Portmaster App.
-	PortmasterAppProfileDescription = `This is the Portmaster UI Windows.`
+	PortmasterAppProfileDescription = `This is the Filemaster UI Windows.`
 
-	// PortmasterNotifierProfileID is the profile ID used for the Portmaster Notifier.
+	// PortmasterNotifierProfileID is the profile ID used for the Filemaster Notifier.
 	PortmasterNotifierProfileID = "_portmaster-notifier"
-	// PortmasterNotifierProfileName is the name used for the Portmaster Notifier.
-	PortmasterNotifierProfileName = "Portmaster Notifier"
-	// PortmasterNotifierProfileDescription is the description used for the Portmaster Notifier.
-	PortmasterNotifierProfileDescription = `This is the Portmaster UI Tray Notifier.`
+	// PortmasterNotifierProfileName is the name used for the Filemaster Notifier.
+	PortmasterNotifierProfileName = "Filemaster Notifier"
+	// PortmasterNotifierProfileDescription is the description used for the Filemaster Notifier.
+	PortmasterNotifierProfileDescription = `This is the Filemaster UI Tray Notifier.`
 )
 
 var (

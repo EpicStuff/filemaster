@@ -24,20 +24,20 @@ myKey:
 introTipup:
   title: Hey there!
   content: |
-    Thanks for installing the Portmaster.
+    Thanks for installing the Filemaster.
 
 intro:
-  title: Portmaster Tips
+  title: Filemaster Tips
   content: |
-    Open tips to learn how the Portmaster work.
+    Open tips to learn how the Filemaster work.
 
-    Tips like this one are found throughout the Portmaster. With some tips you can tour an element or a feature, like this:
+    Tips like this one are found throughout the Filemaster. With some tips you can tour an element or a feature, like this:
   nextKey: navShield
 
 navShield:
   title: Status Shield & Dashboard
   content: |
-    The shield gives you a high level overview of Portmaster's status. If turns any other color than green, look for a notification that tells you what is going on.
+    The shield gives you a high level overview of Filemaster's status. If turns any other color than green, look for a notification that tells you what is going on.
 
     __Click the shield in order to open the dashboard.__
   nextKey: navMonitor
@@ -75,7 +75,7 @@ navMap:
 navSettings:
   title: Global Settings
   content: |
-    Configure global Portmaster settings.
+    Configure global Filemaster settings.
   nextKey: navSupport
   buttons:
     - name: Take the tour
@@ -87,7 +87,7 @@ navSettings:
 navSupport:
   title: Get Help
   content: |
-    Report a bug, contact support or view the extended Portmaster docs.
+    Report a bug, contact support or view the extended Filemaster docs.
   nextKey: navTools
   buttons:
     - name: Open Page
@@ -98,13 +98,13 @@ navSupport:
 navTools:
   title: Version and Tools
   content: |
-    View the Portmaster's version and use special actions and tools.
+    View the Filemaster's version and use special actions and tools.
   nextKey: navPause
 
 navPause:
   title: Pause and Resume
   content: |
-    Temporarily disable Portmaster's protection and network monitoring.
+    Temporarily disable Filemaster's protection and network monitoring.
     
     Choose to pause SPN only or disable all protection completely.
   nextKey: navPower
@@ -112,7 +112,7 @@ navPause:
 navPower:
   title: Shutdown and Restart
   content: |
-    Shutdown or Restart Portmaster.
+    Shutdown or Restart Filemaster.
   nextKey: uiMode
 
 uiMode:
@@ -132,9 +132,9 @@ uiMode:
 ### Sidedash
 
 pilot-widget:
-  title: Portmaster Status
+  title: Filemaster Status
   content: |
-    This shield shows you the current state of the Portmaster:
+    This shield shows you the current state of the Filemaster:
 
     - 🟢 all is well
     - 🟡 something is off, please investigate
@@ -147,7 +147,7 @@ pilot-widget-NetworkRating:
   content: |
     Control your privacy even when connecting to new networks.
 
-    In the Portmaster you configure settings to be active in one environment but not in the other, like allowing sensitive connections at home but not at the public library.
+    In the Filemaster you configure settings to be active in one environment but not in the other, like allowing sensitive connections at home but not at the public library.
 
     The only thing you have to do is to change the network rating whenever you connect to a different network.
   nextKey: pilot-widget-NetworkRating-Trusted
@@ -180,14 +180,14 @@ pilot-widget-NetworkRating-Danger:
     Examples:
      - something suspicious is going on in your home network
 
-    <small>_Note: In the "Danger" rating the Portmaster will become very protective. This might break functionality of apps or render them useless._</small>
+    <small>_Note: In the "Danger" rating the Filemaster will become very protective. This might break functionality of apps or render them useless._</small>
 
 broadcast-info:
   title: Broadcast Notifications
   content: |
-    Broadcast Notifications are public messages downloaded by the Portmaster when checking for updates.
+    Broadcast Notifications are public messages downloaded by the Filemaster when checking for updates.
 
-    The Portmaster then locally decides which messages should be displayed.
+    The Filemaster then locally decides which messages should be displayed.
   url: https://github.com/safing/portmaster/issues/703
   urlText: Learn More
 
@@ -218,9 +218,9 @@ broadcast-info:
 dashboardIntro:
   title: Dashboard
   content: |
-    The Dashboard gives you a first overview of Portmaster's active features and what is happening on your device.
+    The Dashboard gives you a first overview of Filemaster's active features and what is happening on your device.
 
-    Unless noted otherwise, all graphs and statistics shown are based on what Portmaster has seen in the last 10 minutes and are refreshed every 10 seconds.
+    Unless noted otherwise, all graphs and statistics shown are based on what Filemaster has seen in the last 10 minutes and are refreshed every 10 seconds.
 
 ########################
 ### Network Monitor Page
@@ -299,7 +299,7 @@ globalSettings:
 appsTitle:
   title: Application Overview
   content: |
-    All applications or processes that the Portmaster saw being active on the network are listed and can be configured here.
+    All applications or processes that the Filemaster saw being active on the network are listed and can be configured here.
 
     Apps are categorized and only appear once:
 
@@ -364,7 +364,7 @@ support-page-related-issues:
 spn:
   title: Safing Privacy Network
   content: |
-    The Safing Privacy Network (SPN) is a Portmaster Add-On that protects your identity
+    The Safing Privacy Network (SPN) is a Filemaster Add-On that protects your identity
     and Internet traffic from prying eyes. It spreads your connections over multiple server,
     letting you access the Internet from many places at once in order to effectively hide
     your tracks.
@@ -375,4 +375,4 @@ spn:
 # Process Matching and Fingerprints
 process-tags:
   title: Process Tags
-  content: Tags holds special metadata of processes and are gathered by Portmaster. You can use these tags in fingerprints to better match processes, which would otherwise be a lot more difficult or impossible to match correctly.
+  content: Tags holds special metadata of processes and are gathered by Filemaster. You can use these tags in fingerprints to better match processes, which would otherwise be a lot more difficult or impossible to match correctly.

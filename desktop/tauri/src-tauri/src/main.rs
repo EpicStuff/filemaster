@@ -138,8 +138,8 @@ fn show_webview_not_installed_dialog() -> i32 {
     use rfd::MessageDialog;
 
     let result = MessageDialog::new()
-        .set_title("Portmaster")
-        .set_description("Webkit is not installed. Please install it and run portmaster again")
+        .set_title("Filemaster")
+        .set_description("Webkit is not installed. Please install it and run Filemaster again")
         .set_buttons(rfd::MessageButtons::OkCancelCustom(
             "Go to install page".to_owned(),
             "Use old UI".to_owned(),

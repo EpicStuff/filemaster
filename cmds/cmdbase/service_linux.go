@@ -101,7 +101,7 @@ func (s *LinuxSystemService) RestartService() error {
 		slog.Debug("running custom restart command", "command", restartCommand)
 		cmd = exec.Command("sh", "-c", restartCommand)
 	} else {
-		cmd = exec.Command("systemctl", "restart", "portmaster")
+		cmd = exec.Command("systemctl", "restart", "filemaster")
 	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed run restart command: %w", err)

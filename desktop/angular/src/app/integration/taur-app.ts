@@ -199,7 +199,7 @@ export class TauriIntegrationService implements IntegrationService {
         minimizable: false,
         maximizable: false,
         resizable: false,
-        title: 'Portmaster Prompt',
+        title: 'Filemaster Prompt',
         visible: false, // the prompt marks it self as visible.
         skipTaskbar: true,
         closable: false,

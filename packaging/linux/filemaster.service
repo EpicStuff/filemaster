@@ -20,7 +20,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 PIDFile=/var/lib/filemaster/core-lock.pid
 Environment=LOGLEVEL=info
-Environment=PORTMASTER_ARGS=
+Environment=FILEMASTER_ARGS=
 EnvironmentFile=-/etc/default/filemaster
 ProtectSystem=true
 ReadWritePaths=/opt/filemaster
@@ -35,7 +35,7 @@ AmbientCapabilities=cap_chown cap_kill cap_net_admin cap_net_bind_service cap_ne
 CapabilityBoundingSet=cap_chown cap_kill cap_net_admin cap_net_bind_service cap_net_broadcast cap_net_raw cap_sys_admin cap_sys_module cap_sys_ptrace cap_dac_override cap_fowner cap_fsetid cap_sys_resource cap_bpf cap_perfmon
 # TODO(ppacher): add --disable-software-updates once it's merged and the release process changed.
 WorkingDirectory=/var/lib/filemaster
-ExecStart=/opt/filemaster/filemaster-core --bin-dir /opt/filemaster --data-dir /var/lib/filemaster -- $PORTMASTER_ARGS
+ExecStart=/opt/filemaster/filemaster-core --bin-dir /opt/filemaster --data-dir /var/lib/filemaster -- $FILEMASTER_ARGS
 
 [Install]
 WantedBy=multi-user.target

@@ -61,7 +61,7 @@ func (c *Client) Connect() error {
 
 	err := c.wsConnect()
 	if err != nil && err.Error() != c.lastError {
-		log.Errorf("client: error connecting to Portmaster: %s", err)
+		log.Errorf("client: error connecting to Filemaster: %s", err)
 		c.lastError = err.Error()
 	}
 	return err
@@ -69,7 +69,7 @@ func (c *Client) Connect() error {
 
 // StayConnected calls Connect again whenever the connection is lost.
 func (c *Client) StayConnected() {
-	log.Infof("client: connecting to Portmaster at %s", c.server)
+	log.Infof("client: connecting to Filemaster at %s", c.server)
 
 	_ = c.Connect()
 	for {

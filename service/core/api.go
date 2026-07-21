@@ -36,8 +36,8 @@ func registerAPIEndpoints() error {
 		// Do NOT register as belonging to the module, so that the API is available
 		// when something fails during starting of this module or a dependency.
 		ActionFunc:  shutdown,
-		Name:        "Shut Down Portmaster",
-		Description: "Shut down the Portmaster Core Service and all UI components.",
+		Name:        "Shut Down Filemaster",
+		Description: "Shut down the Filemaster Core Service and all UI components.",
 	}); err != nil {
 		return err
 	}
@@ -48,8 +48,8 @@ func registerAPIEndpoints() error {
 		// Do NOT register as belonging to the module, so that the API is available
 		// when something fails during starting of this module or a dependency.
 		ActionFunc:  restart,
-		Name:        "Restart Portmaster",
-		Description: "Restart the Portmaster Core Service.",
+		Name:        "Restart Filemaster",
+		Description: "Restart the Filemaster Core Service.",
 	}); err != nil {
 		return err
 	}
@@ -386,8 +386,8 @@ func authorizeApp(ar *api.Request) (interface{}, error) {
 	n := notifications.Notification{
 		Type:         notifications.Prompt,
 		EventID:      "core:authorize-app-" + time.Now().String(),
-		Title:        "An app requests access to the Portmaster",
-		Message:      "Allow " + appName + " (" + proc.Profile().LocalProfile().Name + ") to query and modify the Portmaster?\n\nBinary: " + proc.Path,
+		Title:        "An app requests access to Filemaster",
+		Message:      "Allow " + appName + " (" + proc.Profile().LocalProfile().Name + ") to query and modify Filemaster?\n\nBinary: " + proc.Path,
 		ShowOnSystem: true,
 		Expires:      time.Now().Add(time.Minute).Unix(),
 		AvailableActions: []*notifications.Action{

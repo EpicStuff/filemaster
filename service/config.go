@@ -31,14 +31,14 @@ func (sc *ServiceConfig) Init() error {
 	case "windows":
 		// Fall back to defaults.
 		if sc.BinDir == "" {
-			exeDir, err := getCurrentBinaryFolder() // Default: C:/Program Files/Portmaster
+			exeDir, err := getCurrentBinaryFolder() // Default: C:/Program Files/Filemaster
 			if err != nil {
 				return fmt.Errorf("derive bin dir from running exe: %w", err)
 			}
 			sc.BinDir = exeDir
 		}
 		if sc.DataDir == "" {
-			sc.DataDir = filepath.FromSlash("$ProgramData/Portmaster")
+			sc.DataDir = filepath.FromSlash("$ProgramData/Filemaster")
 		}
 
 	case "linux":

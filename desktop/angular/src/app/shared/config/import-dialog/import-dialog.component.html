@@ -39,7 +39,7 @@
 
     <div class="flex flex-row gap-2" *ngIf="result?.restartRequired">
       <input type="checkbox" id="restart" [(ngModel)]="triggerRestart" />
-      <label class="text-primary" for="restart">Automatically restart Portmaster after a successfull import</label>
+      <label class="text-primary" for="restart">Automatically restart Filemaster after a successfull import</label>
     </div>
   </div>
 </fieldset>
@@ -81,7 +81,7 @@
     </li>
 
     <li *ngIf="result.restartRequired">
-      This export will require a restart of the Portmaster to take effect.
+      This export will require a restart of the Filemaster to take effect.
     </li>
   </ul>
 </fieldset>

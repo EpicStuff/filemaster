@@ -15,7 +15,7 @@ func TestGenerateBinaryNameFromPath(t *testing.T) {
 	assert.Equal(t, "Msedge", GenerateBinaryNameFromPath("msedge.exe"))
 	assert.Equal(t, "SIH Client", GenerateBinaryNameFromPath("SIHClient.exe"))
 	assert.Equal(t, "Openvpn Gui", GenerateBinaryNameFromPath("openvpn-gui.exe"))
-	assert.Equal(t, "Portmaster Core v0-1-2", GenerateBinaryNameFromPath("portmaster-core_v0-1-2.exe"))
+	assert.Equal(t, "Filemaster Core v0-1-2", GenerateBinaryNameFromPath("portmaster-core_v0-1-2.exe"))
 	assert.Equal(t, "Win Store App", GenerateBinaryNameFromPath("WinStore.App.exe"))
 	assert.Equal(t, "Test Script", GenerateBinaryNameFromPath(".test-script"))
 	assert.Equal(t, "Browser Broker", GenerateBinaryNameFromPath("browser_broker.exe"))

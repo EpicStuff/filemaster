@@ -31,6 +31,15 @@ allow/deny, not redirect.
 - maybe add file picker for watch path and rules
 - maybe add warning when add rule for path outside watch
 - try to make is so a root virus cant stop filemaster without user noticing
+- look into "the curent intended design is that the user facing rules do not differentiate between folders and files, but i guess some way to tag the rule as for only folders or only files could be nice, like how i think portmaster has a upd/tcp tag"
+	```Normal user facing rules intentionally apply to both files and folders, so the absence of a file only distinction is not currently a correctness problem.
+
+The rule language could optionally support qualifiers such as:
+
+@file:
+@folder:
+
+This would allow advanced users to restrict a rule to only files or only folders, similar to how Portmaster supports qualifiers such as TCP and UDP. Unqualified rules would continue to apply to both.```
 
 ## Potential Future Features
 

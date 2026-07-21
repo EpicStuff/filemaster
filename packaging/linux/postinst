@@ -12,8 +12,8 @@ if command -V semanage >/dev/null 2>&1; then
 fi
 
 echo "[ ] Initializing binary files"
-mv /usr/bin/portmaster /opt/filemaster/portmaster
-ln -s /opt/filemaster/portmaster /usr/bin/portmaster
+mv /usr/bin/portmaster /opt/filemaster/filemaster
+ln -s /opt/filemaster/filemaster /usr/bin/filemaster
 
 chmod +x /opt/filemaster/filemaster-core
 

@@ -95,7 +95,7 @@ func authBearer(w http.ResponseWriter, r *http.Request) {
 	// Respond with desired authentication header.
 	w.Header().Set(
 		"WWW-Authenticate",
-		`Bearer realm="Portmaster API" domain="/"`,
+		`Bearer realm="Filemaster API" domain="/"`,
 	)
 	http.Error(w, "Authorization required.", http.StatusUnauthorized)
 }
@@ -111,7 +111,7 @@ func authBasic(w http.ResponseWriter, r *http.Request) {
 	// Respond with desired authentication header.
 	w.Header().Set(
 		"WWW-Authenticate",
-		`Basic realm="Portmaster API" domain="/"`,
+		`Basic realm="Filemaster API" domain="/"`,
 	)
 	http.Error(w, "Authorization required.", http.StatusUnauthorized)
 }
@@ -133,7 +133,7 @@ func authReset(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Clear-Site-Data", "*")
 
 	// Set HTTP Auth Realm without requesting authorization.
-	w.Header().Set("WWW-Authenticate", `None realm="Portmaster API"`)
+	w.Header().Set("WWW-Authenticate", `None realm="Filemaster API"`)
 
 	// Reply with 401 Unauthorized in order to clear HTTP Basic Auth data.
 	http.Error(w, "Session deleted.", http.StatusUnauthorized)

@@ -133,7 +133,7 @@ func migrateIcons(ctx context.Context, _, to *version.Version, db *database.Inte
 		module.states.Add(mgr.State{
 			ID:      "migration-failed-icons",
 			Name:    "Profile Migration Failed",
-			Message: fmt.Sprintf("Failed to migrate icons of %d profiles (out of %d pending). The last error was: %s\n\nPlease restart Portmaster to try the migration again.", failed, total, lastErr),
+			Message: fmt.Sprintf("Failed to migrate icons of %d profiles (out of %d pending). The last error was: %s\n\nPlease restart Filemaster to try the migration again.", failed, total, lastErr),
 			Type:    mgr.StateTypeError,
 		})
 		return fmt.Errorf("failed to migrate %d profiles (out of %d pending) - last error: %w", failed, total, lastErr)
@@ -222,7 +222,7 @@ func migrateToDerivedIDs(ctx context.Context, _, to *version.Version, db *databa
 		module.states.Add(mgr.State{
 			ID:      "migration-failed-derived-IDs",
 			Name:    "Profile Migration Failed",
-			Message: fmt.Sprintf("Failed to migrate profile IDs of %d profiles (out of %d pending). The last error was: %s\n\nPlease restart Portmaster to try the migration again.", failed, total, lastErr),
+			Message: fmt.Sprintf("Failed to migrate profile IDs of %d profiles (out of %d pending). The last error was: %s\n\nPlease restart Filemaster to try the migration again.", failed, total, lastErr),
 			Type:    mgr.StateTypeError,
 		})
 		return fmt.Errorf("failed to migrate %d profiles (out of %d pending) - last error: %w", failed, total, lastErr)

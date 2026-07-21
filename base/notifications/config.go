@@ -14,7 +14,7 @@ func registerConfig() error {
 	if err := config.Register(&config.Option{
 		Name:           "Desktop Notifications",
 		Key:            CfgUseSystemNotificationsKey,
-		Description:    "In addition to showing notifications in the Portmaster App, also send them to the Desktop. This requires the Portmaster Notifier to be running.",
+		Description:    "In addition to showing notifications in the Filemaster App, also send them to the Desktop. This requires the Filemaster Notifier to be running.",
 		OptType:        config.OptTypeBool,
 		ExpertiseLevel: config.ExpertiseLevelUser,
 		ReleaseLevel:   config.ReleaseLevelStable,

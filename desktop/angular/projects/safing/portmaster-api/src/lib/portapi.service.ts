@@ -981,20 +981,20 @@ export class PortapiService {
       binaryType: 'arraybuffer',
       openObserver: {
         next: () => {
-          console.log('[portapi] connection to portmaster established');
+          console.log('[portapi] connection to filemaster established');
           this.connectedSubject.next(true);
           this._flushPendingMethods();
         },
       },
       closeObserver: {
         next: () => {
-          console.log('[portapi] connection to portmaster closed');
+          console.log('[portapi] connection to filemaster closed');
           this.connectedSubject.next(false);
         },
       },
       closingObserver: {
         next: () => {
-          console.log('[portapi] connection to portmaster closing');
+          console.log('[portapi] connection to filemaster closing');
         },
       },
     });

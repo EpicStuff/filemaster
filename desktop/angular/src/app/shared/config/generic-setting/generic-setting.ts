@@ -552,8 +552,8 @@ export class GenericSettingComponent<S extends BaseSetting<any, any>> implements
   restartNow() {
     if (this._setting?.RequiresRestart) {
       this.dialog.confirm({
-        header: 'Restart Portmaster',
-        message: 'Do you want to restart the Portmaster now?',
+        header: 'Restart Filemaster',
+        message: 'Do you want to restart the Filemaster now?',
         buttons: [
           {
             id: 'no',
