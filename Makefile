@@ -11,7 +11,7 @@ NODE_BIN ?=
 NODE_PATH := $(if $(NODE_BIN),$(NODE_BIN):)
 CORE := $(DIST)/$(PLATFORM)/portmaster-core
 APP := $(DIST)/$(PLATFORM)/portmaster
-UI_ZIP := $(DIST)/all/portmaster.zip
+UI_ZIP := $(DIST)/all/filemaster.zip
 ASSETS_ZIP := $(DIST)/all/assets.zip
 INTEL_DIR := $(DIST)/intel
 UPDATEMGR := $(DIST)/$(PLATFORM)/updatemgr
@@ -39,7 +39,7 @@ install: build
 	sudo install -d -m 0755 "$(INSTALL_DIR)" "$(BIN_DIR)" "$(SERVICE_DIR)"
 	sudo install -m 0755 "$(CORE)" "$(INSTALL_DIR)/portmaster-core"
 	sudo install -m 0755 "$(APP)" "$(INSTALL_DIR)/filemaster"
-	sudo install -m 0644 "$(UI_ZIP)" "$(INSTALL_DIR)/portmaster.zip"
+	sudo install -m 0644 "$(UI_ZIP)" "$(INSTALL_DIR)/filemaster.zip"
 	sudo install -m 0644 "$(ASSETS_ZIP)" "$(INSTALL_DIR)/assets.zip"
 	sudo install -d -m 0750 "$(DATA_DIR)"
 	@sed -e 's|/opt/filemaster|$(INSTALL_DIR)|g' -e 's|/var/lib/filemaster|$(DATA_DIR)|g' \
@@ -85,7 +85,7 @@ tauri: tauri-ui
 stage: core ui assets intel tauri-ui
 	@mkdir -p "$(TAURI_DIR)/binary"
 	cp "$(CORE)" "$(TAURI_DIR)/binary/portmaster-core"
-	cp "$(UI_ZIP)" "$(TAURI_DIR)/binary/portmaster.zip"
+	cp "$(UI_ZIP)" "$(TAURI_DIR)/binary/filemaster.zip"
 	cp "$(ASSETS_ZIP)" "$(TAURI_DIR)/binary/assets.zip"
 	@mkdir -p "$(TAURI_DIR)/intel"
 	cp -a "$(INTEL_DIR)/." "$(TAURI_DIR)/intel/"

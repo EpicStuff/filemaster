@@ -151,7 +151,7 @@ func ServeFileFromArchive(w http.ResponseWriter, r *http.Request, archiveName st
 
 // redirectToDefault redirects the request to the default UI module.
 func redirectToDefault(w http.ResponseWriter, r *http.Request) {
-	u, err := url.Parse("/ui/modules/portmaster/")
+	u, err := url.Parse("/ui/modules/filemaster/")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

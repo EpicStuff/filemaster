@@ -63,7 +63,7 @@
 
           // Binary files
           "/opt/filemaster/portmaster-core": "binary/portmaster-core",
-          "/opt/filemaster/portmaster.zip": "binary/portmaster.zip",
+          "/opt/filemaster/filemaster.zip": "binary/filemaster.zip",
           "/opt/filemaster/assets.zip": "binary/assets.zip",
 
           // Intel files
@@ -97,7 +97,7 @@
 
           // Binary files
           "/opt/filemaster/portmaster-core": "binary/portmaster-core",
-          "/opt/filemaster/portmaster.zip": "binary/portmaster.zip",
+          "/opt/filemaster/filemaster.zip": "binary/filemaster.zip",
           "/opt/filemaster/assets.zip": "binary/assets.zip",
 
           // Intel files
