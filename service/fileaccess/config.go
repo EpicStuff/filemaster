@@ -7,8 +7,8 @@ import (
 )
 
 // CfgOptionWatchPathsKey is the global option that controls which
-// directories the fanotify source marks. Each entry is an absolute
-// directory path. Empty list = nothing watched (the source still
+// directories the fanotify source marks. Entries are ordered Watch (+) and
+// Exclude (-) rules. Empty list = nothing watched (the source still
 // initializes; it just has no marks to issue).
 const CfgOptionWatchPathsKey = "fileaccess/watchPaths"
 
@@ -86,22 +86,28 @@ func registerConfig() error {
 	err := config.Register(&config.Option{
 		Name:         "File Access Watch Paths",
 		Key:          CfgOptionWatchPathsKey,
-		Description:  "Absolute directory paths whose immediate children fanotify intercepts. Defaults to /home; / enables whole-system monitoring and can disrupt essential services if policies are made restrictive.",
+		Description:  "Ordered absolute directory-path rules. Watch includes a directory and its descendants; Exclude skips a directory. The first matching rule wins. For example, Exclude /home/user2 before Watch /home watches home except user2. Defaults to Watch /home; / enables whole-system monitoring and can disrupt essential services if policies are made restrictive.",
 		OptType:      config.OptTypeStringArray,
-		DefaultValue: []string{"/home"},
+		DefaultValue: []string{"+ /home"},
 		Annotations: config.Annotations{
 			config.DisplayOrderAnnotation: cfgOptionWatchPathsOrder,
 			config.CategoryAnnotation:     "File Access",
+			config.DisplayHintAnnotation:  "endpoint list",
+			"safing/portmaster:ui:endpoint-list:verdict-names": map[string]string{
+				"+": "Watch",
+				"-": "Exclude",
+			},
 		},
-		// Per-line: any non-empty absolute path. Validation is left
+		// Per-line: any non-empty absolute path, optionally prefixed with + or -.
+		// Validation is left
 		// permissive; the source surfaces a real error on Start if a
 		// path is unmarkable.
-		ValidationRegex: `^/$|^/.+$`,
+		ValidationRegex: `^[-+!]?[[:space:]]?(/$|/.+)$`,
 	})
 	if err != nil {
 		return err
 	}
-	cfgOptionWatchPaths = config.Concurrent.GetAsStringArray(CfgOptionWatchPathsKey, []string{"/home"})
+	cfgOptionWatchPaths = config.Concurrent.GetAsStringArray(CfgOptionWatchPathsKey, []string{"+ /home"})
 
 	defaults := DefaultDecisionPipelineConfig()
 	for _, option := range []struct {

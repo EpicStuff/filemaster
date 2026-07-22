@@ -42,6 +42,79 @@ type scopeMatch struct {
 
 type scopeSnapshot struct {
 	Scopes []scopeMatch
+	Rules  []watchRule
+}
+
+// watchRuleSnapshot keeps the configured watch policy in priority order.
+// Scopes only contain included paths because exclusions do not need fanotify
+// marks; they suppress events that broader included scopes already receive.
+type watchRuleSnapshot struct {
+	Rules      []watchRule
+	ScopePaths []string
+}
+
+type watchRule struct {
+	Path    string
+	Exclude bool
+}
+
+func parseWatchRules(paths []string) (*watchRuleSnapshot, error) {
+	snapshot := &watchRuleSnapshot{}
+	seen := make(map[string]struct{}, len(paths))
+	for _, configured := range paths {
+		configured = strings.TrimSpace(configured)
+		if configured == "" {
+			continue
+		}
+		exclude := false
+		if len(configured) > 0 {
+			switch configured[0] {
+			case '-':
+				exclude = true
+				fallthrough
+			case '+', '!':
+				configured = strings.TrimSpace(configured[1:])
+			}
+		}
+		path, err := normalizePath(configured)
+		if err != nil {
+			return nil, err
+		}
+		key := path
+		if exclude {
+			key = "!" + path
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		snapshot.Rules = append(snapshot.Rules, watchRule{Path: path, Exclude: exclude})
+		if !exclude {
+			snapshot.ScopePaths = append(snapshot.ScopePaths, path)
+		}
+	}
+	return snapshot, nil
+}
+
+func (s *watchRuleSnapshot) matches(path string) bool {
+	for _, rule := range s.Rules {
+		if pathContains(rule.Path, path) {
+			return !rule.Exclude
+		}
+	}
+	return false
+}
+
+func (s *scopeSnapshot) matches(path string) bool {
+	if len(s.Rules) == 0 {
+		return true
+	}
+	for _, rule := range s.Rules {
+		if pathContains(rule.Path, path) {
+			return !rule.Exclude
+		}
+	}
+	return false
 }
 
 type mountedMark struct {
@@ -220,12 +293,20 @@ func snapshotFromScopes(scopes map[string]*policyScope) *scopeSnapshot {
 	return snapshot
 }
 
+func snapshotWithWatchRules(scopes map[string]*policyScope, rules *watchRuleSnapshot) *scopeSnapshot {
+	snapshot := snapshotFromScopes(scopes)
+	if rules != nil {
+		snapshot.Rules = append([]watchRule(nil), rules.Rules...)
+	}
+	return snapshot
+}
+
 // pendingScopesFrom returns only the scopes in next that are not already active
 // (by canonical path) in the current snapshot. A candidate is denied only while
 // its current reconciliation pass verifies mount marks. Once that pass ends,
 // any successfully marked mounts activate the candidate policy; missing marks
 // remain a reported coverage gap rather than blocking unrelated marked mounts.
-func pendingScopesFrom(next map[string]*policyScope, active *scopeSnapshot) *scopeSnapshot {
+func pendingScopesFrom(next map[string]*policyScope, active *scopeSnapshot, rules []watchRule) *scopeSnapshot {
 	activeCanonical := make(map[string]struct{})
 	if active != nil {
 		for _, scope := range active.Scopes {
@@ -233,7 +314,7 @@ func pendingScopesFrom(next map[string]*policyScope, active *scopeSnapshot) *sco
 		}
 	}
 	full := snapshotFromScopes(next)
-	pending := &scopeSnapshot{Scopes: make([]scopeMatch, 0, len(full.Scopes))}
+	pending := &scopeSnapshot{Scopes: make([]scopeMatch, 0, len(full.Scopes)), Rules: append([]watchRule(nil), rules...)}
 	for _, scope := range full.Scopes {
 		if _, verified := activeCanonical[scope.Canonical]; verified {
 			continue
@@ -395,7 +476,7 @@ func (s *fanotifySource) reconcileLocked() {
 		s.recordReconcileFailure(err, mounts)
 		return
 	}
-	desiredSnapshot := snapshotFromScopes(s.scopes)
+	desiredSnapshot := snapshotWithWatchRules(s.scopes, s.watchRules)
 
 	// A mount created beneath an already-active scope was unmarked until this
 	// reconciliation saw it. fanotify mount marks are per mount ID, so marking
@@ -510,7 +591,7 @@ func (s *fanotifySource) pathInPendingScope(path string) bool {
 	}
 	for _, scope := range snapshot.Scopes {
 		if pathContains(scope.Canonical, path) {
-			return true
+			return snapshot.matches(path)
 		}
 	}
 	return false
@@ -711,7 +792,7 @@ func (s *fanotifySource) pathInActiveScope(path string) bool {
 	}
 	for _, scope := range snapshot.Scopes {
 		if pathContains(scope.Canonical, path) {
-			return true
+			return snapshot.matches(path)
 		}
 	}
 	return false

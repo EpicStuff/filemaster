@@ -37,6 +37,7 @@ type fanotifySource struct {
 
 	activeScopes  atomic.Pointer[scopeSnapshot]
 	pendingScopes atomic.Pointer[scopeSnapshot]
+	watchRules    *watchRuleSnapshot
 	// activeMounts is a lock-free snapshot of the currently marked mounts, sorted
 	// longest mount point first, used to attribute events to a mount at event
 	// time (backend-todo-plan Phase 2.5). It is nil while reconciliation is
@@ -497,13 +498,18 @@ func (s *fanotifySource) SetWatchPaths(paths []string) error {
 		return ErrFileAccessClosing
 	}
 
-	next, err := s.prepareScopes(paths)
+	rules, err := parseWatchRules(paths)
+	if err != nil {
+		return err
+	}
+	next, err := s.prepareScopes(rules.ScopePaths)
 	if err != nil {
 		return err
 	}
 	published := s.lifecycle.whileRunning(func() {
 		previous := s.scopes
 		s.scopes = next
+		s.watchRules = rules
 		for configured, scope := range previous {
 			if next[configured] != scope {
 				s.retiredScopes = append(s.retiredScopes, scope)
@@ -516,7 +522,7 @@ func (s *fanotifySource) SetWatchPaths(paths []string) error {
 		// remains unmarkable. The latter remains visible as partial coverage.
 		// Only newly added or changed scopes are pending, so an in-progress
 		// update cannot fail-close unrelated, already-active scopes.
-		s.pendingScopes.Store(pendingScopesFrom(next, s.activeScopes.Load()))
+		s.pendingScopes.Store(pendingScopesFrom(next, s.activeScopes.Load(), rules.Rules))
 	})
 	if !published {
 		closeNewScopes(next, s.scopes)

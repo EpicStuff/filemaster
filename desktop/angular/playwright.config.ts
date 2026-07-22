@@ -1,6 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
 
-const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? 'http://localhost:4200';
+const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:4200';
 
 export default defineConfig({
 	testDir: './playwright',
@@ -22,7 +22,7 @@ export default defineConfig({
 		video: 'retain-on-failure',
 	},
 	webServer: {
-		command: 'npm run serve',
+		command: 'npm run serve -- --host 0.0.0.0',
 		url: baseURL,
 		reuseExistingServer: !process.env.CI,
 		timeout: 240_000,

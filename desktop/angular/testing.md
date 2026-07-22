@@ -93,26 +93,32 @@ navigation, settings screens, onboarding, and backend/proxy behavior.
 
 ## File Access E2E
 
-Run the fake fanotify file-access test with:
+Run the confined real-fanotify file-access test with:
 
 ```bash
 npm run e2e:fileaccess
 ```
 
-Run the same test in a visible browser with:
+Run the same real-fanotify test in a visible browser with:
 
 ```bash
 npm run e2e:fileaccess:headed
 ```
 
-Run against real Linux fanotify with:
+Run the same real-fanotify command explicitly with:
 
 ```bash
 npm run e2e:fileaccess:real
 ```
 
-Real mode requires an environment where `fanotify_init` works, usually
-`CAP_SYS_ADMIN` in the init user namespace.
+The default command creates a private mount namespace, bind-mounts its temporary
+watch directory, and uses real Linux fanotify. It requires `unshare`, `mount`,
+and `fanotify_init` permissions, usually `CAP_SYS_ADMIN` in the initial user
+namespace. Use the fake source only for deterministic debugging:
+
+```bash
+npm run e2e:fileaccess:fake
+```
 
 The file-access test starts a test `portmaster-core`, points Angular at it,
 tries a watched-file write like `echo test > <file>`, clicks `Allow`, checks the

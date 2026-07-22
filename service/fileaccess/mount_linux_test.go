@@ -67,6 +67,27 @@ func TestPathContainmentIsComponentAware(t *testing.T) {
 	}
 }
 
+func TestWatchRulesRespectConfiguredPriority(t *testing.T) {
+	rules, err := parseWatchRules([]string{"- /home/user2", "+ /home"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rules.matches("/home/user2/file") {
+		t.Fatal("leading exclusion must suppress the broader watch path")
+	}
+	if !rules.matches("/home/user1/file") {
+		t.Fatal("broader watch path must include unmatched descendants")
+	}
+
+	rules, err = parseWatchRules([]string{"+ /home", "- /home/user2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rules.matches("/home/user2/file") {
+		t.Fatal("the first matching watch rule must win")
+	}
+}
+
 func TestConfiguredSymlinkIsResolvedAndMissingPathIsRejected(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")

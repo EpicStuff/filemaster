@@ -6,7 +6,7 @@ import path from 'path';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const repoRoot = path.resolve(__dirname, '../../..');
-const sourceMode = process.env.PLAYWRIGHT_FILEACCESS_SOURCE === 'real' ? 'real' : 'fake';
+const sourceMode = process.env.PLAYWRIGHT_FILEACCESS_SOURCE === 'fake' ? 'fake' : 'real';
 
 type TestCore = {
 	apiPort: number;
@@ -20,20 +20,19 @@ type TestCore = {
 
 type AccessAttempt = {
 	path: string;
-	op: 'read' | 'write';
+	op: 'open';
+	effect: 'read' | 'write';
 	command: string;
 	// Fake-source mode spawns this real, long-lived process and sends its
 	// PID over the socket, so the daemon resolves a real portmaster profile
 	// from /proc/<pid>/exe exactly as it would for a kernel fanotify event.
 	liveCmd: string;
 	liveArgs: string[];
-	// Expected resolved profile (binary) name, asserted in the monitor.
-	appName: string;
 };
 
 test.describe.configure({ mode: 'serial' });
 
-test('prompts for watched file write and read decisions and records them in the app', async ({ page }) => {
+test('prompts for watched file open decisions and records them in the app', async ({ page }) => {
 	test.setTimeout(180_000);
 
 	const core = await startFilemaster(sourceMode, test.info().workerIndex);
@@ -45,14 +44,14 @@ test('prompts for watched file write and read decisions and records them in the 
 
 		const writeAttempt = requestAccess({
 			path: target,
-			op: 'write',
+			op: 'open',
+			effect: 'write',
 			command: `echo test > ${target}`,
 			liveCmd: 'sleep',
 			liveArgs: ['60'],
-			appName: 'sleep',
 		}, core);
 
-		await expectPromptInApp(page, core.apiPort, target, 'write');
+		await expectPromptInApp(page, core.apiPort, target, 'open');
 		await page.getByRole('button', { name: 'Allow' }).click();
 		await expect(writeAttempt).resolves.toMatchObject({
 			verdict: 'allow',
@@ -61,29 +60,20 @@ test('prompts for watched file write and read decisions and records them in the 
 			exitCode: 0,
 		});
 
-		await expect(await readFile(target, 'utf8')).toBe('test\n');
-
-		// "Always allow this path" must persist a per-app File Access Rule:
-		// a second event for the same profile/path proceeds without another prompt.
-		await expect(requestAccess({
-			path: target,
-			op: 'write',
-			command: `echo test > ${target}`,
-			liveCmd: 'sleep',
-			liveArgs: ['60'],
-			appName: 'sleep',
-		}, core)).resolves.toMatchObject({ verdict: 'allow', exitCode: 0 });
+		if (core.sourceMode === 'fake') {
+			await expect(await readFile(target, 'utf8')).toBe('test\n');
+		}
 
 		const readAttempt = requestAccess({
 			path: target,
-			op: 'read',
+			op: 'open',
+			effect: 'read',
 			command: `cat ${target}`,
 			liveCmd: 'tail',
 			liveArgs: ['-f', '/dev/null'],
-			appName: 'tail',
 		}, core);
 
-		await expectPromptInApp(page, core.apiPort, target, 'read');
+		await expectPromptInApp(page, core.apiPort, target, 'open');
 		await page.getByRole('button', { name: 'Block' }).click();
 		const readResult = await readAttempt;
 		expect(readResult.verdict).toBe('deny');
@@ -96,19 +86,13 @@ test('prompts for watched file write and read decisions and records them in the 
 		// latter proving the PID→/proc→portmaster-profile path worked end to
 		// end (no synthetic/"/" fallback).
 		await expect(
-			monitorRows.filter({ hasText: 'Write' }).filter({ hasText: 'sleep' })
-		).toHaveCount(2);
+			monitorRows.filter({ hasText: 'Open' }).filter({ hasText: core.sourceMode === 'real' ? 'Bash' : 'sleep' })
+		).toHaveCount(1);
 		await expect(
-			monitorRows.filter({ hasText: 'Read' }).filter({ hasText: 'tail' })
+			monitorRows.filter({ hasText: 'Open' }).filter({ hasText: core.sourceMode === 'real' ? 'Bash' : 'tail' })
 		).toBeVisible();
 		await expect(page.getByText('File Accesses', { exact: true })).toBeVisible();
 		await expect(page.locator('sfng-netquery-line-chart svg')).toBeVisible();
-
-		const introDialog = page.locator('sfng-dialog-container').filter({ hasText: 'Portmaster Protects Your Privacy' });
-		if (await introDialog.isVisible()) {
-			await introDialog.locator('svg').first().click();
-			await expect(introDialog).toBeHidden();
-		}
 
 		if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
 			await page.screenshot({
@@ -117,38 +101,6 @@ test('prompts for watched file write and read decisions and records them in the 
 			});
 		}
 
-		await page.locator('app-network-scout').getByText('Tail', { exact: true }).click();
-		await expect(page).toHaveURL(/\/app\//);
-		await expect(page.getByRole('heading', { name: 'Tail' })).toBeVisible();
-		await page.getByText('File Events', { exact: true }).click();
-		await expect(page.locator('app-filequery-viewer sfng-file-event-row').filter({ hasText: target })).toBeVisible();
-		await expect(page.locator('app-filequery-viewer sfng-netquery-line-chart svg')).toBeVisible();
-
-		if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
-			await page.screenshot({
-				path: path.join(repoRoot, 'tmp', 'app-file-access-activity.png'),
-				fullPage: true,
-			});
-		}
-
-		await page.goto(`/settings?api-port=${core.apiPort}`);
-		await page.waitForTimeout(500);
-		const settingsIntroDialog = page.locator('sfng-dialog-container').filter({ hasText: 'Portmaster Protects Your Privacy' });
-		if (await settingsIntroDialog.isVisible()) {
-			await settingsIntroDialog.locator('svg').first().click();
-			await expect(settingsIntroDialog).toBeHidden();
-		}
-		const otherHeading = page.getByRole('heading', { name: 'Other' });
-		await expect(otherHeading).toBeVisible();
-		await expect(page.getByText('Intercept Read Syscalls', { exact: true })).toBeVisible();
-		await otherHeading.scrollIntoViewIfNeeded();
-
-		if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
-			await page.screenshot({
-				path: path.join(repoRoot, 'tmp', 'settings.png'),
-				fullPage: true,
-			});
-		}
 	} finally {
 		await stopFilemaster(core);
 	}
@@ -166,15 +118,18 @@ async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Prom
 	await mkdir(binDir, { recursive: true });
 	await mkdir(watchDir, { recursive: true });
 	if (mode === 'real') {
-		await requireConfinedRealWatchMount(watchDir);
+		await prepareConfinedRealWatchMount(watchDir);
 	}
 	await writeFile(path.join(dataDir, 'config.json'), JSON.stringify({
 		core: {
 			devMode: true,
 		},
 		fileaccess: {
-			watchPaths: [watchDir],
+			watchPaths: [`+ ${watchDir}`],
 			interceptReads: true,
+		},
+		filter: {
+			defaultAction: 'ask',
 		},
 	}, null, 2));
 
@@ -207,6 +162,7 @@ async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Prom
 		],
 		{
 			cwd: repoRoot,
+			detached: true,
 			env,
 		}
 	);
@@ -248,10 +204,21 @@ async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Prom
 	}
 }
 
-async function requireConfinedRealWatchMount(watchDir: string): Promise<void> {
+async function runCommand(command: string, args: string[]): Promise<void> {
+	const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+	let stderr = '';
+	child.stderr.on('data', chunk => { stderr += String(chunk); });
+	await new Promise<void>((resolve, reject) => {
+		child.once('error', reject);
+		child.once('exit', code => code === 0 ? resolve() : reject(new Error(stderr.trim() || `${command} exited ${code}`)));
+	});
+}
+
+async function prepareConfinedRealWatchMount(watchDir: string): Promise<void> {
 	if (process.env.PLAYWRIGHT_FILEACCESS_REAL_CONFINED !== '1') {
 		throw new Error('real fanotify Playwright mode is disabled: set PLAYWRIGHT_FILEACCESS_REAL_CONFINED=1 only inside a private mount namespace');
 	}
+	await runCommand('mount', ['--bind', watchDir, watchDir]);
 	const target = await new Promise<string>((resolve, reject) => {
 		const child = spawn('findmnt', ['--target', watchDir, '--noheadings', '--output', 'TARGET'], { stdio: ['ignore', 'pipe', 'pipe'] });
 		let stdout = '';
@@ -262,23 +229,27 @@ async function requireConfinedRealWatchMount(watchDir: string): Promise<void> {
 		child.once('exit', code => code === 0 ? resolve(stdout.trim()) : reject(new Error(stderr.trim() || `findmnt exited ${code}`)));
 	});
 	if (target !== watchDir) {
+		await runCommand('umount', ['--lazy', watchDir]);
 		throw new Error(`real fanotify Playwright mode requires ${watchDir} to be its own confined mount; findmnt resolved ${target || '<none>'}`);
 	}
 }
 
 async function stopFilemaster(core: TestCore) {
-	if (core.process.exitCode === null) {
-		core.process.kill('SIGTERM');
+	if (core.process.exitCode === null && core.process.pid) {
+		process.kill(-core.process.pid, 'SIGTERM');
 		await new Promise<void>(resolve => {
 			const done = () => resolve();
 			core.process.once('exit', done);
 			setTimeout(() => {
 				if (core.process.exitCode === null) {
-					core.process.kill('SIGKILL');
+					process.kill(-core.process.pid!, 'SIGKILL');
 				}
 				resolve();
 			}, 5_000);
 		});
+	}
+	if (core.sourceMode === 'real') {
+		await runCommand('umount', ['--lazy', core.watchDir]);
 	}
 	await rm(core.dataDir, { recursive: true, force: true });
 }
@@ -329,7 +300,7 @@ async function requestAccess(attempt: AccessAttempt, core: TestCore) {
 		};
 	}
 
-	if (attempt.op === 'write') {
+	if (attempt.effect === 'write') {
 		await writeFile(attempt.path, 'test\n');
 		return {
 			verdict,

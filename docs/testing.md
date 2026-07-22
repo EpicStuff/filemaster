@@ -73,26 +73,32 @@ The app-shell test checks that Angular boots and redirects `/` to `/dashboard`.
 
 ## File Access E2E
 
-Fake fanotify mode:
+Confined real fanotify mode (default):
 
 ```bash
 npm run e2e:fileaccess
 ```
 
-Fake fanotify with visible browser:
+Confined real fanotify with visible browser:
 
 ```bash
 npm run e2e:fileaccess:headed
 ```
 
-Real Linux fanotify mode:
+Explicit alias for the default real-fanotify command:
 
 ```bash
 npm run e2e:fileaccess:real
 ```
 
-Real mode requires an environment where `fanotify_init` works, usually
-`CAP_SYS_ADMIN` in the init user namespace.
+The default command creates a private mount namespace, bind-mounts its temporary
+watch directory, and uses real Linux fanotify. It requires `unshare`, `mount`,
+and `fanotify_init` permissions, usually `CAP_SYS_ADMIN` in the initial user
+namespace. Use the fake source only for deterministic debugging:
+
+```bash
+npm run e2e:fileaccess:fake
+```
 
 The file-access test starts a test `filemaster-core`, points Angular at it,
 tries a watched-file write like `echo test > <file>`, clicks `Allow`, checks the
