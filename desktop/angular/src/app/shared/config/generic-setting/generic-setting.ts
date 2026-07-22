@@ -506,7 +506,10 @@ export class GenericSettingComponent<S extends BaseSetting<any, any>> implements
     }
     this._touched = true;
 
-    this._currentValue = this.defaultValue;
+    // Seeded rule lists reset to their seed rather than the empty/global value.
+    this._currentValue = this._setting.SeededDefault !== undefined
+      ? this._setting.SeededDefault
+      : this.defaultValue;
     this.wasReset = true;
 
     this.triggerSave.next();

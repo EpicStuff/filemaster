@@ -114,3 +114,32 @@ func TestFilemasterAppSpecialProfilesSeedRulesWithoutDefaultAction(t *testing.T)
 		}
 	}
 }
+
+// TestSeededRuleDefaults exercises the registry the UI "reset to default" action
+// reads: seeded profiles return their rule-list config keyed by option, while
+// profiles with no seed (regular apps) return nil so reset clears the per-app
+// override and inherits the global rules.
+func TestSeededRuleDefaults(t *testing.T) {
+	requireProfileConfiguration(t)
+	SetFilemasterSeedPaths("/opt/filemaster", "/var/lib/filemaster")
+	t.Cleanup(func() { SetFilemasterSeedPaths("", "") })
+
+	seed := SeededRuleDefaults(PortmasterProfileID, "/opt/filemaster/filemaster")
+	if seed == nil {
+		t.Fatal("seeded profile returned nil defaults")
+	}
+	// Only rule-list keys belong in the seed; the default action is set by
+	// createSpecialProfile, not here.
+	if _, ok := seed[CfgOptionDefaultActionKey]; ok {
+		t.Error("seed must not carry the default-action key")
+	}
+	for _, key := range []string{CfgOptionFileAccessReadRulesKey, CfgOptionFileAccessExecRulesKey} {
+		if _, ok := seed[key]; !ok {
+			t.Errorf("seed missing %s", key)
+		}
+	}
+
+	if got := SeededRuleDefaults("_some-regular-app", "/usr/bin/app"); got != nil {
+		t.Errorf("unseeded profile defaults = %#v, want nil (inherits global)", got)
+	}
+}

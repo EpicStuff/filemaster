@@ -240,6 +240,11 @@ export interface BaseSetting<T extends OptionValueType, O extends OptionType> ex
   // GlobalDefault holds the global default value and is used in the app settings
   // This property is NOT defined inside the portmaster!
   GlobalDefault?: T;
+
+  // SeededDefault holds the seeded rule-list a profile should reset to (instead
+  // of clearing the per-app override). Only set for seeded file-access rule
+  // lists. This property is NOT defined inside the portmaster!
+  SeededDefault?: T;
 }
 
 export type IntSetting = BaseSetting<number, OptionType.Int>;

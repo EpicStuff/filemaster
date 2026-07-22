@@ -43,6 +43,26 @@ var (
 	cfgOptionFileAccessExecRulesOrder  = 52
 )
 
+// GlobalFileAccessReadRules / WriteRules / ExecRules return the
+// globally-configured file-access rule lists, cached under cfgLock and
+// refreshed on every config change by updateGlobalConfigProfile. They apply
+// beneath every profile's own rules: the fileaccess decision engine appends
+// them after the app's rules so app rules take precedence and unmatched
+// requests fall through to the global list before the profile's default
+// action. This mirrors upstream Portmaster's LayeredProfile.MatchEndpoint,
+// which checks each profile layer and then falls back to the global rule list.
+func GlobalFileAccessReadRules() []string  { return globalRuleList(&cfgFileAccessReadRules) }
+func GlobalFileAccessWriteRules() []string { return globalRuleList(&cfgFileAccessWriteRules) }
+func GlobalFileAccessExecRules() []string  { return globalRuleList(&cfgFileAccessExecRules) }
+
+// globalRuleList copies a cached global rule list under cfgLock. It takes a
+// pointer so the slice header is read while the lock is held, not at call time.
+func globalRuleList(cached *[]string) []string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	return append([]string(nil), (*cached)...)
+}
+
 func registerConfiguration() error { //nolint:maintidx
 	// Default Action -- inherited from the upstream "Default Network
 	// Action" option. Filemaster reuses the same key + values so the

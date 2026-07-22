@@ -118,6 +118,13 @@ export class AppViewComponent implements OnInit, OnDestroy {
 
   /**
    * @private
+   * Seeded default rule-lists for the current profile, keyed by config-option
+   * key. Null when the profile has no seed.
+   */
+  seededDefaults: Record<string, string[]> | null = null;
+
+  /**
+   * @private
    * All available settings.
    */
   allSettings: Setting[] = [];
@@ -222,10 +229,14 @@ export class AppViewComponent implements OnInit, OnDestroy {
       this.appProfile.Config = {}
     }
 
-    // If the value has been "reset to global value" we need to
-    // set the value to "undefined".
+    // On "Use default setting" reset: a key with a seeded default resets to the
+    // seed, everything else clears the per-app override (writes undefined) so it
+    // inherits/stacks the global value.
     if (event.isDefault) {
-      setAppSetting(this.appProfile!.Config, event.key, undefined);
+      const seed = this.profileSettings.find(
+        (setting) => setting.Key === event.key
+      )?.SeededDefault;
+      setAppSetting(this.appProfile!.Config, event.key, seed);
     } else {
       setAppSetting(this.appProfile!.Config, event.key, event.value);
     }
@@ -402,6 +413,24 @@ export class AppViewComponent implements OnInit, OnDestroy {
       })
     );
 
+    // watch the route parameters and load the seeded default rule-lists for the
+    // referenced profile. Emits null immediately and again on any failure so the
+    // settings still render for profiles without a seed.
+    const seededDefaultsStream: Observable<Record<string, string[]> | null> =
+      this.route.paramMap.pipe(
+        switchMap((params) => {
+          const source = params.get('source');
+          const id = params.get('id');
+          if (source === null || id === null) {
+            return of(null);
+          }
+          return this.profileService.getSeededDefaults(`${source}/${id}`).pipe(
+            catchError(() => of(null)),
+            startWith(null)
+          );
+        })
+      );
+
     // used to track changes to the object identity of the global configuration
     let prevousGlobal: FlatConfigObject = {};
 
@@ -414,8 +443,9 @@ export class AppViewComponent implements OnInit, OnDestroy {
         // watch the current "settings-view" setting, but only if it changes
         distinctUntilChanged()
       ),
+      seededDefaultsStream, // seeded default rule-lists for the current profile
     ]).subscribe(
-      async ([profile, queryMap, global, allSettings, viewSetting]) => {
+      async ([profile, queryMap, global, allSettings, viewSetting, seeded]) => {
         const previousProfile = this.appProfile;
 
         if (!!profile) {
@@ -549,13 +579,15 @@ export class AppViewComponent implements OnInit, OnDestroy {
         const profileChanged = previousProfile !== this.appProfile;
         const settingsChanged = allSettings !== this.allSettings;
         const globalChanged = global !== prevousGlobal;
+        const seededChanged = seeded !== this.seededDefaults;
 
         const settingsNeedUpdate =
-          profileChanged || settingsChanged || globalChanged;
+          profileChanged || settingsChanged || globalChanged || seededChanged;
 
         // save the current global config object so we can compare for identity changes
         // the next time we're executed
         prevousGlobal = global;
+        this.seededDefaults = seeded;
 
         if (!!this.appProfile && settingsNeedUpdate) {
           // filter the settings and remove all settings that are not
@@ -565,6 +597,7 @@ export class AppViewComponent implements OnInit, OnDestroy {
           this.profileSettings = allSettings.map((setting) => {
             setting.Value = profileConfig[setting.Key];
             setting.GlobalDefault = global[setting.Key];
+            setting.SeededDefault = seeded?.[setting.Key];
 
             return setting;
           });

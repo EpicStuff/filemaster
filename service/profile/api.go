@@ -44,7 +44,28 @@ func registerAPIEndpoints() error {
 		return err
 	}
 
+	if err := api.RegisterEndpoint(api.Endpoint{
+		Name:        "Get Seeded Rule Defaults",
+		Description: "Returns the seeded file-access rule lists a profile resets to, keyed by config option. Empty when the profile has no seed (its rule lists reset to the global rules instead).",
+		Path:        "profile/seeded-defaults/{scopedid:.+}",
+		Read:        api.PermitUser,
+		StructFunc:  handleGetSeededDefaults,
+	}); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func handleGetSeededDefaults(ar *api.Request) (interface{}, error) {
+	scopedID := ar.URLVars["scopedid"]
+	p, err := getProfile(scopedID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get profile %s: %w", scopedID, err)
+	}
+	// Computed on read, never persisted, so it always reflects the current seed
+	// definition (see SeededRuleDefaults). nil marshals to an empty object.
+	return SeededRuleDefaults(p.ID, p.PresentationPath), nil
 }
 
 type mergeProfilesRequest struct {

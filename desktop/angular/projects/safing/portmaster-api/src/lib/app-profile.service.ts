@@ -119,6 +119,18 @@ export class AppProfileService {
     );
   }
 
+  /**
+   * Returns the seeded default rule-lists for a profile, keyed by
+   * config-option key. Empty/null when the profile has no seed.
+   *
+   * @param scopedID The scoped profile ID (source/id, e.g. local/_systemd).
+   */
+  getSeededDefaults(scopedID: string): Observable<Record<string, string[]> | null> {
+    return this.http.get<Record<string, string[]> | null>(
+      `${this.httpAPI}/v1/profile/seeded-defaults/${scopedID}`
+    );
+  }
+
   /** Returns all possible process tags. */
   tagDescriptions(): Observable<TagDescription[]> {
     return this.http

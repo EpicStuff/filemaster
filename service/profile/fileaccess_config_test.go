@@ -36,3 +36,26 @@ func TestFileAccessWriteRulesHidden(t *testing.T) {
 		}
 	}
 }
+
+// TestGlobalFileAccessRulesWired verifies the accessors the fileaccess decision
+// engine uses to stack the global rule lists beneath each profile's own rules
+// are wired to their config options: after registration each resolves without
+// panicking and returns its registered default (empty). Setting live values
+// requires booting the config module, which unit tests here don't do; the
+// stacking semantics are covered in service/fileaccess (see
+// TestGlobalRulesStackBeneathProfileRules).
+func TestGlobalFileAccessRulesWired(t *testing.T) {
+	if err := registerConfiguration(); err != nil {
+		t.Fatalf("registerConfiguration: %v", err)
+	}
+
+	for name, got := range map[string][]string{
+		"read":  GlobalFileAccessReadRules(),
+		"write": GlobalFileAccessWriteRules(),
+		"exec":  GlobalFileAccessExecRules(),
+	} {
+		if len(got) != 0 {
+			t.Errorf("Global %s rules = %v, want empty default", name, got)
+		}
+	}
+}

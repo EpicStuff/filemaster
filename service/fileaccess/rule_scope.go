@@ -55,6 +55,22 @@ func combineScopedRules(read, write, exec []string) []string {
 	return combined
 }
 
+// effectiveScopedRules stamps a profile's own per-operation rule lists, then
+// appends the globally-configured rules beneath them. Because the decision
+// engine matches first-to-last (PathRules.LookupEvent), the profile's rules
+// take precedence; requests they don't match fall through to the global rules
+// before hitting the profile's default action. Ported from upstream
+// Portmaster's LayeredProfile.MatchEndpoint, which checks each profile layer
+// and then falls back to the global rule list (cfgEndpoints).
+func effectiveScopedRules(read, write, exec []string) []string {
+	rules := combineScopedRules(read, write, exec)
+	return append(rules, combineScopedRules(
+		profile.GlobalFileAccessReadRules(),
+		profile.GlobalFileAccessWriteRules(),
+		profile.GlobalFileAccessExecRules(),
+	)...)
+}
+
 // tagScopedRuleEntry rewrites an untagged stored entry ("<sign> <payload>") into
 // the internal operation-tagged form parsed by ParseRule.
 func tagScopedRuleEntry(entry string, op FileOp) string {

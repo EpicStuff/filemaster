@@ -15,6 +15,13 @@ var (
 	cfgLock sync.RWMutex
 
 	cfgDefaultAction uint8
+
+	// Global file-access rule lists, cached on every config change so the
+	// fileaccess decision engine can stack them beneath each profile's own
+	// rules without re-reading config per event. Mirrors cfgDefaultAction.
+	cfgFileAccessReadRules  []string
+	cfgFileAccessWriteRules []string
+	cfgFileAccessExecRules  []string
 )
 
 func registerGlobalConfigProfileUpdater() error {
@@ -64,6 +71,10 @@ func updateGlobalConfigProfile(_ context.Context) error {
 		lastErr = fmt.Errorf(`default action "%s" invalid`, action)
 		cfgDefaultAction = DefaultActionBlock // safe-by-default
 	}
+
+	cfgFileAccessReadRules = cfgOptionFileAccessReadRules()
+	cfgFileAccessWriteRules = cfgOptionFileAccessWriteRules()
+	cfgFileAccessExecRules = cfgOptionFileAccessExecRules()
 
 	// Build config.
 	newConfig := make(map[string]interface{})

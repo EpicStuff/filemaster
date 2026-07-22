@@ -1,8 +1,6 @@
 package profile
 
 import (
-	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/safing/portmaster/base/log"
@@ -83,157 +81,6 @@ Additionally, the settings for the System DNS Client are specially pre-configure
 	// PortmasterNotifierProfileDescription is the description used for the Filemaster Notifier.
 	PortmasterNotifierProfileDescription = `This is the Filemaster UI Tray Notifier.`
 )
-
-var (
-	filemasterSeedPathsMu sync.RWMutex
-	filemasterSeedPaths   filemasterFileAccessSeeds
-)
-
-// filemasterFileAccessSeeds separates user-facing File Access from Execute
-// locations, keeping the seeded policy easy to review and edit.
-type filemasterFileAccessSeeds struct {
-	access []string
-	exec   []string
-}
-
-// SetFilemasterSeedPaths supplies the stable runtime directories used when a
-// Filemaster special profile is first created. binDir and dataDir are granted
-// File Access; only the executable and binDir are executable. Existing
-// profiles are left untouched: during development, delete the profile database
-// to recreate them with new seed values.
-func SetFilemasterSeedPaths(binDir, dataDir string) {
-	paths := []string{binDir, dataDir}
-	seen := make(map[string]struct{}, len(paths))
-	access := make([]string, 0, len(paths))
-	for _, path := range paths {
-		if path == "" {
-			continue
-		}
-		path = filepath.Clean(path)
-		if path == "." || path == "/" {
-			continue
-		}
-		if _, ok := seen[path]; ok {
-			continue
-		}
-		seen[path] = struct{}{}
-		access = append(access, path)
-	}
-
-	filemasterSeedPathsMu.Lock()
-	filemasterSeedPaths = filemasterFileAccessSeeds{access: access}
-	if binDir != "" {
-		binDir = filepath.Clean(binDir)
-		if binDir != "." && binDir != "/" {
-			filemasterSeedPaths.exec = []string{binDir}
-		}
-	}
-	filemasterSeedPathsMu.Unlock()
-}
-
-func filemasterFileAccessRules(executablePath string) []string {
-	seen := make(map[string]struct{})
-	rules := make([]string, 0, 4)
-
-	addFile := func(path string) {
-		if path == "" {
-			return
-		}
-		path = filepath.Clean(path)
-		if _, ok := seen["file:"+path]; ok {
-			return
-		}
-		seen["file:"+path] = struct{}{}
-		rules = append(rules, "+ "+path)
-	}
-	addDir := func(path string) {
-		if path == "" {
-			return
-		}
-		path = filepath.Clean(path)
-		if path == "." || path == "/" {
-			return
-		}
-		if _, ok := seen["dir:"+path]; ok {
-			return
-		}
-		seen["dir:"+path] = struct{}{}
-		rules = append(rules, "+ "+path+"/**")
-	}
-
-	addFile(executablePath)
-	addDir(filepath.Dir(executablePath))
-
-	filemasterSeedPathsMu.RLock()
-	paths := append([]string(nil), filemasterSeedPaths.access...)
-	filemasterSeedPathsMu.RUnlock()
-	for _, path := range paths {
-		addDir(path)
-	}
-
-	return rules
-}
-
-func filemasterFileAccessExecRules(executablePath string) []string {
-	seen := make(map[string]struct{})
-	rules := make([]string, 0, 3)
-	addFile := func(path string) {
-		if path == "" {
-			return
-		}
-		path = filepath.Clean(path)
-		if _, ok := seen["file:"+path]; ok {
-			return
-		}
-		seen["file:"+path] = struct{}{}
-		rules = append(rules, "+ "+path)
-	}
-	addDir := func(path string) {
-		if path == "" {
-			return
-		}
-		path = filepath.Clean(path)
-		if path == "." || path == "/" {
-			return
-		}
-		if _, ok := seen["dir:"+path]; ok {
-			return
-		}
-		seen["dir:"+path] = struct{}{}
-		rules = append(rules, "+ "+path+"/**")
-	}
-
-	addFile(executablePath)
-	addDir(filepath.Dir(executablePath))
-	filemasterSeedPathsMu.RLock()
-	paths := append([]string(nil), filemasterSeedPaths.exec...)
-	filemasterSeedPathsMu.RUnlock()
-	for _, path := range paths {
-		addDir(path)
-	}
-	return rules
-}
-
-func systemdFileAccessRules() []string {
-	paths := []string{
-		"/run/systemd",
-		"/run/dbus",
-		"/var/lib/systemd",
-		"/etc/systemd",
-		"/usr/lib/systemd",
-		"/lib/systemd",
-		"/usr/lib64/systemd",
-		"/lib64/systemd",
-		"/proc",
-		"/sys",
-		"/dev",
-	}
-	rules := make([]string, 0, len(paths))
-	for _, path := range paths {
-		rules = append(rules, "+ "+path+"/**")
-	}
-	return rules
-}
 
 func isSpecialProfileID(id string) bool {
 	switch id {
@@ -341,61 +188,40 @@ func createSpecialProfile(profileID string, path string) *Profile {
 		})
 
 	case SystemdProfileID:
-		systemdRules := systemdFileAccessRules()
+		// The internal write list is inactive until LSM support exists.
 		return New(&Profile{
 			ID:               SystemdProfileID,
 			Source:           SourceLocal,
 			PresentationPath: path,
-			Config: map[string]interface{}{
-				// Seed the two user-facing operations. The internal write list
-				// is inactive until LSM support exists.
-				CfgOptionFileAccessReadRulesKey: systemdRules,
-				CfgOptionFileAccessExecRulesKey: systemdRules,
-			},
+			Config:           SeededRuleDefaults(SystemdProfileID, path),
 		})
 
 	case PortmasterProfileID:
-		filemasterReadRules := filemasterFileAccessRules(path)
-		filemasterExecRules := filemasterFileAccessExecRules(path)
+		seed := SeededRuleDefaults(PortmasterProfileID, path)
+		seed[CfgOptionDefaultActionKey] = DefaultActionPermitValue
 		return New(&Profile{
 			ID:               PortmasterProfileID,
 			Source:           SourceLocal,
 			PresentationPath: path,
-			Config: map[string]interface{}{
-				CfgOptionDefaultActionKey: DefaultActionPermitValue,
-				// File Access includes the data directory, while Execute is
-				// limited to the executable and binary directory.
-				CfgOptionFileAccessReadRulesKey: filemasterReadRules,
-				CfgOptionFileAccessExecRulesKey: filemasterExecRules,
-			},
+			Config:           seed,
 		})
 
 	case PortmasterAppProfileID:
-		filemasterReadRules := filemasterFileAccessRules(path)
-		filemasterExecRules := filemasterFileAccessExecRules(path)
 		return New(&Profile{
 			ID:               PortmasterAppProfileID,
 			Source:           SourceLocal,
 			PresentationPath: path,
-			Config: map[string]interface{}{
-				CfgOptionFileAccessReadRulesKey: filemasterReadRules,
-				CfgOptionFileAccessExecRulesKey: filemasterExecRules,
-			},
-			Internal: true,
+			Config:           SeededRuleDefaults(PortmasterAppProfileID, path),
+			Internal:         true,
 		})
 
 	case PortmasterNotifierProfileID:
-		filemasterReadRules := filemasterFileAccessRules(path)
-		filemasterExecRules := filemasterFileAccessExecRules(path)
 		return New(&Profile{
 			ID:               PortmasterNotifierProfileID,
 			Source:           SourceLocal,
 			PresentationPath: path,
-			Config: map[string]interface{}{
-				CfgOptionFileAccessReadRulesKey: filemasterReadRules,
-				CfgOptionFileAccessExecRulesKey: filemasterExecRules,
-			},
-			Internal: true,
+			Config:           SeededRuleDefaults(PortmasterNotifierProfileID, path),
+			Internal:         true,
 		})
 
 	default:

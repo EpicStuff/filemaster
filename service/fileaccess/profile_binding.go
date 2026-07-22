@@ -106,7 +106,7 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	// returned snapshot never retains the raw rule slice.
 	lp.LockForUsage()
 	id := local.ID
-	rawRules := combineScopedRules(local.GetFileAccessReadRules(), local.GetFileAccessWriteRules(), local.GetFileAccessExecRules())
+	rawRules := effectiveScopedRules(local.GetFileAccessReadRules(), local.GetFileAccessWriteRules(), local.GetFileAccessExecRules())
 	defaultAction := lp.DefaultAction()
 	source := string(local.Source)
 	name := local.Name

@@ -13,6 +13,40 @@ func globRule(v Verdict, op FileOp, pattern string) PathRule {
 	return PathRule{Pattern: pattern, Verdict: v, Operation: op, OperationScoped: true}
 }
 
+// TestGlobalRulesStackBeneathProfileRules exercises the ordering effectiveScopedRules
+// produces: a profile's own rules first, then the globally-configured rules.
+// Because evaluation is first-match-wins, the profile takes precedence, requests
+// it doesn't match fall through to the global rules, and only then to the default
+// action -- mirroring upstream Portmaster's LayeredProfile.MatchEndpoint (app
+// layers, then the global rule list, then the default).
+func TestGlobalRulesStackBeneathProfileRules(t *testing.T) {
+	profileRead := []string{"- /shared/blocked"}
+	globalRead := []string{"+ /shared/**", "+ /global/**"}
+
+	// Same composition effectiveScopedRules performs: profile rules, then global.
+	combined := append(
+		combineScopedRules(profileRead, nil, nil),
+		combineScopedRules(globalRead, nil, nil)...,
+	)
+	rules := ParseRules(combined)
+	rules.Default = VerdictDeny
+
+	// Profile rule wins over the conflicting global rule (first match): deny is
+	// neither the global verdict (allow) nor the default (deny would be ambiguous,
+	// so the global allow makes this unambiguous).
+	if got := rules.DecideOperation("/shared/blocked", DecisionAccess, false); got != VerdictDeny {
+		t.Errorf("/shared/blocked = %s, want deny (profile rule precedes global allow)", got)
+	}
+	// Global rule applies where the profile is silent (allow, distinct from the deny default).
+	if got := rules.DecideOperation("/global/file", DecisionAccess, false); got != VerdictAllow {
+		t.Errorf("/global/file = %s, want allow (global rule applies beneath profile)", got)
+	}
+	// No profile or global rule matches -> default action.
+	if got := rules.DecideOperation("/elsewhere", DecisionAccess, false); got != VerdictDeny {
+		t.Errorf("/elsewhere = %s, want deny (default)", got)
+	}
+}
+
 func TestDecisionOpRuntimeObservable(t *testing.T) {
 	observable := map[DecisionOp]bool{
 		DecisionAccess:  true,

@@ -267,7 +267,7 @@ func (h *ProfileHandler) setSelfProfileRunning(p *profile.Profile, pid int32) {
 
 	p.RLock()
 	id := p.ID
-	rawRules := combineScopedRules(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
+	rawRules := effectiveScopedRules(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
 	source := string(p.Source)
 	name := p.Name
 	linkedPath := p.LinkedPath
@@ -376,7 +376,7 @@ func (h *ProfileHandler) PublishProfileSnapshot(p *profile.Profile) {
 func (h *ProfileHandler) publishProfileSnapshotRunning(p *profile.Profile) {
 	p.RLock()
 	id := p.ID
-	rawRules := combineScopedRules(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
+	rawRules := effectiveScopedRules(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
 	source := string(p.Source)
 	p.RUnlock()
 	defaultAction := p.EffectiveDefaultAction()
