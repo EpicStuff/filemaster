@@ -21,21 +21,43 @@ func ruleScopeOp(op FileOp) FileOp {
 	return op
 }
 
+// fileAccessListOp folds an operation to the operation whose rule list governs
+// it -- OpRead, OpWrite or OpExec -- reporting ok=false for anything else. It is
+// the single routing primitive every decision and persistence path funnels
+// through (DecisionSnapshot.rulesFor, fileAccessRuleKey, the fallback
+// PromptHandler, and the permanent-rule overlay), so an unsupported operation
+// can never silently select the Access, Write or Execute list by accident:
+// callers must fail closed on ok=false rather than defaulting to a list.
+func fileAccessListOp(op FileOp) (FileOp, bool) {
+	switch ruleScopeOp(op) {
+	case OpRead:
+		return OpRead, true
+	case OpWrite:
+		return OpWrite, true
+	case OpExec:
+		return OpExec, true
+	default:
+		return 0, false
+	}
+}
+
 // fileAccessRuleKey maps an operation to the profile config key whose rule list
 // governs it. It is the persistence-side counterpart to
-// DecisionSnapshot.rulesFor: both route through ruleScopeOp so an operation
+// DecisionSnapshot.rulesFor: both route through fileAccessListOp so an operation
 // resolves to the same list on the decision and storage paths, and both fail
 // closed (ok=false) rather than defaulting an unsupported operation to a list.
 func fileAccessRuleKey(op FileOp) (string, bool) {
-	switch ruleScopeOp(op) {
-	case OpRead:
-		return profile.CfgOptionFileAccessReadRulesKey, true
+	listOp, ok := fileAccessListOp(op)
+	if !ok {
+		return "", false
+	}
+	switch listOp {
 	case OpWrite:
 		return profile.CfgOptionFileAccessWriteRulesKey, true
 	case OpExec:
 		return profile.CfgOptionFileAccessExecRulesKey, true
 	default:
-		return "", false
+		return profile.CfgOptionFileAccessReadRulesKey, true
 	}
 }
 

@@ -2,6 +2,7 @@ package fileaccess
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -92,18 +93,22 @@ type exeRuleSet struct {
 	exec  PathRules
 }
 
-// list returns the list governing op. Opens fold to the read list (ruleScopeOp);
-// an unrecognized operation falls back to the read list, since the fallback
-// handler only ever sees opens and execs and the authoritative decision path
-// already fails closed on unsupported operations.
-func (s *exeRuleSet) list(op FileOp) *PathRules {
-	switch ruleScopeOp(op) {
+// list returns the list governing op. Opens fold to the read list. It routes
+// through the shared fileAccessListOp so an unsupported operation fails closed
+// (ok=false) instead of silently landing in the read list, matching the
+// authoritative snapshot router.
+func (s *exeRuleSet) list(op FileOp) (*PathRules, bool) {
+	listOp, ok := fileAccessListOp(op)
+	if !ok {
+		return nil, false
+	}
+	switch listOp {
 	case OpWrite:
-		return &s.write
+		return &s.write, true
 	case OpExec:
-		return &s.exec
+		return &s.exec, true
 	default:
-		return &s.read
+		return &s.read, true
 	}
 }
 
@@ -177,7 +182,13 @@ func (h *PromptHandler) lookup(exe, path string, op FileOp, isDir bool) (Verdict
 	if !ok {
 		return 0, false
 	}
-	return set.list(op).match(path, isDir)
+	list, ok := set.list(op)
+	if !ok {
+		// Unsupported operation: no match, so the caller prompts/denies rather
+		// than consulting an unrelated operation's rules.
+		return 0, false
+	}
+	return list.match(path, isDir)
 }
 
 func (h *PromptHandler) appendRule(exe, pattern string, op FileOp, isDir bool, v Verdict) {
@@ -207,7 +218,11 @@ func (h *PromptHandler) appendRuleEntry(exe string, op FileOp, rule PathRule) er
 		set = h.seedRuleSet()
 		h.rules[exe] = set
 	}
-	list := set.list(op)
+	list, ok := set.list(op)
+	if !ok {
+		h.rulesMu.Unlock()
+		return errors.New("unroutable rule operation")
+	}
 	rules := make([]PathRule, 0, len(list.Rules)+1)
 	rules = append(rules, rule)
 	for _, existing := range list.Rules {

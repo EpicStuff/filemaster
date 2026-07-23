@@ -1,5 +1,7 @@
 package fileaccess
 
+import "github.com/safing/portmaster/service/profile"
+
 // DecisionSnapshot is the immutable file-access policy used by a decision
 // worker. It holds one parsed rule list per operation plus one shared default
 // action. Rules are parsed while building the snapshot and must never be mutated
@@ -20,15 +22,35 @@ type DecisionSnapshot struct {
 }
 
 func newDecisionSnapshot(profileID, source string, defaultAction uint8, lists ruleLists, revision uint64) *DecisionSnapshot {
+	// Each parsed list carries the shared default resolved to a Verdict, so the
+	// non-prompt DecideOperation engine falls back to the profile's own default
+	// (not a hardcoded allow) and the three lists cannot diverge from each other.
+	def := verdictFromDefaultAction(defaultAction)
+	read := ParseRules(lists.read)
+	write := ParseRules(lists.write)
+	exec := ParseRules(lists.exec)
+	read.Default, write.Default, exec.Default = def, def, def
 	return &DecisionSnapshot{
 		ProfileID:     profileID,
 		Source:        source,
 		DefaultAction: defaultAction,
-		Read:          ParseRules(lists.read),
-		Write:         ParseRules(lists.write),
-		Exec:          ParseRules(lists.exec),
+		Read:          read,
+		Write:         write,
+		Exec:          exec,
 		Revision:      revision,
 	}
+}
+
+// verdictFromDefaultAction resolves the shared profile default action to the
+// Verdict the non-prompt DecideOperation engine applies on no match. Permit
+// allows; every other action (Block, Ask, NotSet) fails closed to Deny, since a
+// non-prompt operation cannot surface an Ask prompt. The runtime prompt path does
+// not use this -- it applies DefaultAction directly and can prompt on Ask.
+func verdictFromDefaultAction(defaultAction uint8) Verdict {
+	if defaultAction == profile.DefaultActionPermit {
+		return VerdictAllow
+	}
+	return VerdictDeny
 }
 
 // rulesFor centralizes operation -> list routing. Every decision path selects
@@ -36,15 +58,17 @@ func newDecisionSnapshot(profileID, source string, defaultAction uint8, lists ru
 // another operation's rules: ok is false for anything that is not an Access,
 // Write or Execute operation, and callers must fail closed on it.
 func (s *DecisionSnapshot) rulesFor(op FileOp) (PathRules, bool) {
-	switch ruleScopeOp(op) {
-	case OpRead:
-		return s.Read, true
+	listOp, ok := fileAccessListOp(op)
+	if !ok {
+		return PathRules{}, false
+	}
+	switch listOp {
 	case OpWrite:
 		return s.Write, true
 	case OpExec:
 		return s.Exec, true
 	default:
-		return PathRules{}, false
+		return s.Read, true
 	}
 }
 

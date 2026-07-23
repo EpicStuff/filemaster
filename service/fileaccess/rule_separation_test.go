@@ -3,9 +3,28 @@ package fileaccess
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/safing/portmaster/service/profile"
 )
+
+// recordingStore is a minimal RuleStore that records the operation each entry
+// was routed to, for asserting the persistence side of the router.
+type recordingStore struct {
+	mu      sync.Mutex
+	ops     []FileOp
+	entries []string
+}
+
+func (s *recordingStore) ID() string { return "rec" }
+
+func (s *recordingStore) AppendRule(op FileOp, entry string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ops = append(s.ops, op)
+	s.entries = append(s.entries, entry)
+	return nil
+}
 
 // This file covers the separated per-operation rule-list model: a DecisionSnapshot
 // holds independent Access(/Read), Write and Execute lists sharing one default,
@@ -83,7 +102,11 @@ func TestOpenEventsUseAccessList(t *testing.T) {
 
 func TestUnknownOperationFailsClosed(t *testing.T) {
 	s := snapshotOf([]string{`+ /**`}, []string{`+ /**`}, []string{`+ /**`})
-	// An operation outside {read, write, exec} must not select any list.
+	// Every router funnels through fileAccessListOp; all of them must fail closed
+	// on an operation outside {read, write, exec} rather than picking a list.
+	if _, ok := fileAccessListOp(FileOp(200)); ok {
+		t.Fatalf("fileAccessListOp must fail closed on an unknown operation")
+	}
 	if _, _, ok := s.Lookup("/anything", FileOp(200), false); ok {
 		t.Fatalf("unknown operation must be reported unsupported, not routed to a list")
 	}
@@ -93,6 +116,67 @@ func TestUnknownOperationFailsClosed(t *testing.T) {
 	// fileAccessRuleKey (the persistence-side router) must fail closed too.
 	if _, ok := fileAccessRuleKey(FileOp(200)); ok {
 		t.Fatalf("fileAccessRuleKey must fail closed on an unknown operation")
+	}
+}
+
+func TestFallbackHandlerRoutesFailClosed(t *testing.T) {
+	// The fallback PromptHandler's per-exe router must fail closed on an
+	// unsupported operation instead of defaulting to the read list, and its
+	// per-operation lists must not leak across operations.
+	h := NewPromptHandler(&scriptedPrompter{}, nil, time.Second)
+	if err := h.appendRuleEntry("exe", OpExec, PathRule{Pattern: "/x", Verdict: VerdictAllow, Exact: true}); err != nil {
+		t.Fatalf("seed exec rule: %v", err)
+	}
+	if _, ok := h.lookup("exe", "/x", FileOp(200), false); ok {
+		t.Fatalf("fallback lookup must fail closed on an unsupported operation")
+	}
+	if _, ok := h.lookup("exe", "/x", OpRead, false); ok {
+		t.Fatalf("exec-list rule leaked into a read lookup")
+	}
+	if _, ok := h.lookup("exe", "/x", OpExec, false); !ok {
+		t.Fatalf("exec-list rule did not answer an exec lookup")
+	}
+	if err := h.appendRuleEntry("exe", FileOp(200), PathRule{Pattern: "/y", Verdict: VerdictAllow, Exact: true}); err == nil {
+		t.Fatalf("appendRuleEntry must reject an unsupported operation")
+	}
+}
+
+func TestOverlayRejectsUnsupportedOperation(t *testing.T) {
+	// A learned rule with an unsupported operation must not enter the overlay:
+	// otherwise it would land in the read list and then loop forever in dirty
+	// retries because storage rejects it.
+	p := NewRulePersistence(nil, RulePersistenceOptions{})
+	store := &recordingStore{}
+	snap := newDecisionSnapshot("p", "local", profile.DefaultActionAsk, ruleLists{}, 1)
+	merged := p.ApplyEvent(snap, store, "/x", FileOp(200), false, VerdictAllow)
+	if merged != snap {
+		t.Fatalf("unsupported-op overlay created a replacement snapshot")
+	}
+	for name, list := range map[string]PathRules{"read": merged.Read, "write": merged.Write, "exec": merged.Exec} {
+		if _, ok := list.Lookup("/x"); ok {
+			t.Fatalf("unsupported-op rule leaked into the %s list", name)
+		}
+	}
+	if len(p.Diagnostics()) != 0 {
+		t.Fatalf("unsupported-op rule created overlay state: %v", p.Diagnostics())
+	}
+}
+
+func TestDecideOperationUsesSharedDefault(t *testing.T) {
+	// On no match the non-prompt engine applies the shared profile default
+	// resolved to a Verdict -- not a hardcoded allow. Permit allows; Block and
+	// Ask (which cannot prompt here) fail closed to deny.
+	block := newDecisionSnapshot("p", "local", profile.DefaultActionBlock, ruleLists{}, 1)
+	if got := block.DecideOperation("/x", DecisionAccess, false); got != VerdictDeny {
+		t.Fatalf("block default: DecideOperation = %v, want deny", got)
+	}
+	permit := newDecisionSnapshot("p", "local", profile.DefaultActionPermit, ruleLists{}, 1)
+	if got := permit.DecideOperation("/x", DecisionExecute, false); got != VerdictAllow {
+		t.Fatalf("permit default: DecideOperation = %v, want allow", got)
+	}
+	ask := newDecisionSnapshot("p", "local", profile.DefaultActionAsk, ruleLists{}, 1)
+	if got := ask.DecideOperation("/x", DecisionWrite, false); got != VerdictDeny {
+		t.Fatalf("ask default: DecideOperation = %v, want deny (fail closed)", got)
 	}
 }
 

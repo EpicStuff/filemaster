@@ -302,9 +302,14 @@ func (p *RulePersistence) ApplyEvent(snapshot *DecisionSnapshot, store RuleStore
 }
 
 func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pattern string, operation FileOp, directory bool, verdict Verdict, allowBinding bool) (*DecisionSnapshot, bool) {
-	// Opens are governed by the read-rule list, so a learned Always rule for an
-	// open persists and matches as a read rule.
-	operation = ruleScopeOp(operation)
+	// Route the operation to its governing list up front and fail closed on an
+	// unsupported one, so an unroutable rule never enters the overlay (where it
+	// would otherwise land in the read list and then loop forever in dirty
+	// retries because storage rejects it). Opens fold to the read list.
+	operation, ok := fileAccessListOp(operation)
+	if !ok {
+		return snapshot, false
+	}
 	rule, ok := canonicalPermanentRule(pattern, operation, directory, verdict)
 	if !ok || snapshot == nil || store == nil {
 		return snapshot, false
@@ -483,10 +488,16 @@ func (state *dirtyRuleProfile) publishLocked(base *DecisionSnapshot) *DecisionSn
 	// Newest-first: a later learned rule outranks an older one for the same path.
 	sort.Slice(rules, func(i, j int) bool { return rules[i].generation > rules[j].generation })
 	// Route each learned rule to its operation's overlay so it merges into that
-	// list only, never suppressing an equivalent rule in another operation.
+	// list only, never suppressing an equivalent rule in another operation. Rules
+	// with an unroutable operation are skipped defensively; apply rejects them
+	// before they ever reach the overlay.
 	var read, write, exec []permanentRule
 	for _, rule := range rules {
-		switch ruleScopeOp(rule.operation) {
+		listOp, ok := fileAccessListOp(rule.operation)
+		if !ok {
+			continue
+		}
+		switch listOp {
 		case OpWrite:
 			write = append(write, rule)
 		case OpExec:
@@ -660,8 +671,12 @@ func snapshotWithDurableExactRule(base *DecisionSnapshot, rule permanentRule) *D
 	if base == nil {
 		return nil
 	}
+	listOp, ok := fileAccessListOp(rule.operation)
+	if !ok {
+		return base
+	}
 	updated := *base
-	switch ruleScopeOp(rule.operation) {
+	switch listOp {
 	case OpWrite:
 		updated.Write = pathRulesWithDurableExactRule(base.Write, rule)
 	case OpExec:

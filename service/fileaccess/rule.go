@@ -82,11 +82,19 @@ func (rs PathRules) Decide(_ context.Context, e *FileEvent) Verdict {
 	return rs.Default
 }
 
-// Lookup returns the first matching verdict for path (directory discriminator
-// ignored), or (0, false) if no rule applies. Unlike Decide it does not fall
-// back to Default -- the caller decides what "no match" means.
+// Lookup returns the first matching verdict for path with the directory
+// discriminator ignored -- a DirectoryOnly rule still matches by path -- or
+// (0, false) if no rule applies. Unlike Decide it does not fall back to Default;
+// the caller decides what "no match" means. It is an inspection helper (tests,
+// diagnostics); event decisions use match/Lookup on the snapshot, which honor
+// DirectoryOnly.
 func (rs PathRules) Lookup(path string) (Verdict, bool) {
-	return rs.match(path, false)
+	for _, r := range rs.Rules {
+		if r.Matches(path) {
+			return r.Verdict, true
+		}
+	}
+	return 0, false
 }
 
 func matchPathPattern(pattern, path string) bool {
