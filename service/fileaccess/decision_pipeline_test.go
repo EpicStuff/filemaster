@@ -159,12 +159,11 @@ func (p *blockingPrompter) Prompt(context.Context, FileEvent, time.Duration) (st
 type askLookup struct{ store RuleStore }
 
 func (l askLookup) Lookup(context.Context, int32) (LookupResult, error) {
-	snapshot := newDecisionSnapshot("profile", "local", profile.DefaultActionAsk, nil, 1)
+	snapshot := newDecisionSnapshot("profile", "local", profile.DefaultActionAsk, ruleLists{}, 1)
 	return LookupResult{
 		Path:          "/usr/bin/test",
 		Store:         l.store,
 		Snapshot:      snapshot,
-		ParsedRules:   snapshot.Rules,
 		DefaultAction: snapshot.DefaultAction,
 		ProfileSource: snapshot.Source,
 	}, nil
@@ -341,11 +340,10 @@ func TestDecisionPipelineFilemasterSelfSnapshot(t *testing.T) {
 	lookup := &fakeLookup{err: errors.New("normal lookup must not run")}
 	handler := NewProfileHandler(lookup, &scriptedPrompter{}, nil, time.Second, nopLogger{})
 	store := &fakeRuleStore{id: profile.PortmasterProfileID}
-	snapshot := newDecisionSnapshot(profile.PortmasterProfileID, "local", profile.DefaultActionAsk, []string{"- /tmp/self"}, 1)
+	snapshot := newDecisionSnapshot(profile.PortmasterProfileID, "local", profile.DefaultActionAsk, ruleLists{read: []string{"- /tmp/self"}}, 1)
 	handler.setSelfProfile(77, LookupResult{
 		Store:         store,
 		Snapshot:      snapshot,
-		ParsedRules:   snapshot.Rules,
 		DefaultAction: snapshot.DefaultAction,
 		ProfileSource: snapshot.Source,
 	})

@@ -74,7 +74,7 @@ type processProfileLookup struct {
 
 type ruleCacheEntry struct {
 	mu       sync.Mutex
-	rawRules []string
+	lists    ruleLists
 	revision uint64
 	snapshot atomic.Pointer[DecisionSnapshot]
 }
@@ -106,7 +106,7 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	// returned snapshot never retains the raw rule slice.
 	lp.LockForUsage()
 	id := local.ID
-	rawRules := effectiveScopedRules(local.GetFileAccessReadRules(), local.GetFileAccessWriteRules(), local.GetFileAccessExecRules())
+	lists := scopedRuleLists(local.GetFileAccessReadRules(), local.GetFileAccessWriteRules(), local.GetFileAccessExecRules())
 	defaultAction := lp.DefaultAction()
 	source := string(local.Source)
 	name := local.Name
@@ -114,11 +114,10 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	lp.UnlockForUsage()
 	store := &profileRuleStore{p: local, source: profile.ProfileSource(source), id: id}
 	l.bindPersistentStoreFor(source, id, store)
-	snapshot := l.snapshotFor(id, source, defaultAction, rawRules)
+	snapshot := l.snapshotFor(id, source, defaultAction, lists)
 	l.bindPersistentStore(snapshot, store)
 	res.Store = store
 	res.Snapshot = snapshot
-	res.ParsedRules = snapshot.Rules
 	res.DefaultAction = snapshot.DefaultAction
 	res.ProfileSource = source
 	res.ProfileName = name
@@ -126,8 +125,8 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	return res, nil
 }
 
-func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint8, raw []string) *DecisionSnapshot {
-	snapshot, replaced := l.snapshotForRunning(id, source, defaultAction, raw)
+func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint8, lists ruleLists) *DecisionSnapshot {
+	snapshot, replaced := l.snapshotForRunning(id, source, defaultAction, lists)
 	if !replaced {
 		return snapshot
 	}
@@ -143,7 +142,7 @@ func (l *processProfileLookup) snapshotFor(id, source string, defaultAction uint
 // snapshotForRunning updates the immutable cache without notifying the
 // guarded observer. Callers holding the lifecycle activity barrier publish the
 // returned snapshot through their corresponding Running path.
-func (l *processProfileLookup) snapshotForRunning(id, source string, defaultAction uint8, raw []string) (*DecisionSnapshot, bool) {
+func (l *processProfileLookup) snapshotForRunning(id, source string, defaultAction uint8, lists ruleLists) (*DecisionSnapshot, bool) {
 	cacheKey := source + "/" + id
 	value, _ := l.parseCache.LoadOrStore(cacheKey, &ruleCacheEntry{})
 	entry := value.(*ruleCacheEntry)
@@ -152,14 +151,18 @@ func (l *processProfileLookup) snapshotForRunning(id, source string, defaultActi
 	if snapshot := entry.snapshot.Load(); snapshot != nil &&
 		snapshot.Source == source &&
 		snapshot.DefaultAction == defaultAction &&
-		sameRuleEntries(entry.rawRules, raw) {
+		sameRuleLists(entry.lists, lists) {
 		entry.mu.Unlock()
 		return l.mergePersistentRules(snapshot), false
 	}
 
-	entry.rawRules = append(entry.rawRules[:0], raw...)
+	entry.lists = ruleLists{
+		read:  append(entry.lists.read[:0], lists.read...),
+		write: append(entry.lists.write[:0], lists.write...),
+		exec:  append(entry.lists.exec[:0], lists.exec...),
+	}
 	entry.revision++
-	snapshot := newDecisionSnapshot(id, source, defaultAction, entry.rawRules, entry.revision)
+	snapshot := newDecisionSnapshot(id, source, defaultAction, entry.lists, entry.revision)
 	entry.snapshot.Store(snapshot)
 	entry.mu.Unlock()
 	snapshot = l.mergePersistentRules(snapshot)
@@ -238,21 +241,21 @@ func (s *profileRuleStore) ruleStoreIdentity() any {
 	return s.p
 }
 
-func (s *profileRuleStore) AppendRule(entry string) error {
+func (s *profileRuleStore) AppendRule(op FileOp, entry string) error {
 	if entry == "" {
 		return errors.New("empty rule entry")
 	}
-	op, stored, ok := splitScopedRuleEntry(entry)
+	key, ok := fileAccessRuleKey(op)
 	if !ok {
-		return errors.New("unroutable rule entry: " + entry)
+		return errors.New("unroutable rule operation")
 	}
-	return profile.PersistCurrentFileAccessRule(s.source, s.id, fileAccessRuleKey(op), stored, nil)
+	return profile.PersistCurrentFileAccessRule(s.source, s.id, key, entry, nil)
 }
 
-func (s *profileRuleStore) AppendRuleIfCurrent(entry string, current func() bool) error {
-	op, stored, ok := splitScopedRuleEntry(entry)
+func (s *profileRuleStore) AppendRuleIfCurrent(op FileOp, entry string, current func() bool) error {
+	key, ok := fileAccessRuleKey(op)
 	if !ok {
-		return errors.New("unroutable rule entry: " + entry)
+		return errors.New("unroutable rule operation")
 	}
-	return profile.PersistCurrentFileAccessRule(s.source, s.id, fileAccessRuleKey(op), stored, current)
+	return profile.PersistCurrentFileAccessRule(s.source, s.id, key, entry, current)
 }

@@ -10,20 +10,23 @@ import (
 	"github.com/safing/portmaster/service/profile"
 )
 
-// fakeRuleStore is an in-memory RuleStore for tests.
+// fakeRuleStore is an in-memory RuleStore for tests. It records the operation
+// each entry was routed to so tests can assert per-operation persistence.
 type fakeRuleStore struct {
-	id       string
-	appendMu sync.Mutex
-	appended []string
-	errs     []error
+	id         string
+	appendMu   sync.Mutex
+	appended   []string
+	appendedOp []FileOp
+	errs       []error
 }
 
 func (s *fakeRuleStore) ID() string { return s.id }
 
-func (s *fakeRuleStore) AppendRule(entry string) error {
+func (s *fakeRuleStore) AppendRule(op FileOp, entry string) error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
 	s.appended = append(s.appended, entry)
+	s.appendedOp = append(s.appendedOp, op)
 	if len(s.errs) != 0 {
 		err := s.errs[0]
 		s.errs = s.errs[1:]
@@ -76,15 +79,27 @@ func (l *fakeLookup) Lookup(_ context.Context, pid int32) (LookupResult, error) 
 	}
 	// Merge any persisted entries that AppendRule has recorded into the
 	// next-lookup parsed view, mirroring how the real binding re-reads
-	// from the live profile.
-	allRules := append([]string(nil), store.appended...)
-	allRules = append(allRules, fp.rules...)
+	// from the live profile. Learned entries precede the profile's own seed
+	// rules (first match wins) and are routed into the same per-operation list
+	// the store persisted them to; the profile's seed rules are read rules.
+	var lists ruleLists
+	for i, entry := range store.appended {
+		switch ruleScopeOp(store.appendedOp[i]) {
+		case OpWrite:
+			lists.write = append(lists.write, entry)
+		case OpExec:
+			lists.exec = append(lists.exec, entry)
+		default:
+			lists.read = append(lists.read, entry)
+		}
+	}
+	lists.read = append(lists.read, fp.rules...)
 	l.mu.Unlock()
 
 	return LookupResult{
 		Path:          fp.exe,
 		Store:         store,
-		ParsedRules:   ParseRules(allRules),
+		Snapshot:      newDecisionSnapshot(fp.id, "", fp.defAct, lists, 1),
 		DefaultAction: fp.defAct,
 	}, nil
 }
@@ -97,6 +112,18 @@ func (l *fakeLookup) appendedFor(pid int32) []string {
 	}
 	if s, ok := l.stores[pid]; ok {
 		return append([]string(nil), s.appended...)
+	}
+	return nil
+}
+
+func (l *fakeLookup) appendedOpFor(pid int32) []FileOp {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stores == nil {
+		return nil
+	}
+	if s, ok := l.stores[pid]; ok {
+		return append([]FileOp(nil), s.appendedOp...)
 	}
 	return nil
 }
@@ -128,23 +155,29 @@ func TestParseAndFormatRuleRoundTrip(t *testing.T) {
 }
 
 func TestOperationExactRuleRoundTripAndProfileDecision(t *testing.T) {
-	entry := FormatExactOperationRule("/tmp/data", OpRead, false, VerdictAllow)
+	// The operation is no longer encoded in the stored string; it is carried by
+	// the list the entry lives in. The stored form is untagged.
+	entry := formatStoredExactRule("/tmp/data", false, VerdictAllow)
 	rule, ok := ParseRule(entry)
-	if !ok || !rule.Exact || !rule.OperationScoped || rule.Operation != OpRead || rule.DirectoryOnly {
-		t.Fatalf("parsed operation rule = %#v, ok=%t", rule, ok)
+	if !ok || !rule.Exact || rule.DirectoryOnly {
+		t.Fatalf("parsed exact rule = %#v, ok=%t", rule, ok)
 	}
-	if !rule.MatchesEvent("/tmp/data", OpOpen, false) {
+	// Placed in the read list, the rule governs opens (which fold to reads) and
+	// reads, but nothing in the write list matches.
+	snapshot := newDecisionSnapshot("profile", "local", 2, ruleLists{read: []string{entry}}, 1)
+	if _, matched, ok := snapshot.Lookup("/tmp/data", OpOpen, false); !ok || !matched {
 		t.Fatal("read rule did not match open (opens are governed by read rules)")
 	}
-	if !rule.MatchesEvent("/tmp/data", OpRead, false) {
+	if _, matched, ok := snapshot.Lookup("/tmp/data", OpRead, false); !ok || !matched {
 		t.Fatal("read rule did not match read")
 	}
-	if rule.MatchesEvent("/tmp/data", OpWrite, false) {
-		t.Fatal("read rule matched write")
+	if _, matched, ok := snapshot.Lookup("/tmp/data", OpWrite, false); !ok || matched {
+		t.Fatal("read rule leaked into write")
 	}
-	directoryEntry := FormatExactOperationRule("/tmp/folder", OpRead, true, VerdictDeny)
+
+	directoryEntry := formatStoredExactRule("/tmp/folder", true, VerdictDeny)
 	directoryRule, ok := ParseRule(directoryEntry)
-	if !ok || !directoryRule.DirectoryOnly || !directoryRule.MatchesEvent("/tmp/folder", OpRead, true) || directoryRule.MatchesEvent("/tmp/folder", OpRead, false) {
+	if !ok || !directoryRule.DirectoryOnly || !directoryRule.applies("/tmp/folder", true) || directoryRule.applies("/tmp/folder", false) {
 		t.Fatalf("directory rule did not preserve discriminator: %#v", directoryRule)
 	}
 }
@@ -202,11 +235,14 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 		t.Fatalf("FlushPermanentRules: %v", err)
 	}
 	// The event carries no operation (OpOpen), which folds to a read: the
-	// overlay emits a read-scoped exact rule (the real store then routes it,
-	// untagged, into the read-rule list).
+	// overlay emits an untagged exact rule and routes it to the read list
+	// (OpRead). The operation is carried by the destination list, not the string.
 	got := lookup.appendedFor(99)
-	if len(got) != 1 || got[0] != `+ @read:"/home/alice/notes.txt"` {
+	if len(got) != 1 || got[0] != `+ @"/home/alice/notes.txt"` {
 		t.Fatalf("rule not persisted in profile store: %v", got)
+	}
+	if ops := lookup.appendedOpFor(99); len(ops) != 1 || ops[0] != OpRead {
+		t.Fatalf("persisted rule op routing = %v, want [OpRead]", ops)
 	}
 
 	// Tripwire on the second call: prompter must not be invoked.
@@ -473,7 +509,7 @@ func TestProfileHandlerSelfProfileUsesInMemorySnapshot(t *testing.T) {
 	h.setSelfProfile(4242, LookupResult{
 		Path:          "/usr/bin/filemaster",
 		Store:         store,
-		ParsedRules:   ParseRules([]string{"+ /var/lib/filemaster/**"}),
+		Snapshot:      newDecisionSnapshot(profile.PortmasterProfileID, string(profile.SourceLocal), profile.DefaultActionBlock, ruleLists{read: []string{"+ /var/lib/filemaster/**"}}, 1),
 		DefaultAction: profile.DefaultActionBlock,
 		ProfileSource: string(profile.SourceLocal),
 		ProfileName:   "Filemaster",

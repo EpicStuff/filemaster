@@ -22,10 +22,12 @@ type RuleStore interface {
 	// and the prompter's notification IDs.
 	ID() string
 
-	// AppendRule prepends a new rule entry and persists it. Errors are
-	// surfaced so the caller can log without losing the in-memory
-	// verdict; persistence failures are non-fatal to the current event.
-	AppendRule(entry string) error
+	// AppendRule prepends a new rule entry to the given operation's list and
+	// persists it. The entry is the untagged storage form; the operation selects
+	// the destination list. Errors are surfaced so the caller can log without
+	// losing the in-memory verdict; persistence failures are non-fatal to the
+	// current event.
+	AppendRule(op FileOp, entry string) error
 }
 
 // fallbackRuleStore keeps an accepted Always rule durable when process profile
@@ -38,12 +40,12 @@ type fallbackRuleStore struct {
 
 func (s fallbackRuleStore) ID() string { return "fallback:" + s.exe }
 
-func (s fallbackRuleStore) AppendRule(entry string) error {
+func (s fallbackRuleStore) AppendRule(op FileOp, entry string) error {
 	rule, ok := ParseRule(entry)
 	if !ok {
 		return errors.New("invalid fallback file access rule")
 	}
-	return s.handler.appendRuleEntry(s.exe, rule)
+	return s.handler.appendRuleEntry(s.exe, op, rule)
 }
 
 // LookupResult is everything a single ProfileLookup pass yields: the
@@ -71,10 +73,6 @@ type LookupResult struct {
 	// Snapshot is the immutable parsed policy used for this lookup. It is
 	// nil only for compatibility with non-profile test lookups.
 	Snapshot *DecisionSnapshot
-
-	// ParsedRules is retained for compatibility with existing lookups. New
-	// production lookups populate it from Snapshot.
-	ParsedRules PathRules
 
 	// DefaultAction is the profile's default action constant from
 	// service/profile (DefaultActionNotSet / Block / Ask / Permit).
@@ -267,7 +265,7 @@ func (h *ProfileHandler) setSelfProfileRunning(p *profile.Profile, pid int32) {
 
 	p.RLock()
 	id := p.ID
-	rawRules := effectiveScopedRules(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
+	lists := scopedRuleLists(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
 	source := string(p.Source)
 	name := p.Name
 	linkedPath := p.LinkedPath
@@ -281,7 +279,7 @@ func (h *ProfileHandler) setSelfProfileRunning(p *profile.Profile, pid int32) {
 	if coordinator := h.coordinator(); coordinator != nil {
 		coordinator.RulePersistence().bindStoreRunning(source, id, store)
 	}
-	snapshot := newDecisionSnapshot(id, source, defaultAction, rawRules, h.selfRevision.Add(1))
+	snapshot := newDecisionSnapshot(id, source, defaultAction, lists, h.selfRevision.Add(1))
 	if coordinator := h.coordinator(); coordinator != nil {
 		snapshot = coordinator.RulePersistence().Merge(snapshot)
 	}
@@ -292,7 +290,6 @@ func (h *ProfileHandler) setSelfProfileRunning(p *profile.Profile, pid int32) {
 		Path:              path,
 		Store:             store,
 		Snapshot:          snapshot,
-		ParsedRules:       snapshot.Rules,
 		DefaultAction:     snapshot.DefaultAction,
 		ProfileSource:     source,
 		ProfileName:       name,
@@ -342,7 +339,6 @@ func (h *ProfileHandler) publishSnapshotRunning(snapshot *DecisionSnapshot) {
 	h.selfMu.Lock()
 	if current := h.selfProfile.Snapshot; current != nil && current.ProfileID == snapshot.ProfileID && current.Source == snapshot.Source {
 		h.selfProfile.Snapshot = snapshot
-		h.selfProfile.ParsedRules = snapshot.Rules
 		h.selfProfile.DefaultAction = snapshot.DefaultAction
 	}
 	h.selfMu.Unlock()
@@ -376,7 +372,7 @@ func (h *ProfileHandler) PublishProfileSnapshot(p *profile.Profile) {
 func (h *ProfileHandler) publishProfileSnapshotRunning(p *profile.Profile) {
 	p.RLock()
 	id := p.ID
-	rawRules := effectiveScopedRules(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
+	lists := scopedRuleLists(p.GetFileAccessReadRules(), p.GetFileAccessWriteRules(), p.GetFileAccessExecRules())
 	source := string(p.Source)
 	p.RUnlock()
 	defaultAction := p.EffectiveDefaultAction()
@@ -390,9 +386,9 @@ func (h *ProfileHandler) publishProfileSnapshotRunning(p *profile.Profile) {
 
 	var snapshot *DecisionSnapshot
 	if lookup, ok := h.lookup.(*processProfileLookup); ok {
-		snapshot, _ = lookup.snapshotForRunning(id, source, defaultAction, rawRules)
+		snapshot, _ = lookup.snapshotForRunning(id, source, defaultAction, lists)
 	} else {
-		snapshot = newDecisionSnapshot(id, source, defaultAction, rawRules, h.selfRevision.Add(1))
+		snapshot = newDecisionSnapshot(id, source, defaultAction, lists, h.selfRevision.Add(1))
 		if coordinator := h.coordinator(); coordinator != nil {
 			snapshot = coordinator.RulePersistence().Merge(snapshot)
 		}
@@ -470,7 +466,6 @@ func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (V
 			ProfileID:     e.ProfileID,
 			Source:        e.ProfileSource,
 			DefaultAction: res.DefaultAction,
-			Rules:         res.ParsedRules,
 		}
 	}
 	if h.coordinator() == nil {
@@ -478,9 +473,13 @@ func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (V
 			snapshot = persistence.Merge(snapshot)
 		}
 	}
-	rules := snapshot.Rules
 	defaultAction := snapshot.DefaultAction
-	if verdict, ok := rules.LookupEvent(e.Path, e.Op, e.IsDir); ok {
+	verdict, matched, ok := snapshot.Lookup(e.Path, e.Op, e.IsDir)
+	if !ok {
+		// Unsupported operation: never borrow another list's policy. Fail closed.
+		return VerdictDeny, nil
+	}
+	if matched {
 		return verdict, nil
 	}
 
@@ -593,7 +592,6 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 			ProfileID:     e.ProfileID,
 			Source:        e.ProfileSource,
 			DefaultAction: res.DefaultAction,
-			Rules:         res.ParsedRules,
 		}
 	}
 	// A definitive rule or default action resolves the verdict without a
@@ -622,11 +620,14 @@ func (h *ProfileHandler) fallbackSnapshot(event *FileEvent) (RuleStore, *Decisio
 		store := fallbackRuleStore{handler: fallback, exe: exe}
 		event.ProfileID = store.ID()
 		event.ProfileSource = "fallback"
+		read, write, exec := fallback.ruleListsFor(exe)
 		return store, &DecisionSnapshot{
 			ProfileID:     event.ProfileID,
 			Source:        event.ProfileSource,
 			DefaultAction: profile.DefaultActionAsk,
-			Rules:         PathRules{Rules: fallback.RulesFor(exe), Default: VerdictDeny},
+			Read:          read,
+			Write:         write,
+			Exec:          exec,
 		}
 	}
 	return nil, &DecisionSnapshot{DefaultAction: profile.DefaultActionAsk}
@@ -656,34 +657,40 @@ func FormatRule(pattern string, v Verdict) string {
 	return "- " + pattern
 }
 
-// FormatExactRule stores a normalized literal path using a tagged Go-quoted
-// payload. Legacy +/- rules remain patterns; only this tagged form is exact.
+// FormatExactRule stores a normalized literal file path using a Go-quoted
+// payload: "@\"/path\"". Legacy +/- rules remain globs; only this @-quoted form
+// is exact. The operation is carried by which per-operation list the entry is
+// stored in, never encoded in the string.
 func FormatExactRule(path string, v Verdict) string {
-	path = filepath.Clean(path)
-	if v == VerdictAllow {
-		return "+ @" + strconv.Quote(path)
-	}
-	return "- @" + strconv.Quote(path)
+	return formatStoredExactRule(path, false, v)
 }
 
-// FormatExactOperationRule stores a literal path bound to one operation. The
-// tagged form is deliberately distinct from legacy path patterns: @read: is
-// operation-scoped while @ remains compatible with existing all-operation
-// exact rules.
-func FormatExactOperationRule(path string, op FileOp, isDir bool, v Verdict) string {
+// formatStoredExactRule encodes a canonical literal path as its untagged storage
+// entry: @"path" for a file, @dir:"path" for a directory-only rule. This is the
+// exact form ParseRule reads back. It is deliberately distinct from a plain glob
+// entry, and the "@dir:" prefix is the only remaining tag -- it is a directory
+// discriminator, not an operation tag.
+func formatStoredExactRule(path string, directory bool, v Verdict) string {
 	path = filepath.Clean(path)
-	tag := op.String()
-	if isDir {
-		tag = "dir-" + tag
-	}
+	sign := "- "
 	if v == VerdictAllow {
-		return "+ @" + tag + ":" + strconv.Quote(path)
+		sign = "+ "
 	}
-	return "- @" + tag + ":" + strconv.Quote(path)
+	if directory {
+		return sign + "@dir:" + strconv.Quote(path)
+	}
+	return sign + "@" + strconv.Quote(path)
 }
 
-// ParseRule decodes a "<+|-> <pattern>" string into a PathRule. Returns
-// false on malformed input.
+// ParseRule decodes a "<+|-> <pattern>" storage entry into a PathRule. Returns
+// false on malformed input. Recognized forms:
+//
+//   - "+ /foo/**"        -- glob/recursive/exact-path pattern (see PathRule).
+//   - "+ @\"/foo/bar\""  -- exact literal file path.
+//   - "+ @dir:\"/foo\""  -- exact literal path, directory events only.
+//
+// The operation is not encoded here: the caller parses each per-operation list
+// separately, so the list a rule came from carries its operation.
 func ParseRule(entry string) (PathRule, bool) {
 	if len(entry) < 3 || entry[1] != ' ' {
 		return PathRule{}, false
@@ -700,53 +707,21 @@ func ParseRule(entry string) (PathRule, bool) {
 	payload := entry[2:]
 	if strings.HasPrefix(payload, "@") {
 		payload = payload[1:]
-		var op FileOp
-		var scoped, directory bool
-		if colon := strings.IndexByte(payload, ':'); colon >= 0 {
-			var ok bool
-			op, directory, ok = parseRuleOperation(payload[:colon])
-			if !ok {
-				return PathRule{}, false
-			}
-			scoped = true
-			payload = payload[colon+1:]
-		}
-		// An operation-scoped entry whose payload is not a quoted literal is a
-		// glob pattern (the list carries the operation; the pattern stays plain).
-		if scoped && !strings.HasPrefix(payload, `"`) {
-			pattern := strings.TrimSpace(payload)
-			if pattern == "" {
-				return PathRule{}, false
-			}
-			return PathRule{Pattern: pattern, Verdict: v, Operation: op, OperationScoped: true, DirectoryOnly: directory}, true
+		directory := strings.HasPrefix(payload, "dir:")
+		if directory {
+			payload = payload[len("dir:"):]
 		}
 		path, err := strconv.Unquote(payload)
-		path = filepath.Clean(path)
-		if err != nil || path == "." || !filepath.IsAbs(path) {
+		if err != nil {
 			return PathRule{}, false
 		}
-		return PathRule{Pattern: path, Verdict: v, Exact: true, Operation: op, OperationScoped: scoped, DirectoryOnly: directory}, true
+		path = filepath.Clean(path)
+		if path == "." || !filepath.IsAbs(path) {
+			return PathRule{}, false
+		}
+		return PathRule{Pattern: path, Verdict: v, Exact: true, DirectoryOnly: directory}, true
 	}
 	return PathRule{Pattern: strings.TrimSpace(payload), Verdict: v}, true
-}
-
-func parseRuleOperation(tag string) (FileOp, bool, bool) {
-	directory := strings.HasPrefix(tag, "dir-")
-	if directory {
-		tag = strings.TrimPrefix(tag, "dir-")
-	}
-	switch tag {
-	case "open":
-		return OpOpen, directory, true
-	case "read":
-		return OpRead, directory, true
-	case "write":
-		return OpWrite, directory, true
-	case "exec":
-		return OpExec, directory, true
-	default:
-		return 0, false, false
-	}
 }
 
 // ParseRules parses a []string of rule entries (as stored in a profile)

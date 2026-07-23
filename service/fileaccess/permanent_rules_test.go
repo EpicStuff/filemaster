@@ -13,6 +13,7 @@ import (
 type persistenceTestStore struct {
 	mu      sync.Mutex
 	entries []string
+	ops     []FileOp
 	errs    []error
 	started chan struct{}
 	release chan struct{}
@@ -22,7 +23,7 @@ type persistenceTestStore struct {
 
 func (s *persistenceTestStore) ID() string { return "profile" }
 
-func (s *persistenceTestStore) AppendRule(entry string) error {
+func (s *persistenceTestStore) AppendRule(op FileOp, entry string) error {
 	s.mu.Lock()
 	s.active++
 	if s.active > s.max {
@@ -43,6 +44,7 @@ func (s *persistenceTestStore) AppendRule(entry string) error {
 	defer s.mu.Unlock()
 	s.active--
 	s.entries = append(s.entries, entry)
+	s.ops = append(s.ops, op)
 	if len(s.errs) == 0 {
 		return nil
 	}
@@ -57,8 +59,14 @@ func (s *persistenceTestStore) snapshot() ([]string, int) {
 	return append([]string(nil), s.entries...), s.max
 }
 
+func (s *persistenceTestStore) opSnapshot() []FileOp {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]FileOp(nil), s.ops...)
+}
+
 func persistenceSnapshot(rules ...string) *DecisionSnapshot {
-	return newDecisionSnapshot("profile", "local", 2, rules, 1)
+	return newDecisionSnapshot("profile", "local", 2, ruleLists{read: rules}, 1)
 }
 
 func waitRule(t *testing.T, predicate func() bool) {
@@ -76,11 +84,11 @@ func TestPermanentRulesApplyAllowAndDenyImmediately(t *testing.T) {
 	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
 	store := &persistenceTestStore{release: make(chan struct{})}
 	allow := persistence.Apply(persistenceSnapshot(), store, "/tmp/allow", VerdictAllow)
-	if verdict, ok := allow.Rules.Lookup("/tmp/allow"); !ok || verdict != VerdictAllow {
+	if verdict, ok := allow.Read.Lookup("/tmp/allow"); !ok || verdict != VerdictAllow {
 		t.Fatalf("allow overlay did not affect the next decision: %v %v", verdict, ok)
 	}
 	deny := persistence.Apply(allow, store, "/tmp/deny", VerdictDeny)
-	if verdict, ok := deny.Rules.Lookup("/tmp/deny"); !ok || verdict != VerdictDeny {
+	if verdict, ok := deny.Read.Lookup("/tmp/deny"); !ok || verdict != VerdictDeny {
 		t.Fatalf("deny overlay did not affect the next decision: %v %v", verdict, ok)
 	}
 }
@@ -143,7 +151,7 @@ func TestPermanentRulesCoalesceAndNewerOppositeWins(t *testing.T) {
 	<-store.started
 	persistence.Apply(first, store, "/tmp/same", VerdictAllow)
 	latest := persistence.Apply(first, store, "/tmp/same", VerdictDeny)
-	if verdict, ok := latest.Rules.Lookup("/tmp/same"); !ok || verdict != VerdictDeny {
+	if verdict, ok := latest.Read.Lookup("/tmp/same"); !ok || verdict != VerdictDeny {
 		t.Fatalf("newer permanent rule did not supersede older rule: %v %v", verdict, ok)
 	}
 	store.release <- struct{}{}
@@ -160,16 +168,16 @@ func TestPermanentRulesSerializeProfilesAndMergeReload(t *testing.T) {
 	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
 	store := &persistenceTestStore{started: make(chan struct{}, 2), release: make(chan struct{}, 2)}
 	merged := persistence.Apply(persistenceSnapshot("+ /tmp/clean"), store, "/tmp/dirty", VerdictAllow)
-	if verdict, ok := merged.Rules.Lookup("/tmp/dirty"); !ok || verdict != VerdictAllow {
+	if verdict, ok := merged.Read.Lookup("/tmp/dirty"); !ok || verdict != VerdictAllow {
 		t.Fatal("dirty rule missing from merged snapshot")
 	}
-	if verdict, ok := merged.Rules.Lookup("/tmp/clean"); !ok || verdict != VerdictAllow {
+	if verdict, ok := merged.Read.Lookup("/tmp/clean"); !ok || verdict != VerdictAllow {
 		t.Fatal("clean rule missing from merged snapshot")
 	}
 	<-store.started
 	// A reload with unrelated clean rules cannot discard the dirty overlay.
 	reloaded := persistence.Merge(persistenceSnapshot("- /tmp/external"))
-	if verdict, ok := reloaded.Rules.Lookup("/tmp/dirty"); !ok || verdict != VerdictAllow {
+	if verdict, ok := reloaded.Read.Lookup("/tmp/dirty"); !ok || verdict != VerdictAllow {
 		t.Fatal("reload discarded dirty overlay")
 	}
 	store.release <- struct{}{}
@@ -205,7 +213,7 @@ func TestPermanentRulesObserverAndFlush(t *testing.T) {
 	if err := failing.Flush(deadline); err == nil {
 		t.Fatal("flush succeeded with dirty rule still pending")
 	}
-	if verdict, ok := active.Rules.Lookup("/tmp/kept"); !ok || verdict != VerdictDeny {
+	if verdict, ok := active.Read.Lookup("/tmp/kept"); !ok || verdict != VerdictDeny {
 		t.Fatal("flush timeout changed active dirty policy")
 	}
 }
@@ -240,7 +248,7 @@ func TestPermanentRulesRequireEffectiveExactDurablePrecedence(t *testing.T) {
 	if diagnostics := persistence.Diagnostics()["local/profile"]; diagnostics.DirtyCount != 1 {
 		t.Fatalf("hidden lower allow was treated as durable: %+v", diagnostics)
 	}
-	if got := hidden.Rules.Rules[0]; got.Pattern != "/tmp/file" || got.Verdict != VerdictAllow {
+	if got := hidden.Read.Rules[0]; got.Pattern != "/tmp/file" || got.Verdict != VerdictAllow {
 		t.Fatalf("exact allow was not placed at effective precedence: %+v", got)
 	}
 
@@ -250,7 +258,7 @@ func TestPermanentRulesRequireEffectiveExactDurablePrecedence(t *testing.T) {
 	if diagnostics := broader.Diagnostics()["local/profile"]; diagnostics.DirtyCount != 1 {
 		t.Fatalf("broader rule was treated as exact durable confirmation: %+v", diagnostics)
 	}
-	if got := merged.Rules.Rules[0]; got.Pattern != "/tmp/file" || got.Verdict != VerdictAllow {
+	if got := merged.Read.Rules[0]; got.Pattern != "/tmp/file" || got.Verdict != VerdictAllow {
 		t.Fatalf("exact rule was not placed before broader rule: %+v", got)
 	}
 }
@@ -271,12 +279,12 @@ func TestPermanentRulesPublishMonotonicRevisionsAcrossOverlayLifecycle(t *testin
 	<-store.started
 	store.release <- struct{}{}
 	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
-	external := newDecisionSnapshot("profile", "local", 2, []string{"+ /tmp/one", "- /tmp/two", "+ /tmp/external"}, 2)
+	external := newDecisionSnapshot("profile", "local", 2, ruleLists{read: []string{"+ /tmp/one", "- /tmp/two", "+ /tmp/external"}}, 2)
 	clean := persistence.Merge(external)
 	if clean.Revision <= second.Revision {
 		t.Fatalf("clean durable snapshot revision %d did not exceed overlay %d", clean.Revision, second.Revision)
 	}
-	newer := persistence.Merge(newDecisionSnapshot("profile", "local", 2, []string{"+ /tmp/one", "- /tmp/two", "- /tmp/external"}, 3))
+	newer := persistence.Merge(newDecisionSnapshot("profile", "local", 2, ruleLists{read: []string{"+ /tmp/one", "- /tmp/two", "- /tmp/external"}}, 3))
 	if newer.Revision <= clean.Revision {
 		t.Fatalf("new external revision %d was rejected after overlay %d", newer.Revision, clean.Revision)
 	}
@@ -348,8 +356,8 @@ func TestPermanentRulesBindingsAreIndependentAndDoNotLoseWakeups(t *testing.T) {
 	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
 	storeA := &persistenceTestStore{}
 	storeB := &persistenceTestStore{}
-	first := newDecisionSnapshot("first", "local", 2, nil, 1)
-	second := newDecisionSnapshot("second", "local", 2, nil, 1)
+	first := newDecisionSnapshot("first", "local", 2, ruleLists{}, 1)
+	second := newDecisionSnapshot("second", "local", 2, ruleLists{}, 1)
 	persistence.BindStore("local", "first", storeA)
 	persistence.BindStore("local", "second", storeB)
 	persistence.Apply(first, storeA, "/tmp/first", VerdictAllow)
@@ -408,19 +416,19 @@ func TestExactPermanentRulesRoundTripLiteralPaths(t *testing.T) {
 func TestPermanentRulesKeepExactAndLegacyPatternsDistinct(t *testing.T) {
 	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
 	merged := persistence.Apply(persistenceSnapshot("- /tmp/a*b"), &persistenceTestStore{}, "/tmp/a*b", VerdictAllow)
-	if len(merged.Rules.Rules) != 2 {
-		t.Fatalf("merged rules = %#v, want exact and legacy rules", merged.Rules.Rules)
+	if len(merged.Read.Rules) != 2 {
+		t.Fatalf("merged rules = %#v, want exact and legacy rules", merged.Read.Rules)
 	}
-	if exact := merged.Rules.Rules[0]; !exact.Exact || exact.Pattern != "/tmp/a*b" || exact.Verdict != VerdictAllow {
+	if exact := merged.Read.Rules[0]; !exact.Exact || exact.Pattern != "/tmp/a*b" || exact.Verdict != VerdictAllow {
 		t.Fatalf("exact rule was not first: %+v", exact)
 	}
-	if legacy := merged.Rules.Rules[1]; legacy.Exact || legacy.Pattern != "/tmp/a*b" || legacy.Verdict != VerdictDeny {
+	if legacy := merged.Read.Rules[1]; legacy.Exact || legacy.Pattern != "/tmp/a*b" || legacy.Verdict != VerdictDeny {
 		t.Fatalf("legacy wildcard was incorrectly coalesced: %+v", legacy)
 	}
-	if verdict, ok := merged.Rules.Lookup("/tmp/a*b"); !ok || verdict != VerdictAllow {
+	if verdict, ok := merged.Read.Lookup("/tmp/a*b"); !ok || verdict != VerdictAllow {
 		t.Fatalf("literal exact rule did not win: %v, %v", verdict, ok)
 	}
-	if verdict, ok := merged.Rules.Lookup("/tmp/axxb"); !ok || verdict != VerdictDeny {
+	if verdict, ok := merged.Read.Lookup("/tmp/axxb"); !ok || verdict != VerdictDeny {
 		t.Fatalf("legacy wildcard no longer controlled neighboring path: %v, %v", verdict, ok)
 	}
 }
@@ -463,8 +471,8 @@ func TestPermanentRulesCurrentRevisionCanRemoveAppliedRule(t *testing.T) {
 	base := persistenceSnapshot()
 	persistence.Apply(base, store, "/tmp/remove", VerdictDeny)
 	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
-	removed := persistence.Merge(newDecisionSnapshot("profile", "local", 2, nil, 2))
-	if verdict, ok := removed.Rules.Lookup("/tmp/remove"); ok || verdict != VerdictAllow {
+	removed := persistence.Merge(newDecisionSnapshot("profile", "local", 2, ruleLists{}, 2))
+	if verdict, ok := removed.Read.Lookup("/tmp/remove"); ok || verdict != VerdictAllow {
 		t.Fatalf("removed durable rule was silently restored: %v, %v", verdict, ok)
 	}
 }
@@ -475,26 +483,26 @@ func TestPermanentRulesEqualRevisionDivergenceDoesNotRestoreCleanRule(t *testing
 	base := persistenceSnapshot()
 	persistence.Apply(base, store, "/tmp/equal-revision", VerdictAllow)
 	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
-	identical := persistence.Merge(newDecisionSnapshot("profile", "local", 2, []string{FormatExactRule("/tmp/equal-revision", VerdictAllow)}, base.Revision))
-	if verdict, ok := identical.Rules.Lookup("/tmp/equal-revision"); !ok || verdict != VerdictAllow {
+	identical := persistence.Merge(newDecisionSnapshot("profile", "local", 2, ruleLists{read: []string{FormatExactRule("/tmp/equal-revision", VerdictAllow)}}, base.Revision))
+	if verdict, ok := identical.Read.Lookup("/tmp/equal-revision"); !ok || verdict != VerdictAllow {
 		t.Fatalf("equal-revision identical content changed durable policy: %v, %v", verdict, ok)
 	}
 
 	// An equal revision is only unchanged when its policy content is equal. A
 	// divergent replacement is authoritative for clean/applied rules.
-	removed := persistence.Merge(newDecisionSnapshot("profile", "local", 2, nil, base.Revision))
-	if _, ok := removed.Rules.Lookup("/tmp/equal-revision"); ok {
+	removed := persistence.Merge(newDecisionSnapshot("profile", "local", 2, ruleLists{}, base.Revision))
+	if _, ok := removed.Read.Lookup("/tmp/equal-revision"); ok {
 		t.Fatal("equal-revision external removal was silently restored")
 	}
 
 	blocked := &persistenceTestStore{release: make(chan struct{})}
 	defer close(blocked.release)
 	updated := persistence.Apply(removed, blocked, "/tmp/local-dirty", VerdictDeny)
-	if verdict, ok := updated.Rules.Lookup("/tmp/local-dirty"); !ok || verdict != VerdictDeny {
+	if verdict, ok := updated.Read.Lookup("/tmp/local-dirty"); !ok || verdict != VerdictDeny {
 		t.Fatalf("dirty local intent was lost during equal-revision merge: %v, %v", verdict, ok)
 	}
-	mergedDirty := persistence.Merge(newDecisionSnapshot("profile", "local", 2, nil, base.Revision))
-	if verdict, ok := mergedDirty.Rules.Lookup("/tmp/local-dirty"); !ok || verdict != VerdictDeny {
+	mergedDirty := persistence.Merge(newDecisionSnapshot("profile", "local", 2, ruleLists{}, base.Revision))
+	if verdict, ok := mergedDirty.Read.Lookup("/tmp/local-dirty"); !ok || verdict != VerdictDeny {
 		t.Fatalf("equal-revision base overwrote newer dirty overlay: %v, %v", verdict, ok)
 	}
 }
@@ -502,7 +510,7 @@ func TestPermanentRulesEqualRevisionDivergenceDoesNotRestoreCleanRule(t *testing
 func TestPermanentRulesRetireIdleWorkersAndStopWithoutDiscardingDirtyState(t *testing.T) {
 	persistence := NewRulePersistence(nil, RulePersistenceOptions{WorkerIdle: time.Millisecond})
 	for _, id := range []string{"idle-a", "idle-b", "idle-c", "idle-d"} {
-		persistence.Apply(newDecisionSnapshot(id, "local", 2, nil, 1), &persistenceTestStore{}, "/tmp/"+id, VerdictAllow)
+		persistence.Apply(newDecisionSnapshot(id, "local", 2, ruleLists{}, 1), &persistenceTestStore{}, "/tmp/"+id, VerdictAllow)
 	}
 	waitRule(t, func() bool {
 		diagnostics := persistence.Diagnostics()
@@ -530,7 +538,7 @@ func TestPermanentRulesRetireIdleWorkersAndStopWithoutDiscardingDirtyState(t *te
 		t.Fatalf("Stop: %v", err)
 	}
 	merged := persistence.Apply(persistenceSnapshot(), &persistenceTestStore{}, "/tmp/after-stop", VerdictAllow)
-	if _, ok := merged.Rules.Lookup("/tmp/after-stop"); ok {
+	if _, ok := merged.Read.Lookup("/tmp/after-stop"); ok {
 		t.Fatal("stopped persistence accepted a new durable rule")
 	}
 }
@@ -557,7 +565,7 @@ func TestPermanentRulesStopWaitsForBlockedWorkerAfterFlushDeadline(t *testing.T)
 		return persistence.stopped
 	})
 	merged := persistence.Apply(persistenceSnapshot(), &persistenceTestStore{}, "/tmp/rejected-after-stop", VerdictDeny)
-	if _, ok := merged.Rules.Lookup("/tmp/rejected-after-stop"); ok {
+	if _, ok := merged.Read.Lookup("/tmp/rejected-after-stop"); ok {
 		t.Fatal("persistence accepted a rule after stop admission began")
 	}
 
@@ -573,23 +581,114 @@ func TestPermanentRulesKeepAlwaysRulesOperationScoped(t *testing.T) {
 	store := &persistenceTestStore{}
 	base := persistenceSnapshot()
 	merged := persistence.ApplyEvent(base, store, "/tmp/data", OpRead, false, VerdictAllow)
-	if verdict, ok := merged.Rules.LookupEvent("/tmp/data", OpRead, false); !ok || verdict != VerdictAllow {
-		t.Fatalf("read rule lookup = (%v, %t), want (allow, true)", verdict, ok)
+	if verdict, matched, ok := merged.Lookup("/tmp/data", OpRead, false); !ok || !matched || verdict != VerdictAllow {
+		t.Fatalf("read rule lookup = (%v, %t, %t), want (allow, true, true)", verdict, matched, ok)
+	}
+	// The rule lives only in the read list, not the write or exec lists.
+	if verdict, ok := merged.Read.Lookup("/tmp/data"); !ok || verdict != VerdictAllow {
+		t.Fatalf("read list lookup = (%v, %t), want (allow, true)", verdict, ok)
+	}
+	if _, ok := merged.Write.Lookup("/tmp/data"); ok {
+		t.Fatal("read Always rule leaked into the write list")
+	}
+	if _, ok := merged.Exec.Lookup("/tmp/data"); ok {
+		t.Fatal("read Always rule leaked into the exec list")
 	}
 	// Opens are governed by the read list, so the read rule also matches opens.
-	if verdict, ok := merged.Rules.LookupEvent("/tmp/data", OpOpen, false); !ok || verdict != VerdictAllow {
-		t.Fatalf("open lookup = (%v, %t), want (allow, true); opens fold to reads", verdict, ok)
+	if verdict, matched, ok := merged.Lookup("/tmp/data", OpOpen, false); !ok || !matched || verdict != VerdictAllow {
+		t.Fatalf("open lookup = (%v, %t, %t), want (allow, true, true); opens fold to reads", verdict, matched, ok)
 	}
-	// It must not leak to writes.
-	if _, ok := merged.Rules.LookupEvent("/tmp/data", OpWrite, false); ok {
-		t.Fatal("read Always rule matched write")
+	// Write is a supported operation (ok) but no rule matched (not matched).
+	if _, matched, ok := merged.Lookup("/tmp/data", OpWrite, false); !ok || matched {
+		t.Fatalf("read Always rule matched write: matched=%t ok=%t", matched, ok)
 	}
 	waitRule(t, func() bool {
 		entries, _ := store.snapshot()
 		return len(entries) == 1
 	})
 	entries, _ := store.snapshot()
-	if got := entries[0]; got != FormatExactOperationRule("/tmp/data", OpRead, false, VerdictAllow) {
+	if got := entries[0]; got != formatStoredExactRule("/tmp/data", false, VerdictAllow) {
 		t.Fatalf("stored rule = %q", got)
+	}
+	if ops := store.opSnapshot(); len(ops) != 1 || ops[0] != OpRead {
+		t.Fatalf("persisted op routing = %v, want [OpRead]", ops)
+	}
+}
+
+// TestPermanentRulesRouteLearnedRulesPerOperation covers that ApplyEvent places
+// a learned rule in the list for its operation and nowhere else: OpExec lands in
+// Exec, OpWrite lands in Write, and neither leaks into Read.
+func TestPermanentRulesRouteLearnedRulesPerOperation(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	store := &persistenceTestStore{}
+
+	execMerged := persistence.ApplyEvent(persistenceSnapshot(), store, "/tmp/prog", OpExec, false, VerdictAllow)
+	if verdict, ok := execMerged.Exec.Lookup("/tmp/prog"); !ok || verdict != VerdictAllow {
+		t.Fatalf("exec rule missing from exec list: (%v, %t)", verdict, ok)
+	}
+	if _, ok := execMerged.Read.Lookup("/tmp/prog"); ok {
+		t.Fatal("exec rule leaked into read list")
+	}
+	if _, ok := execMerged.Write.Lookup("/tmp/prog"); ok {
+		t.Fatal("exec rule leaked into write list")
+	}
+
+	writeMerged := persistence.ApplyEvent(persistenceSnapshot(), store, "/tmp/doc", OpWrite, false, VerdictDeny)
+	if verdict, ok := writeMerged.Write.Lookup("/tmp/doc"); !ok || verdict != VerdictDeny {
+		t.Fatalf("write rule missing from write list: (%v, %t)", verdict, ok)
+	}
+	if _, ok := writeMerged.Read.Lookup("/tmp/doc"); ok {
+		t.Fatal("write rule leaked into read list")
+	}
+
+	waitRule(t, func() bool {
+		entries, _ := store.snapshot()
+		return len(entries) == 2
+	})
+	ops := store.opSnapshot()
+	if len(ops) != 2 || ops[0] != OpExec || ops[1] != OpWrite {
+		t.Fatalf("persisted op routing = %v, want [OpExec OpWrite]", ops)
+	}
+}
+
+// TestPermanentRulesSamePathCoexistAcrossOperations covers that learning the
+// same path for two different operations keeps both -- dedup is per-operation, so
+// a read rule does not suppress an exec rule on the identical path.
+func TestPermanentRulesSamePathCoexistAcrossOperations(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	store := &persistenceTestStore{}
+	merged := persistence.ApplyEvent(persistenceSnapshot(), store, "/tmp/dual", OpRead, false, VerdictAllow)
+	merged = persistence.ApplyEvent(merged, store, "/tmp/dual", OpExec, false, VerdictDeny)
+	if verdict, ok := merged.Read.Lookup("/tmp/dual"); !ok || verdict != VerdictAllow {
+		t.Fatalf("read rule lost after exec rule on same path: (%v, %t)", verdict, ok)
+	}
+	if verdict, ok := merged.Exec.Lookup("/tmp/dual"); !ok || verdict != VerdictDeny {
+		t.Fatalf("exec rule missing after coexisting read rule: (%v, %t)", verdict, ok)
+	}
+	waitRule(t, func() bool {
+		entries, _ := store.snapshot()
+		return len(entries) == 2
+	})
+	ops := store.opSnapshot()
+	if len(ops) != 2 || ops[0] != OpRead || ops[1] != OpExec {
+		t.Fatalf("persisted op routing = %v, want [OpRead OpExec]", ops)
+	}
+}
+
+// TestPermanentRulesReloadKeepsLearnedRuleInOperationList covers that a profile
+// reload (Merge) that has not yet caught up to a dirty learned exec rule keeps it
+// in the exec list, not the read list.
+func TestPermanentRulesReloadKeepsLearnedRuleInOperationList(t *testing.T) {
+	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
+	store := &persistenceTestStore{started: make(chan struct{}, 1), release: make(chan struct{})}
+	defer close(store.release)
+	persistence.ApplyEvent(persistenceSnapshot(), store, "/tmp/reloaded", OpExec, false, VerdictAllow)
+	<-store.started
+	reloaded := persistence.Merge(persistenceSnapshot("- /tmp/other"))
+	if verdict, ok := reloaded.Exec.Lookup("/tmp/reloaded"); !ok || verdict != VerdictAllow {
+		t.Fatalf("reload dropped the dirty exec rule from the exec list: (%v, %t)", verdict, ok)
+	}
+	if _, ok := reloaded.Read.Lookup("/tmp/reloaded"); ok {
+		t.Fatal("reload moved the dirty exec rule into the read list")
 	}
 }

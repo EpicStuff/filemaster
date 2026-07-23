@@ -69,7 +69,7 @@ func coordinatorPending(event FileEvent) (PendingEvent, <-chan Verdict) {
 }
 
 func coordinatorSnapshot(id string, revision uint64, defaultAction uint8, rules ...string) *DecisionSnapshot {
-	return newDecisionSnapshot(id, "local", defaultAction, rules, revision)
+	return newDecisionSnapshot(id, "local", defaultAction, ruleLists{read: rules}, revision)
 }
 
 func waitCoordinatorPrompt(t *testing.T, prompter *coordinatorPrompter) FileEvent {

@@ -18,19 +18,23 @@ import (
 //
 // The "**" form is the common case for "this dir and everything inside,"
 // so it's worth the custom code on top of filepath.Match.
+//
+// A PathRule never carries its own operation. The operation is implied by which
+// per-operation list (Access/Write/Execute) the rule was parsed into; the
+// snapshot selects that list before the rule is ever matched. See
+// DecisionSnapshot.rulesFor.
 type PathRule struct {
 	Pattern string
 	Verdict Verdict
 	Exact   bool
 
-	// OperationScoped restricts this rule to one filesystem operation. Legacy
-	// rules leave it false and therefore continue to apply to every operation.
-	Operation       FileOp
-	OperationScoped bool
-	DirectoryOnly   bool
+	// DirectoryOnly restricts the rule to directory events (FAN_ONDIR). A
+	// file-only variant is not needed: a plain rule already applies to both.
+	DirectoryOnly bool
 }
 
-// Matches reports whether the rule applies to path.
+// Matches reports whether the rule's path pattern applies to path, ignoring the
+// directory discriminator.
 func (r PathRule) Matches(path string) bool {
 	if r.Exact {
 		return r.Pattern == path
@@ -38,56 +42,51 @@ func (r PathRule) Matches(path string) bool {
 	return matchPathPattern(r.Pattern, path)
 }
 
-// MatchesEvent applies the path match plus an optional operation and directory
-// discriminator. This keeps legacy path-only rules backward compatible while
-// allowing learned Always rules to be safely operation-specific.
-func (r PathRule) MatchesEvent(path string, op FileOp, isDir bool) bool {
+// applies reports whether the rule governs an event on path. isDir is the event
+// object's directory-ness (FAN_ONDIR). The operation is not checked here: the
+// rule already lives in the operation's own list.
+func (r PathRule) applies(path string, isDir bool) bool {
 	if !r.Matches(path) {
-		return false
-	}
-	if r.OperationScoped && ruleScopeOp(r.Operation) != ruleScopeOp(op) {
 		return false
 	}
 	return !r.DirectoryOnly || isDir
 }
 
-// PathRules is an ordered list of PathRules. First match wins; if no
-// rule matches, Default is returned.
+// PathRules is an ordered list of PathRules governing a single operation. First
+// match wins; if no rule matches, Default is returned.
 type PathRules struct {
 	Rules   []PathRule
 	Default Verdict
 }
 
-// Decide implements Handler: look up the event's path in the rule list
-// and return the matching verdict (or the default).
+// match is the single shared matcher every decision path uses once the
+// operation's list has been selected. It walks the ordered list and returns
+// (verdict, true) on the first rule that applies, or (0, false) if none do.
+func (rs PathRules) match(path string, isDir bool) (Verdict, bool) {
+	for _, r := range rs.Rules {
+		if r.applies(path, isDir) {
+			return r.Verdict, true
+		}
+	}
+	return 0, false
+}
+
+// Decide implements Handler for a standalone list: match the event's path and
+// return the matching verdict, or the list default. A bare PathRules is one
+// operation's list, so the event's Op is not consulted -- routing to the right
+// list happens at the snapshot level.
 func (rs PathRules) Decide(_ context.Context, e *FileEvent) Verdict {
-	if v, ok := rs.LookupEvent(e.Path, e.Op, e.IsDir); ok {
+	if v, ok := rs.match(e.Path, e.IsDir); ok {
 		return v
 	}
 	return rs.Default
 }
 
-// Lookup walks the rule list and returns (verdict, true) on the first
-// match, or (zero, false) if no rule applies. Unlike Decide, Lookup
-// does not fall back to Default -- the caller decides what "no match"
-// means (e.g. prompt the user vs. apply a system-wide default).
+// Lookup returns the first matching verdict for path (directory discriminator
+// ignored), or (0, false) if no rule applies. Unlike Decide it does not fall
+// back to Default -- the caller decides what "no match" means.
 func (rs PathRules) Lookup(path string) (Verdict, bool) {
-	for _, r := range rs.Rules {
-		if r.Matches(path) {
-			return r.Verdict, true
-		}
-	}
-	return 0, false
-}
-
-// LookupEvent evaluates the first matching rule for this exact operation.
-func (rs PathRules) LookupEvent(path string, op FileOp, isDir bool) (Verdict, bool) {
-	for _, r := range rs.Rules {
-		if r.MatchesEvent(path, op, isDir) {
-			return r.Verdict, true
-		}
-	}
-	return 0, false
+	return rs.match(path, false)
 }
 
 func matchPathPattern(pattern, path string) bool {

@@ -436,7 +436,13 @@ func (c *PromptCoordinator) completeGroup(group *promptGroup, entries []promptEn
 }
 
 func decisionFromSnapshot(snapshot *DecisionSnapshot, path string, op FileOp, isDir bool) (Verdict, bool) {
-	if verdict, ok := snapshot.Rules.LookupEvent(path, op, isDir); ok {
+	verdict, matched, ok := snapshot.Lookup(path, op, isDir)
+	if !ok {
+		// Unsupported operation: fail closed without prompting rather than
+		// borrowing another list's policy.
+		return VerdictDeny, false
+	}
+	if matched {
 		return verdict, false
 	}
 	switch snapshot.DefaultAction {

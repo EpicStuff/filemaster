@@ -394,7 +394,7 @@ func TestShutdownPermanentRuleFlushTimeoutPreservesOverlay(t *testing.T) {
 	if err == nil {
 		t.Fatal("flush unexpectedly succeeded while storage was blocked")
 	}
-	if verdict, ok := merged.Rules.Lookup("/tmp/dirty"); !ok || verdict != VerdictDeny {
+	if verdict, ok := merged.Read.Lookup("/tmp/dirty"); !ok || verdict != VerdictDeny {
 		t.Fatalf("dirty overlay lost after timeout: verdict=%v ok=%t", verdict, ok)
 	}
 	diagnostics := persistence.Diagnostics()["local/profile"]
@@ -914,7 +914,7 @@ func TestShutdownWaitsForBlockedPermanentRuleWorkerAfterReport(t *testing.T) {
 		return persistence.stopped
 	})
 	merged := persistence.Apply(persistenceSnapshot(), &persistenceTestStore{}, "/tmp/rejected-after-shutdown", VerdictDeny)
-	if _, ok := merged.Rules.Lookup("/tmp/rejected-after-shutdown"); ok {
+	if _, ok := merged.Read.Lookup("/tmp/rejected-after-shutdown"); ok {
 		t.Fatal("shutdown accepted a new persistence request")
 	}
 

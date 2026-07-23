@@ -71,7 +71,7 @@ func (panicRefreshHandler) RefreshProcessMapping(context.Context, int32) error {
 
 func (s *orderedRuleStore) ID() string { return "profile" }
 
-func (s *orderedRuleStore) AppendRule(rule string) error {
+func (s *orderedRuleStore) AppendRule(_ FileOp, rule string) error {
 	s.mu.Lock()
 	*s.sequence = append(*s.sequence, "append")
 	s.appended = append(s.appended, rule)
@@ -86,12 +86,11 @@ func storedRules(store *fakeRuleStore) []string {
 }
 
 func (l *refreshingAskLookup) Lookup(context.Context, int32) (LookupResult, error) {
-	snapshot := newDecisionSnapshot("profile", "local", profile.DefaultActionAsk, nil, 1)
+	snapshot := newDecisionSnapshot("profile", "local", profile.DefaultActionAsk, ruleLists{}, 1)
 	return LookupResult{
 		Path:          "/usr/bin/test",
 		Store:         l.store,
 		Snapshot:      snapshot,
-		ParsedRules:   snapshot.Rules,
 		DefaultAction: snapshot.DefaultAction,
 		ProfileSource: snapshot.Source,
 	}, nil
@@ -477,10 +476,10 @@ func TestSnapshotObserverCanReenterSnapshotLookup(t *testing.T) {
 	lookup := &processProfileLookup{}
 	done := make(chan struct{})
 	lookup.setSnapshotObserver(func(*DecisionSnapshot) {
-		lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, nil)
+		lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, ruleLists{})
 		close(done)
 	})
-	go func() { lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, nil) }()
+	go func() { lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, ruleLists{}) }()
 	select {
 	case <-done:
 	case <-time.After(time.Second):

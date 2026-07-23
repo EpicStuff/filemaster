@@ -78,28 +78,35 @@ func TestPathRulesAsHandler(t *testing.T) {
 }
 
 func TestPathRulesScopeRulesToOperationAndDirectory(t *testing.T) {
-	rules := PathRules{
-		Rules: []PathRule{
-			{Pattern: "/tmp/report", Verdict: VerdictDeny, Exact: true, Operation: OpRead, OperationScoped: true},
-			{Pattern: "/tmp/folder", Verdict: VerdictDeny, Exact: true, Operation: OpRead, OperationScoped: true, DirectoryOnly: true},
+	// The rules live in the read list; the snapshot routes each operation to its
+	// own list, so cross-operation scoping is a snapshot property, not a rule one.
+	snapshot := &DecisionSnapshot{
+		Read: PathRules{
+			Rules: []PathRule{
+				{Pattern: "/tmp/report", Verdict: VerdictDeny, Exact: true},
+				{Pattern: "/tmp/folder", Verdict: VerdictDeny, Exact: true, DirectoryOnly: true},
+			},
+			Default: VerdictAllow,
 		},
-		Default: VerdictAllow,
+		Write: PathRules{Default: VerdictAllow},
 	}
 	// A read rule governs both reads and opens: FAN_OPEN_PERM opens fold to reads.
-	if got := rules.Decide(context.Background(), &FileEvent{Path: "/tmp/report", Op: OpRead}); got != VerdictDeny {
-		t.Fatalf("read verdict = %v, want deny", got)
+	if v, matched, ok := snapshot.Lookup("/tmp/report", OpRead, false); !ok || !matched || v != VerdictDeny {
+		t.Fatalf("read lookup = (%v, %t, %t), want (deny, true, true)", v, matched, ok)
 	}
-	if got := rules.Decide(context.Background(), &FileEvent{Path: "/tmp/report", Op: OpOpen}); got != VerdictDeny {
-		t.Fatalf("open verdict = %v, want deny (opens are governed by read rules)", got)
+	if v, matched, ok := snapshot.Lookup("/tmp/report", OpOpen, false); !ok || !matched || v != VerdictDeny {
+		t.Fatalf("open lookup = (%v, %t, %t), want (deny, true, true); opens are governed by read rules", v, matched, ok)
 	}
-	// But it must not leak to other operations.
-	if got := rules.Decide(context.Background(), &FileEvent{Path: "/tmp/report", Op: OpWrite}); got != VerdictAllow {
-		t.Fatalf("write verdict = %v, want allow (read rule must not govern writes)", got)
+	// But it must not leak to other operations: write is supported (ok) but no
+	// rule matches it (not matched), so the write default applies.
+	if _, matched, ok := snapshot.Lookup("/tmp/report", OpWrite, false); !ok || matched {
+		t.Fatalf("write lookup matched a read rule: matched=%t ok=%t", matched, ok)
 	}
-	if got := rules.Decide(context.Background(), &FileEvent{Path: "/tmp/folder", Op: OpRead, IsDir: false}); got != VerdictAllow {
-		t.Fatalf("file read should bypass directory-only rule, got %v", got)
+	// A directory-only rule must not apply to a file event on the same path.
+	if _, matched, ok := snapshot.Lookup("/tmp/folder", OpRead, false); !ok || matched {
+		t.Fatalf("file read matched a directory-only rule: matched=%t ok=%t", matched, ok)
 	}
-	if verdict, ok := rules.LookupEvent("/tmp/folder", OpRead, true); !ok || verdict != VerdictDeny {
-		t.Fatalf("directory read lookup = (%v, %t), want (deny, true)", verdict, ok)
+	if v, matched, ok := snapshot.Lookup("/tmp/folder", OpRead, true); !ok || !matched || v != VerdictDeny {
+		t.Fatalf("directory read lookup = (%v, %t, %t), want (deny, true, true)", v, matched, ok)
 	}
 }

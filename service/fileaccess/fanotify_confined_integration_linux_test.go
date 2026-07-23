@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -181,7 +182,7 @@ func testConfinedFanotifyIntegrationChild(t *testing.T) {
 	}
 
 promptCompleted:
-	handler.denyPath = denyPath
+	handler.denyPath.Store(&denyPath)
 	if err := openAndRead(denyPath); err == nil {
 		t.Fatal("real fanotify deny did not reject the syscall")
 	}
@@ -281,11 +282,13 @@ func (p confinedPrompter) Prompt(_ context.Context, event FileEvent, _ time.Dura
 type confinedFanotifyHandler struct {
 	coordinator *PromptCoordinator
 	snapshot    *DecisionSnapshot
-	denyPath    string
+	// denyPath is set by the test goroutine after the first prompt resolves while
+	// the pipeline goroutine reads it in Decide, so it is accessed atomically.
+	denyPath atomic.Pointer[string]
 }
 
 func (h *confinedFanotifyHandler) Decide(_ context.Context, event *FileEvent) Verdict {
-	if event.Path == h.denyPath {
+	if deny := h.denyPath.Load(); deny != nil && event.Path == *deny {
 		return VerdictDeny
 	}
 	return VerdictAllow
@@ -304,7 +307,7 @@ type confinedRuleStore struct{}
 
 func (confinedRuleStore) ID() string { return "confined-integration" }
 
-func (confinedRuleStore) AppendRule(string) error { return nil }
+func (confinedRuleStore) AppendRule(FileOp, string) error { return nil }
 
 var _ RuleStore = confinedRuleStore{}
 var _ Handler = (*confinedFanotifyHandler)(nil)

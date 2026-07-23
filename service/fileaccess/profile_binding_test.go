@@ -125,20 +125,20 @@ func TestProcessProfileLookupReusesPortmasterIdentityStore(t *testing.T) {
 func TestDecisionSnapshotReplacementCopiesRulesAndDetectsEqualLengthEdits(t *testing.T) {
 	lookup := &processProfileLookup{}
 	rules := []string{"+ /tmp/rule"}
-	first := lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, rules)
+	first := lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, ruleLists{read: rules})
 	rules[0] = "- /tmp/rule"
-	if verdict, ok := first.Rules.Lookup("/tmp/rule"); !ok || verdict != VerdictAllow {
+	if verdict, ok := first.Read.Lookup("/tmp/rule"); !ok || verdict != VerdictAllow {
 		t.Fatalf("first snapshot changed after source mutation: verdict=%s ok=%v", verdict, ok)
 	}
 
-	second := lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, rules)
-	if same := lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, rules); same != second {
+	second := lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, ruleLists{read: rules})
+	if same := lookup.snapshotFor("profile", "local", profile.DefaultActionAsk, ruleLists{read: rules}); same != second {
 		t.Fatal("unchanged profile rules replaced their immutable snapshot")
 	}
 	if second == first || second.Revision <= first.Revision {
 		t.Fatalf("snapshot replacement = %#v -> %#v, want newer immutable snapshot", first, second)
 	}
-	if verdict, ok := second.Rules.Lookup("/tmp/rule"); !ok || verdict != VerdictDeny {
+	if verdict, ok := second.Read.Lookup("/tmp/rule"); !ok || verdict != VerdictDeny {
 		t.Fatalf("equal-length rule edit verdict=%s ok=%v, want deny", verdict, ok)
 	}
 }

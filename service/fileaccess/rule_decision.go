@@ -120,29 +120,41 @@ func (op DecisionOp) entryOp() bool {
 	return op == DecisionCreate || op == DecisionDelete
 }
 
-// ruleAppliesToDecision reports whether rule r governs op on path. A rule
-// applies if it matches the object's own path under the governing list scope,
-// or -- for entry operations -- if it matches the containing folder.
+// ruleAppliesToDecision reports whether rule r governs op on path. The rule's
+// list has already been selected for op's operation, so the operation itself is
+// not re-checked here. A rule applies if it matches the object's own path, or --
+// for entry operations -- if it matches the containing folder.
 func ruleAppliesToDecision(r PathRule, path string, op DecisionOp, isDir bool) bool {
-	if r.MatchesEvent(path, op.scopeOp(), isDir) {
+	if r.applies(path, isDir) {
 		return true
 	}
 	if op.entryOp() {
 		// Create/Delete modify an entry inside the containing folder, so a rule
 		// on that folder applies too. The folder is always a directory.
-		if r.MatchesEvent(filepath.Dir(path), op.scopeOp(), true) {
+		if r.applies(filepath.Dir(path), true) {
 			return true
 		}
 	}
 	return false
 }
 
-// DecideOperation returns the verdict for op on path. The first rule in the
-// shared ordered list that applies decides; if none apply, the list default
-// decides (backend-todo-plan section 3). File and folder rules live in one
-// ordered list and neither outranks the other by kind -- only list order
-// matters.
-func (rs PathRules) DecideOperation(path string, op DecisionOp, isDir bool) Verdict {
+// DecideOperation returns the verdict for op on path, routing to the operation's
+// own rule list and applying the shared matcher over it. An unsupported
+// operation fails closed (Deny) rather than borrowing another list's policy.
+func (s *DecisionSnapshot) DecideOperation(path string, op DecisionOp, isDir bool) Verdict {
+	rules, ok := s.rulesFor(op.scopeOp())
+	if !ok {
+		return VerdictDeny
+	}
+	return rules.decideOperation(path, op, isDir)
+}
+
+// decideOperation evaluates op against this (already operation-selected) list.
+// The first rule that applies decides; if none apply, the list default decides
+// (backend-todo-plan section 3). File and folder rules live in one ordered list
+// and neither outranks the other by kind -- only list order matters. The
+// DecisionOp is used only for entry-operation parent-folder semantics.
+func (rs PathRules) decideOperation(path string, op DecisionOp, isDir bool) Verdict {
 	for _, r := range rs.Rules {
 		if ruleAppliesToDecision(r, path, op, isDir) {
 			return r.Verdict
@@ -172,17 +184,17 @@ type RenameRequest struct {
 // existing object's own Write (a parent-folder Allow does not by itself
 // authorize destroying it) and the folder-entry replacement (a parent-folder
 // Deny can still block it).
-func (rs PathRules) DecideRename(req RenameRequest) Verdict {
-	if rs.DecideOperation(req.Source, DecisionDelete, req.SourceIsDir) == VerdictDeny {
+func (s *DecisionSnapshot) DecideRename(req RenameRequest) Verdict {
+	if s.DecideOperation(req.Source, DecisionDelete, req.SourceIsDir) == VerdictDeny {
 		return VerdictDeny
 	}
 	if !req.DestExists {
-		return rs.DecideOperation(req.Dest, DecisionCreate, req.DestIsDir)
+		return s.DecideOperation(req.Dest, DecisionCreate, req.DestIsDir)
 	}
-	if rs.DecideOperation(req.Dest, DecisionWrite, req.DestIsDir) == VerdictDeny {
+	if s.DecideOperation(req.Dest, DecisionWrite, req.DestIsDir) == VerdictDeny {
 		return VerdictDeny
 	}
-	return rs.DecideOperation(req.Dest, DecisionDelete, req.DestIsDir)
+	return s.DecideOperation(req.Dest, DecisionDelete, req.DestIsDir)
 }
 
 // LinkRequest bundles the decisions creating a link needs. Future/LSM only.
@@ -199,13 +211,13 @@ type LinkRequest struct {
 // has: it requires Source Read AND Write AND Execute, plus Destination Create
 // (and Destination Delete first if the destination already exists). The first
 // denying decision determines the result (backend-todo-plan "Stuff" / Links).
-func (rs PathRules) DecideHardLink(req LinkRequest) Verdict {
+func (s *DecisionSnapshot) DecideHardLink(req LinkRequest) Verdict {
 	for _, op := range [...]DecisionOp{DecisionRead, DecisionWrite, DecisionExecute} {
-		if rs.DecideOperation(req.Source, op, req.SourceIsDir) == VerdictDeny {
+		if s.DecideOperation(req.Source, op, req.SourceIsDir) == VerdictDeny {
 			return VerdictDeny
 		}
 	}
-	return rs.decideDestinationCreate(req)
+	return s.decideDestinationCreate(req)
 }
 
 // DecideSymlink evaluates creating a symbolic link. A symlink is an independent
@@ -213,17 +225,17 @@ func (rs PathRules) DecideHardLink(req LinkRequest) Verdict {
 // target and needs only Destination Create (and Destination Delete first if the
 // destination already exists). Access through the symlink is governed later by
 // the rules for the resolved target path.
-func (rs PathRules) DecideSymlink(req LinkRequest) Verdict {
-	return rs.decideDestinationCreate(req)
+func (s *DecisionSnapshot) DecideSymlink(req LinkRequest) Verdict {
+	return s.decideDestinationCreate(req)
 }
 
 // decideDestinationCreate is the shared destination decision for links: Delete
 // the existing destination first if present, then Create.
-func (rs PathRules) decideDestinationCreate(req LinkRequest) Verdict {
+func (s *DecisionSnapshot) decideDestinationCreate(req LinkRequest) Verdict {
 	if req.DestExists {
-		if rs.DecideOperation(req.Dest, DecisionDelete, req.DestIsDir) == VerdictDeny {
+		if s.DecideOperation(req.Dest, DecisionDelete, req.DestIsDir) == VerdictDeny {
 			return VerdictDeny
 		}
 	}
-	return rs.DecideOperation(req.Dest, DecisionCreate, req.DestIsDir)
+	return s.DecideOperation(req.Dest, DecisionCreate, req.DestIsDir)
 }

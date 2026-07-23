@@ -12,11 +12,21 @@ import (
 // trigger a refusal to load (rather than silently losing state) so we
 // notice incompatible schema changes during development.
 type persistedFile struct {
-	Version int                    `json:"version"`
-	Rules   map[string][]PathRule  `json:"rules"`
+	Version int                         `json:"version"`
+	Rules   map[string]persistedRuleSet `json:"rules"`
 }
 
-const persistedFileVersion = 1
+// persistedRuleSet is the on-disk form of an exe's three per-operation lists.
+type persistedRuleSet struct {
+	Read  []PathRule `json:"read"`
+	Write []PathRule `json:"write"`
+	Exec  []PathRule `json:"exec"`
+}
+
+// persistedFileVersion is 2 since the split of the single per-exe rule list into
+// three per-operation lists (and the removal of PathRule's operation fields).
+// A version-1 file is refused; development databases must be recreated.
+const persistedFileVersion = 2
 
 // Save writes the handler's per-exe rule map to disk as JSON. Safe to
 // call from any goroutine; takes the handler's read lock.
@@ -29,11 +39,13 @@ func (h *PromptHandler) Save(path string) error {
 	}
 
 	h.rulesMu.RLock()
-	snapshot := make(map[string][]PathRule, len(h.rules))
-	for exe, rs := range h.rules {
-		rules := make([]PathRule, len(rs.Rules))
-		copy(rules, rs.Rules)
-		snapshot[exe] = rules
+	snapshot := make(map[string]persistedRuleSet, len(h.rules))
+	for exe, set := range h.rules {
+		snapshot[exe] = persistedRuleSet{
+			Read:  append([]PathRule(nil), set.read.Rules...),
+			Write: append([]PathRule(nil), set.write.Rules...),
+			Exec:  append([]PathRule(nil), set.exec.Rules...),
+		}
 	}
 	h.rulesMu.RUnlock()
 
@@ -80,11 +92,12 @@ func (h *PromptHandler) Load(path string) error {
 
 	h.rulesMu.Lock()
 	defer h.rulesMu.Unlock()
-	h.rules = make(map[string]*PathRules, len(payload.Rules))
-	for exe, rules := range payload.Rules {
-		h.rules[exe] = &PathRules{
-			Rules:   append([]PathRule(nil), rules...),
-			Default: h.initial.Default,
+	h.rules = make(map[string]*exeRuleSet, len(payload.Rules))
+	for exe, set := range payload.Rules {
+		h.rules[exe] = &exeRuleSet{
+			read:  PathRules{Rules: append([]PathRule(nil), set.Read...), Default: h.initial.Default},
+			write: PathRules{Rules: append([]PathRule(nil), set.Write...), Default: h.initial.Default},
+			exec:  PathRules{Rules: append([]PathRule(nil), set.Exec...), Default: h.initial.Default},
 		}
 	}
 	return nil

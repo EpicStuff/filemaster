@@ -52,6 +52,12 @@ Deleting or renaming `/folder/file.txt` is allowed because the file Allow is the
 
 A rule for `/folder` controls the folder itself and operations involving its entries. It does not automatically control content changes to existing descendants. A recursive rule such as `/folder/**` may control matching descendants.
 
+### Implementation: separate per-operation lists
+
+The Access, Write, and Execute rules are stored in three separate profile config keys (`fileaccess/readRules`, `fileaccess/writeRules`, `fileaccess/execRules`) and are also kept **separate after parsing**: a `DecisionSnapshot` holds one parsed `PathRules` list per operation plus one shared default action, all published together as one immutable value. Deciding an event determines the operation, selects the matching list via `DecisionSnapshot.rulesFor` (the single routing point; opens fold to the Read list, an unsupported operation fails closed and never borrows another list), then runs the one shared matcher over that list, applying the shared default on no match. Each rule's operation is implied by the list it lives in — it is not encoded in the parsed rule or in the stored string. Stored rules are untagged: a glob/recursive `+ /foo/**`, an exact file `+ @"/foo"`, or an exact directory `+ @dir:"/foo"`.
+
+**Development reset requirement.** This refactor removed the internal operation-tagged rule representation and changed the on-disk schema of the fallback per-exe rules file (`persistedFileVersion` 1 → 2, now three lists per exe). A version-1 fallback file is refused rather than silently dropped. Backward compatibility with existing development databases is intentionally not provided: **after pulling this change, delete and recreate the Filemaster/profile database (and any fallback rules file) so special profiles are re-seeded.** The stored per-operation rule strings themselves are unchanged, so profile rule content is not lost by editing, but a clean reset is the supported path and avoids the refused fallback file.
+
 ## 4. Current Access Behaviour
 
 ### File Access
