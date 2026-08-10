@@ -23,15 +23,15 @@ Environment=FILEMASTER_ARGS=
 EnvironmentFile=-/etc/default/filemaster
 ProtectSystem=true
 ReadWritePaths=/opt/filemaster
-RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 ProtectHome=read-only
 ProtectKernelTunables=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 PrivateDevices=yes
-AmbientCapabilities=cap_chown cap_kill cap_net_admin cap_net_bind_service cap_net_broadcast cap_net_raw cap_sys_admin cap_sys_module cap_sys_ptrace cap_dac_override cap_fowner cap_fsetid cap_sys_resource cap_bpf cap_perfmon
-CapabilityBoundingSet=cap_chown cap_kill cap_net_admin cap_net_bind_service cap_net_broadcast cap_net_raw cap_sys_admin cap_sys_module cap_sys_ptrace cap_dac_override cap_fowner cap_fsetid cap_sys_resource cap_bpf cap_perfmon
+AmbientCapabilities=cap_sys_admin cap_dac_override cap_sys_ptrace
+CapabilityBoundingSet=cap_sys_admin cap_dac_override cap_sys_ptrace
 # TODO(ppacher): add --disable-software-updates once it's merged and the release process changed.
 WorkingDirectory=/var/lib/filemaster
 ExecStart=/opt/filemaster/filemaster-core --bin-dir /opt/filemaster --data-dir /var/lib/filemaster -- $FILEMASTER_ARGS
