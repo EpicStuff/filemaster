@@ -5,7 +5,6 @@ Documentation=https://docs.safing.io
 Before=nss-lookup.target network.target shutdown.target
 After=systemd-networkd.service
 Conflicts=shutdown.target
-Conflicts=firewalld.service
 Wants=nss-lookup.target
 
 [Service]
