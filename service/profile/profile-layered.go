@@ -246,6 +246,24 @@ func (profile *Profile) EffectiveDefaultAction() uint8 {
 	return layeredProfile.DefaultAction()
 }
 
+// EffectiveFileEventHistoryRetentionDays returns the configured file-event
+// retention period for this profile, falling back to the global setting.
+func (profile *Profile) EffectiveFileEventHistoryRetentionDays() int64 {
+	layeredProfile := profile.LayeredProfile()
+	if layeredProfile == nil {
+		return cfgOptionFileEventHistoryRetention()
+	}
+
+	layeredProfile.LockForUsage()
+	defer layeredProfile.UnlockForUsage()
+	for _, layer := range layeredProfile.layers {
+		if retentionDays, ok := layer.configPerspective.GetAsInt(CfgOptionFileEventHistoryRetentionKey); ok {
+			return retentionDays
+		}
+	}
+	return cfgOptionFileEventHistoryRetention()
+}
+
 // GetProfileSource returns the database key of the first profile in the
 // layers that has the given configuration key set. If it returns an empty
 // string, the global profile can be assumed to have been effective.

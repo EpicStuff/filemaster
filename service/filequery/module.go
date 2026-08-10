@@ -3,6 +3,7 @@ package filequery
 
 import (
 	"fmt"
+	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
 
@@ -79,6 +80,20 @@ func NewFileQuery(inst instance) (*FileQuery, error) {
 		return nil, fmt.Errorf("register filequery/query/batch endpoint: %w", err)
 	}
 
+	if err := api.RegisterEndpoint(api.Endpoint{
+		Name:  "Apply file-event history retention threshold",
+		Path:  "filequery/history/cleanup",
+		Write: api.PermitUser,
+		ActionFunc: func(ar *api.Request) (string, error) {
+			if err := db.CleanupHistory(ar.Context()); err != nil {
+				return "", err
+			}
+			return "Deleted expired file events.", nil
+		},
+	}); err != nil {
+		return nil, fmt.Errorf("register filequery/history/cleanup endpoint: %w", err)
+	}
+
 	return fq, nil
 }
 
@@ -98,6 +113,9 @@ func (fq *FileQuery) Start() error {
 		m := newManager(fq.db, fq.feed)
 		return m.Run(w.Ctx())
 	})
+	fq.mgr.Delay("file-event history cleaner delay", 10*time.Minute, func(w *mgr.WorkerCtx) error {
+		return fq.db.CleanupHistory(w.Ctx())
+	}).Repeat(1 * time.Hour)
 
 	return nil
 }

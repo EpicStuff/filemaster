@@ -23,6 +23,13 @@ var (
 	DefaultActionAskValue    = "ask"
 )
 
+// File-event history options.
+var (
+	CfgOptionFileEventHistoryRetentionKey   = "fileaccess/historyRetention"
+	cfgOptionFileEventHistoryRetention      config.IntOption
+	cfgOptionFileEventHistoryRetentionOrder = 4
+)
+
 // File-access rules options. Rules are split by filesystem operation —
 // read, write, and execute — mirroring how upstream Portmaster keeps
 // separate incoming/outgoing rule lists. Each entry is "<verdict> <pattern>",
@@ -54,6 +61,9 @@ var (
 func GlobalFileAccessReadRules() []string  { return globalRuleList(&cfgFileAccessReadRules) }
 func GlobalFileAccessWriteRules() []string { return globalRuleList(&cfgFileAccessWriteRules) }
 func GlobalFileAccessExecRules() []string  { return globalRuleList(&cfgFileAccessExecRules) }
+
+// FileEventHistoryRetentionDays returns the global history retention period.
+func FileEventHistoryRetentionDays() int64 { return cfgOptionFileEventHistoryRetention() }
 
 // globalRuleList copies a cached global rule list under cfgLock. It takes a
 // pointer so the slice header is read while the lock is held, not at call time.
@@ -103,6 +113,28 @@ func registerConfiguration() error { //nolint:maintidx
 	}
 	cfgOptionDefaultAction = config.Concurrent.GetAsString(CfgOptionDefaultActionKey, DefaultActionPermitValue)
 	cfgStringOptions[CfgOptionDefaultActionKey] = cfgOptionDefaultAction
+
+	err = config.Register(&config.Option{
+		Name: "Keep File Event History",
+		Key:  CfgOptionFileEventHistoryRetentionKey,
+		Description: `Specify how many days file-event history should be kept. Older events are deleted periodically.
+
+	Set to 0 days to keep file-event history forever. Depending on file activity and available disk space, this may affect performance.`,
+		OptType:        config.OptTypeInt,
+		ExpertiseLevel: config.ExpertiseLevelUser,
+		DefaultValue:   30,
+		Annotations: config.Annotations{
+			config.SettablePerAppAnnotation: true,
+			config.UnitAnnotation:           "Days",
+			config.DisplayOrderAnnotation:   cfgOptionFileEventHistoryRetentionOrder,
+			config.CategoryAnnotation:       "File Access",
+		},
+	})
+	if err != nil {
+		return err
+	}
+	cfgOptionFileEventHistoryRetention = config.Concurrent.GetAsInt(CfgOptionFileEventHistoryRetentionKey, 30)
+	cfgIntOptions[CfgOptionFileEventHistoryRetentionKey] = cfgOptionFileEventHistoryRetention
 
 	// File-Access Rules, split by operation. One list per operation mirrors
 	// upstream Portmaster's separate Incoming/Outgoing rule lists: the list an
