@@ -76,10 +76,12 @@ type ruleLists struct {
 // default action. Ported from upstream Portmaster's LayeredProfile.MatchEndpoint,
 // which checks each profile layer and then falls back to the global rule list.
 func scopedRuleLists(read, write, exec []string) ruleLists {
+	globalRead, globalWrite, globalExec := profile.GlobalFileAccessRules()
+
 	return ruleLists{
-		read:  appendGlobalRules(read, profile.GlobalFileAccessReadRules()),
-		write: appendGlobalRules(write, profile.GlobalFileAccessWriteRules()),
-		exec:  appendGlobalRules(exec, profile.GlobalFileAccessExecRules()),
+		read:  appendGlobalRules(read, globalRead),
+		write: appendGlobalRules(write, globalWrite),
+		exec:  appendGlobalRules(exec, globalExec),
 	}
 }
 

@@ -69,6 +69,7 @@ node desktop/angular/screenshot.mjs http://localhost:4200/settings   ./tmp/setti
   check network tab in devtools or daemon logs for 403s.
 - **Important**: Also make sure to check the bug you are fixing or the feature
   you are implementing is actually working/fixed.
+- make sure to stop/kill the program/ui after testing is done
 
 ## Other conventions
 

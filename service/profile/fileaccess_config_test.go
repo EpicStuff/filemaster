@@ -59,3 +59,46 @@ func TestGlobalFileAccessRulesWired(t *testing.T) {
 		}
 	}
 }
+
+func TestGlobalFileAccessRulesReturnsIndependentSnapshot(t *testing.T) {
+	cfgLock.Lock()
+	originalRead := cfgFileAccessReadRules
+	originalWrite := cfgFileAccessWriteRules
+	originalExec := cfgFileAccessExecRules
+	cfgFileAccessReadRules = []string{"+ /read/**"}
+	cfgFileAccessWriteRules = []string{"+ /write/**"}
+	cfgFileAccessExecRules = []string{"+ /exec/**"}
+	cfgLock.Unlock()
+	t.Cleanup(func() {
+		cfgLock.Lock()
+		cfgFileAccessReadRules = originalRead
+		cfgFileAccessWriteRules = originalWrite
+		cfgFileAccessExecRules = originalExec
+		cfgLock.Unlock()
+	})
+
+	read, write, exec := GlobalFileAccessRules()
+	if len(read) != 1 || read[0] != "+ /read/**" {
+		t.Errorf("read rules = %v, want [+ /read/**]", read)
+	}
+	if len(write) != 1 || write[0] != "+ /write/**" {
+		t.Errorf("write rules = %v, want [+ /write/**]", write)
+	}
+	if len(exec) != 1 || exec[0] != "+ /exec/**" {
+		t.Errorf("exec rules = %v, want [+ /exec/**]", exec)
+	}
+
+	read[0] = "- /changed"
+	write[0] = "- /changed"
+	exec[0] = "- /changed"
+	againRead, againWrite, againExec := GlobalFileAccessRules()
+	if againRead[0] != "+ /read/**" {
+		t.Errorf("read snapshot aliases cached rules: got %q", againRead[0])
+	}
+	if againWrite[0] != "+ /write/**" {
+		t.Errorf("write snapshot aliases cached rules: got %q", againWrite[0])
+	}
+	if againExec[0] != "+ /exec/**" {
+		t.Errorf("exec snapshot aliases cached rules: got %q", againExec[0])
+	}
+}

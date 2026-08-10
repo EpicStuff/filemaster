@@ -62,6 +62,17 @@ func GlobalFileAccessReadRules() []string  { return globalRuleList(&cfgFileAcces
 func GlobalFileAccessWriteRules() []string { return globalRuleList(&cfgFileAccessWriteRules) }
 func GlobalFileAccessExecRules() []string  { return globalRuleList(&cfgFileAccessExecRules) }
 
+// GlobalFileAccessRules returns independent copies of all global file-access
+// rule lists from one configuration generation.
+func GlobalFileAccessRules() (read, write, exec []string) {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+
+	return append([]string(nil), cfgFileAccessReadRules...),
+		append([]string(nil), cfgFileAccessWriteRules...),
+		append([]string(nil), cfgFileAccessExecRules...)
+}
+
 // FileEventHistoryRetentionDays returns the global history retention period.
 func FileEventHistoryRetentionDays() int64 { return cfgOptionFileEventHistoryRetention() }
 

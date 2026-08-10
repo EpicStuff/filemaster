@@ -33,6 +33,9 @@ allow/deny, not redirect.
 - try to make is so a root virus cant stop filemaster without user noticing
 - look into "the curent intended design is that the user facing rules do not differentiate between folders and files, but i guess some way to tag the rule as for only folders or only files could be nice, like how i think portmaster has a upd/tcp tag"
 	```Normal user facing rules intentionally apply to both files and folders, so the absence of a file only distinction is not currently a correctness problem.
+- ui: deal with welcome/first time popup, file access enforcement error/warning needs more info, especially the popup
+- seeded rules, filemaster, get rid of duplicate install/filemaster and instal/**
+- deal with the get help enforcement error button
 
 The rule language could optionally support qualifiers such as:
 
@@ -49,9 +52,4 @@ This would allow advanced users to restrict a rule to only files or only folders
 
 ## Cross-cutting cleanup
 
-- [ ] Rename the binary and module path from `portmaster` to `filemaster`.
-	The module-path rename touches every Go file.
 - [ ] Drop the `safing.io` / Portmaster branding from `info/info.go`.
-- [ ] Replace remaining Portmaster/Safing strings, URLs, updater defaults,
-	and CSP allowances across the UI, prompt text, support surfaces, and Tauri
-	metadata.
