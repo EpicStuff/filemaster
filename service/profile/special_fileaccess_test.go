@@ -21,8 +21,13 @@ func requireProfileConfiguration(t *testing.T) {
 
 func TestFilemasterSpecialProfileSeedsEditableRules(t *testing.T) {
 	requireProfileConfiguration(t)
+	previousHomes := userHomeDirsFunc
+	userHomeDirsFunc = func() []string { return []string{"/home/tester"} }
 	SetFilemasterSeedPaths("/opt/filemaster", "/var/lib/filemaster")
-	t.Cleanup(func() { SetFilemasterSeedPaths("", "") })
+	t.Cleanup(func() {
+		userHomeDirsFunc = previousHomes
+		SetFilemasterSeedPaths("", "")
+	})
 
 	p := createSpecialProfile(PortmasterProfileID, "/opt/filemaster/filemaster")
 	if p == nil {
@@ -38,6 +43,11 @@ func TestFilemasterSpecialProfileSeedsEditableRules(t *testing.T) {
 		"+ /opt/filemaster/filemaster",
 		"+ /opt/filemaster/**",
 		"+ /var/lib/filemaster/**",
+		"+ /home/tester/.config/filemaster/**",
+		"+ /home/tester/.local/share/filemaster/**",
+		"+ /home/tester/.cache/filemaster/**",
+		"+ /home/tester/.cache/mesa_shader_cache/**",
+		"+ /home/tester/.cache/dconf/**",
 	}
 	if got := p.GetFileAccessReadRules(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("read seed rules = %#v, want %#v", got, want)
@@ -80,13 +90,25 @@ func TestSystemdSpecialProfileSeedsRulesWithoutDefaultAction(t *testing.T) {
 
 func TestFilemasterAppSpecialProfilesSeedRulesWithoutDefaultAction(t *testing.T) {
 	requireProfileConfiguration(t)
+	previousHomes := userHomeDirsFunc
+	userHomeDirsFunc = func() []string { return []string{"/home/tester"} }
 	SetFilemasterSeedPaths("/opt/filemaster", "/var/lib/filemaster")
-	t.Cleanup(func() { SetFilemasterSeedPaths("", "") })
+	t.Cleanup(func() {
+		userHomeDirsFunc = previousHomes
+		SetFilemasterSeedPaths("", "")
+	})
 
+	// The desktop's own state directories are seeded so it never blocks on its
+	// own storage in prompt mode.
 	want := []string{
 		"+ /opt/filemaster/filemaster",
 		"+ /opt/filemaster/**",
 		"+ /var/lib/filemaster/**",
+		"+ /home/tester/.config/filemaster/**",
+		"+ /home/tester/.local/share/filemaster/**",
+		"+ /home/tester/.cache/filemaster/**",
+		"+ /home/tester/.cache/mesa_shader_cache/**",
+		"+ /home/tester/.cache/dconf/**",
 	}
 	for _, id := range []string{PortmasterAppProfileID, PortmasterNotifierProfileID} {
 		p := createSpecialProfile(id, "/opt/filemaster/filemaster")

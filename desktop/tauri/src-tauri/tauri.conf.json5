@@ -39,7 +39,7 @@
     }
   },
   "productName": "Filemaster",
-  "identifier": "io.safing.filemaster", // distinct from upstream Portmaster so the single-instance lock does not collide; lets filemaster run side-by-side. Also the shortcut/notification ApplicationUserModelID.
+  "identifier": "filemaster", // distinct from upstream Portmaster so the single-instance lock does not collide; lets filemaster run side-by-side. Also the shortcut/notification ApplicationUserModelID.
   "app": {
     "withGlobalTauri": true,
     "enableGTKAppId": false,

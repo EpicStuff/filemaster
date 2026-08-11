@@ -6,7 +6,9 @@ package profile
 // source of truth. Adding a new seeded profile is a single fileAccessSeeds entry.
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -22,13 +24,82 @@ type filemasterFileAccessSeeds struct {
 	exec   []string
 }
 
+// filemasterUIAppDirs are the desktop's runtime state directories, relative to a
+// user's home. Without them the desktop blocks on its own storage in prompt
+// mode: the prompt that would decide the access is rendered by the process the
+// access is blocking. WebKitGTK derives its directory names from the binary
+// name, Tauri from the bundle identifier, hence both.
+var filemasterUIAppDirs = []string{
+	".config/filemaster",      // window state
+	".local/share/filemaster", // mediakeys, storage
+	".local/share/filemaster", // WebKit HSTS store
+	".cache/filemaster",       // WebKitCache, CacheStorage
+	// Shared GTK/GPU runtime caches. Not Filemaster's, but the desktop cannot
+	// render without them, and a prompt for them cannot be answered.
+	".cache/mesa_shader_cache",
+	".cache/dconf",
+}
+
+// filemasterUISeedPaths expands filemasterUIAppDirs across the home directories
+// the desktop can run from. Rule patterns match literal prefixes, so per-user
+// paths cannot be expressed as a wildcard and have to be enumerated.
+func filemasterUISeedPaths() []string {
+	var paths []string
+	for _, home := range userHomeDirsFunc() {
+		for _, dir := range filemasterUIAppDirs {
+			paths = append(paths, filepath.Join(home, dir))
+		}
+	}
+	return paths
+}
+
+// userHomeDirsFunc is swapped in tests to keep seed expectations off the host's
+// real accounts.
+var userHomeDirsFunc = userHomeDirs
+
+// userHomeDirs returns the home directories of accounts that can run the
+// desktop, limited to /home and /root to keep the seed off system accounts.
+// Directories under /home are included even without a passwd entry, so that
+// directory-service accounts (LDAP, SSSD) are covered too.
+func userHomeDirs() []string {
+	seen := make(map[string]struct{})
+	var homes []string
+	add := func(home string) {
+		home = filepath.Clean(home)
+		if home != "/root" && !strings.HasPrefix(home, "/home/") {
+			return
+		}
+		if _, ok := seen[home]; ok {
+			return
+		}
+		seen[home] = struct{}{}
+		homes = append(homes, home)
+	}
+
+	if contents, err := os.ReadFile("/etc/passwd"); err == nil {
+		for _, line := range strings.Split(string(contents), "\n") {
+			if fields := strings.Split(line, ":"); len(fields) >= 6 {
+				add(fields[5])
+			}
+		}
+	}
+	if entries, err := os.ReadDir("/home"); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				add(filepath.Join("/home", entry.Name()))
+			}
+		}
+	}
+	return homes
+}
+
 // SetFilemasterSeedPaths supplies the stable runtime directories used when a
-// Filemaster special profile is first created. binDir and dataDir are granted
-// File Access; only the executable and binDir are executable. Existing
-// profiles are left untouched: during development, delete the profile database
-// to recreate them with new seed values.
+// Filemaster special profile is first created. binDir, dataDir and the desktop's
+// per-user state directories are granted File Access; only the executable and
+// binDir are executable. Existing profiles are left untouched: during
+// development, delete the profile database to recreate them with new seed values.
 func SetFilemasterSeedPaths(binDir, dataDir string) {
-	paths := []string{binDir, dataDir}
+	paths := append([]string{binDir, dataDir}, filemasterUISeedPaths()...)
 	seen := make(map[string]struct{}, len(paths))
 	access := make([]string, 0, len(paths))
 	for _, path := range paths {
@@ -185,8 +256,10 @@ var fileAccessSeeds = map[string]fileAccessSeed{
 }
 
 // filemasterSelfSeed seeds Filemaster's own profiles: File Access covers the
-// executable and the runtime directories (data dir included), while Execute is
-// limited to the executable and the binary directory.
+// executable and the runtime directories (data dir and the desktop's per-user
+// state included), while Execute is limited to the executable and the binary
+// directory. Write rules stay unseeded because no runtime write event exists
+// yet; FAN_OPEN_PERM covers opening for write and is governed by File Access.
 func filemasterSelfSeed(path string) map[string]interface{} {
 	return map[string]interface{}{
 		CfgOptionFileAccessReadRulesKey: filemasterFileAccessRules(path),

@@ -4,6 +4,8 @@ package fileaccess
 
 import (
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/safing/portmaster/service/mgr"
 )
@@ -22,6 +24,9 @@ type DegradedWarning struct {
 	ID       string
 	Severity string
 	Message  string
+	// Details carries the operational data needed to act on the warning. It
+	// stays free of file paths that belong to watched user data.
+	Details string
 }
 
 // FileAccessDiagnostics is a race-safe, value-only diagnostic snapshot. It
@@ -108,13 +113,68 @@ func (fa *FileAccess) Diagnostics() FileAccessDiagnostics {
 	return diagnostics
 }
 
+// mountCoverageDetails renders the scope and mount data behind a coverage
+// warning. Coverage that could not be determined is stated as such, because an
+// empty missing-mount list would otherwise read as "nothing missing".
+func mountCoverageDetails(mount MountDiagnostics) string {
+	var details []string
+	if len(mount.ConfiguredScopes) > 0 {
+		details = append(details, "configured="+strings.Join(mount.ConfiguredScopes, ","))
+	}
+	if len(mount.CanonicalScopes) > 0 {
+		details = append(details, "canonical="+strings.Join(mount.CanonicalScopes, ","))
+	}
+	if len(mount.PendingScopes) > 0 {
+		details = append(details, "pending="+strings.Join(mount.PendingScopes, ","))
+	}
+	if mount.CoverageKnown {
+		details = append(details, "active_mount_ids="+formatMountIDs(mount.ActiveMountIDs))
+		details = append(details, "missing_mount_ids="+formatMountIDs(mount.MissingMountIDs))
+	} else {
+		details = append(details, "coverage unknown: mountinfo could not be read")
+	}
+	if mount.MountNamespaceIsolated {
+		details = append(details, "mount_namespace=isolated")
+	}
+	for _, entry := range mount.MountInfoEntries {
+		details = append(details, "mountinfo["+entry+"]")
+	}
+	if mount.LastError != "" {
+		details = append(details, "err="+mount.LastError)
+	}
+	return strings.Join(details, " ")
+}
+
+func formatMountIDs(ids []int) string {
+	if len(ids) == 0 {
+		return "none"
+	}
+	formatted := make([]string, 0, len(ids))
+	for _, id := range ids {
+		formatted = append(formatted, strconv.Itoa(id))
+	}
+	return strings.Join(formatted, ",")
+}
+
 func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 	warnings := make([]DegradedWarning, 0, 10)
-	appendWarning := func(id, severity, message string) {
-		warnings = append(warnings, DegradedWarning{ID: id, Severity: severity, Message: message})
+	appendWarning := func(id, severity, message string, details ...string) {
+		warnings = append(warnings, DegradedWarning{
+			ID:       id,
+			Severity: severity,
+			Message:  message,
+			Details:  strings.Join(details, " "),
+		})
 	}
 	if diagnostics.Mount.PartialCoverage {
-		appendWarning("partial-mount-coverage", "error", "File access coverage is partial because one or more required mount marks are missing.")
+		appendWarning("partial-mount-coverage", "error",
+			"File access coverage is partial because one or more required mount marks are missing.",
+			mountCoverageDetails(diagnostics.Mount))
+	}
+	if diagnostics.Mount.MountNamespaceIsolated {
+		appendWarning("mount-namespace-isolated", "error",
+			"File access marks were taken in a private mount namespace, so they do not cover processes on the rest of the system.",
+			mountCoverageDetails(diagnostics.Mount))
 	}
 	if diagnostics.Reader.Fatal {
 		appendWarning("reader-fatal", "error", "The fanotify reader is in a fatal state; enforcement cannot be considered complete.")

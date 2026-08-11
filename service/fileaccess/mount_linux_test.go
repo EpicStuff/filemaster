@@ -21,7 +21,10 @@ func TestParseMountInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []mountInfo{{ID: 36, MountPoint: "/"}, {ID: 37, MountPoint: "/work space"}}
+	want := []mountInfo{
+		{ID: 36, MountPoint: "/", Raw: "36 25 0:32 / / rw - tmpfs tmpfs rw"},
+		{ID: 37, MountPoint: "/work space", Raw: `37 36 0:33 / /work\040space rw - ext4 /dev/sda rw`},
+	}
 	if !reflect.DeepEqual(mounts, want) {
 		t.Fatalf("mounts = %#v, want %#v", mounts, want)
 	}

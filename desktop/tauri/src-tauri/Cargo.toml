@@ -1,11 +1,11 @@
 [package]
-name = "portmaster"
+name = "filemaster"
 version = "2.1.20"
 description = "Filemaster UI"
 authors = ["Safing"]
 license = ""
 repository = ""
-default-run = "portmaster"
+default-run = "filemaster"
 edition = "2021"
 rust-version = "1.64"
 

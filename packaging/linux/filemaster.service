@@ -16,20 +16,16 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 MemoryLow=2G
 NoNewPrivileges=yes
-PrivateTmp=yes
 PIDFile=/var/lib/filemaster/core-lock.pid
 Environment=LOGLEVEL=info
 Environment=FILEMASTER_ARGS=
 EnvironmentFile=-/etc/default/filemaster
-ProtectSystem=true
-ReadWritePaths=/opt/filemaster
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
-ProtectHome=read-only
-ProtectKernelTunables=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-PrivateDevices=yes
+# No mount-namespace options (ProtectHome/ProtectSystem/PrivateTmp/
+# PrivateDevices/ReadWritePaths/ProtectKernel*/ProtectControlGroups): fanotify
+# marks apply to a vfsmount, so marks taken in a private namespace enforce
+# nothing for the rest of the system.
 AmbientCapabilities=cap_sys_admin cap_dac_override cap_sys_ptrace
 CapabilityBoundingSet=cap_sys_admin cap_dac_override cap_sys_ptrace
 # TODO(ppacher): add --disable-software-updates once it's merged and the release process changed.

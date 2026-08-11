@@ -20,6 +20,9 @@ import (
 type mountInfo struct {
 	ID         int
 	MountPoint string
+	// Raw is the originating /proc/self/mountinfo line, retained so coverage
+	// diagnostics can cite the exact entry a mount ID refers to.
+	Raw string
 }
 
 type MountCoverageGap struct {
@@ -135,6 +138,15 @@ type MountDiagnostics struct {
 	ScopeActivationPending     bool
 	PendingScopes              []string
 	PartialCoverage            bool
+	// MountInfoEntries holds the /proc/self/mountinfo rows for the mounts a
+	// coverage report refers to, so a partial-coverage warning can be acted on
+	// without reproducing the mount topology by hand.
+	MountInfoEntries []string
+	// MountNamespaceIsolated reports that this process does not share PID 1's
+	// mount namespace. fanotify mount marks apply to a vfsmount, so marks taken
+	// here cover only this namespace's clones and enforce nothing for the rest
+	// of the system.
+	MountNamespaceIsolated bool
 	// CoverageKnown is false when mountinfo could not be read, so the missing
 	// mount list is deliberately empty rather than stale.
 	CoverageKnown bool
@@ -157,7 +169,7 @@ func parseMountInfo(input string) ([]mountInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mount %d path: %w", id, err)
 		}
-		mounts = append(mounts, mountInfo{ID: id, MountPoint: mountPoint})
+		mounts = append(mounts, mountInfo{ID: id, MountPoint: mountPoint, Raw: scanner.Text()})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read mountinfo: %w", err)
@@ -625,7 +637,7 @@ func knownRequiredMounts(scopes map[string]*policyScope, mounts []mountInfo) map
 }
 
 func (s *fanotifySource) baseMountDiagnostics() MountDiagnostics {
-	diagnostics := MountDiagnostics{}
+	diagnostics := MountDiagnostics{MountNamespaceIsolated: mountNamespaceIsolated()}
 	scopes := snapshotFromScopes(s.scopes)
 	for _, scope := range scopes.Scopes {
 		diagnostics.ConfiguredScopes = append(diagnostics.ConfiguredScopes, scope.Configured)
@@ -679,6 +691,11 @@ func (s *fanotifySource) addKnownCoverage(diagnostics *MountDiagnostics, require
 	sort.Ints(diagnostics.ActiveMountIDs)
 	sort.Ints(diagnostics.MissingMountIDs)
 	diagnostics.PartialCoverage = diagnostics.PartialCoverage || len(diagnostics.MissingMountIDs) > 0
+	for _, id := range diagnostics.MissingMountIDs {
+		if mount, ok := required[id]; ok && mount.Raw != "" {
+			diagnostics.MountInfoEntries = append(diagnostics.MountInfoEntries, mount.Raw)
+		}
+	}
 }
 
 func (s *fanotifySource) recordReconcileFailure(err error, mounts []mountInfo) {

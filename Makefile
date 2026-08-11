@@ -10,7 +10,7 @@ ARCHIVER := bsdtar
 NODE_BIN ?=
 NODE_PATH := $(if $(NODE_BIN),$(NODE_BIN):)
 CORE := $(DIST)/$(PLATFORM)/filemaster-core
-APP := $(DIST)/$(PLATFORM)/portmaster
+APP := $(DIST)/$(PLATFORM)/filemaster
 UI_ZIP := $(DIST)/all/filemaster.zip
 ASSETS_ZIP := $(DIST)/all/assets.zip
 INTEL_DIR := $(DIST)/intel
@@ -22,7 +22,7 @@ SERVICE_DIR ?= /etc/systemd/system
 SERVICE_FILE := $(SERVICE_DIR)/filemaster.service
 
 .DEFAULT_GOAL := build
-.PHONY: assets build clean core help install intel package stage tauri tauri-ui test test-fake test-ui-archive ui ui-deps verify-ui-archive
+.PHONY: assets build clean core help install intel package stage tauri tauri-ui test test-desktop-smoke test-fake test-release-gate test-ui-archive ui ui-deps verify-ui-archive
 
 help:
 	@printf '%s\n' 'Filemaster native build targets:' \
@@ -30,6 +30,8 @@ help:
 		'  make install  Build and install the core, UI, payloads, and systemd unit.' \
 		'  make package  Build Linux .deb/.rpm packages through Tauri.' \
 		'  make test     Run production and fake-source Go tests.' \
+		'  make test-desktop-smoke  Launch the built desktop app against real fanotify and Xvfb.' \
+		'  make test-release-gate   Full production gate; missing capabilities fail instead of skipping.' \
 		'  Override install locations with INSTALL_DIR, DATA_DIR, BIN_DIR, and SERVICE_DIR.' \
 		'  make clean    Remove generated artifacts.'
 
@@ -87,7 +89,7 @@ tauri-ui: ui-deps
 tauri: tauri-ui
 	cd "$(TAURI_DIR)" && cargo tauri build --no-bundle
 	@mkdir -p "$(dir $(APP))"
-	cp "$(TAURI_DIR)/target/release/portmaster" "$(APP)"
+	cp "$(TAURI_DIR)/target/release/filemaster" "$(APP)"
 
 stage: core ui assets intel tauri-ui
 	@mkdir -p "$(TAURI_DIR)/binary"
@@ -112,6 +114,19 @@ test-fake:
 
 test-ui-archive:
 	packaging/linux/test_ui_archive.sh "$(MAKE)" "$(ARCHIVER)"
+
+# Opt in locally; skips with a precise reason when the host cannot provide
+# fanotify, a private mount namespace or an X display.
+test-desktop-smoke: core
+	packaging/linux/test_desktop_smoke.sh "$(CURDIR)" "$(CORE)" "$(APP)" "$(UI_ZIP)" "$(ASSETS_ZIP)"
+
+# Release gate: the production boundary must actually be exercised, so an
+# unavailable capability fails instead of skipping.
+test-release-gate: core ui assets tauri
+	go test ./...
+	$(MAKE) test-ui-archive
+	FM_FANOTIFY_INTEGRATION=1 go test ./service/fileaccess -run '^TestConfinedFanotifyIntegration$$' -count=1 -timeout=45s
+	FM_RELEASE_GATE=1 $(MAKE) test-desktop-smoke
 
 clean:
 	rm -rf "$(DIST)" "$(TAURI_DIR)/binary" "$(TAURI_DIR)/target"
