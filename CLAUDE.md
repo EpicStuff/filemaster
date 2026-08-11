@@ -47,6 +47,14 @@ Feel free to commit at every coherent stopping point — no need to ask, unless 
 then leave it and commit it with the next feature commit. Push immediately after every commit.
 Do not batch commits waiting for permission to push.
 
+## Development data and migrations
+
+This is a development fork with disposable local data. Do not add migrations,
+backward-compatible parsers, or legacy fallbacks for replaced configuration,
+profile, or rule formats unless the user explicitly asks for compatibility.
+When a format changes, prefer one clean current representation; developers may
+reset or reinstall instead of preserving obsolete local state.
+
 ## Test before every commit
 
 Compiling clean is not testing. Every behavioral change must be exercised and
