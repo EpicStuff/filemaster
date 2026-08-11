@@ -154,7 +154,7 @@ func registerConfiguration() error { //nolint:maintidx
 	// rule-list editor in the UI (the "endpoint list" hint matches
 	// ExternalOptionHint.EndpointList in the Angular config types, drawing our
 	// path-rule list with Allow/Block prefix labels).
-	const ruleSyntax = " Each entry is `<+|-> <pattern>`; `+` allows, `-` denies, and `pattern` is a path or glob."
+	const ruleSyntax = " Each entry is `<+|-> <pattern>`; `+` allows, `-` denies, and `pattern` is a path or glob. Prefix with `file:` or `folder:` to restrict the matched object type; unqualified patterns match both files and folders."
 	fileAccessRuleOptions := []struct {
 		name  string
 		key   string
