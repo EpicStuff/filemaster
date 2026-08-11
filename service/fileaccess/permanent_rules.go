@@ -39,12 +39,16 @@ type RulePersistenceDiagnostics struct {
 }
 
 type permanentRule struct {
-	pattern    string
-	verdict    Verdict
-	operation  FileOp
-	kind       ObjectKind
-	entry      string
-	generation uint64
+	// pattern is the escaped rule pattern used by every decision snapshot and
+	// durable profile entry. literalPath is retained only to check whether an
+	// existing rule has first-match precedence for this exact event path.
+	pattern     string
+	literalPath string
+	verdict     Verdict
+	operation   FileOp
+	kind        ObjectKind
+	entry       string
+	generation  uint64
 }
 
 // key identifies a permanent rule within its operation list: two rules with the
@@ -150,17 +154,19 @@ func profileSnapshotKey(snapshot *DecisionSnapshot) string {
 	return snapshot.Source + "/" + snapshot.ProfileID
 }
 
-func canonicalPermanentRule(pattern string, operation FileOp, _ bool, verdict Verdict) (permanentRule, bool) {
-	pattern = filepath.Clean(pattern)
-	if pattern == "." || !filepath.IsAbs(pattern) || (verdict != VerdictAllow && verdict != VerdictDeny) {
+func canonicalPermanentRule(path string, operation FileOp, _ bool, verdict Verdict) (permanentRule, bool) {
+	literalPath := filepath.Clean(path)
+	if literalPath == "." || !filepath.IsAbs(literalPath) || (verdict != VerdictAllow && verdict != VerdictDeny) {
 		return permanentRule{}, false
 	}
+	pattern := escapePathPattern(literalPath)
 	return permanentRule{
-		pattern:   pattern,
-		verdict:   verdict,
-		operation: operation,
-		kind:      ObjectKindAny,
-		entry:     FormatLiteralRule(pattern, verdict),
+		pattern:     pattern,
+		literalPath: literalPath,
+		verdict:     verdict,
+		operation:   operation,
+		kind:        ObjectKindAny,
+		entry:       FormatRule(pattern, verdict),
 	}, true
 }
 
@@ -466,10 +472,10 @@ func durableRuleAtPrecedence(snapshot *DecisionSnapshot, rule permanentRule) boo
 		return false
 	}
 	for _, existing := range rules.Rules {
-		if !existing.Matches(rule.pattern) {
+		if !existing.Matches(rule.literalPath) {
 			continue
 		}
-		return existing.Pattern == escapePathPattern(rule.pattern) && existing.Verdict == rule.verdict && existing.ObjectKind == rule.kind
+		return existing.Pattern == rule.pattern && existing.Verdict == rule.verdict && existing.ObjectKind == rule.kind
 	}
 	return false
 }
@@ -532,9 +538,8 @@ func mergeOverlayList(base PathRules, overlayRules []permanentRule) PathRules {
 	merged := make([]PathRule, 0, len(base.Rules)+len(overlayRules))
 	covered := make(map[overlayIdentity]struct{}, len(overlayRules))
 	for _, rule := range overlayRules {
-		pattern := escapePathPattern(rule.pattern)
-		merged = append(merged, PathRule{Pattern: pattern, Verdict: rule.verdict, ObjectKind: rule.kind})
-		covered[overlayIdentity{pattern: pattern, kind: rule.kind}] = struct{}{}
+		merged = append(merged, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, ObjectKind: rule.kind})
+		covered[overlayIdentity{pattern: rule.pattern, kind: rule.kind}] = struct{}{}
 	}
 	for _, rule := range base.Rules {
 		if _, ok := covered[overlayIdentity{pattern: rule.Pattern, kind: rule.ObjectKind}]; ok {
@@ -690,7 +695,7 @@ func snapshotWithDurableRule(base *DecisionSnapshot, rule permanentRule) *Decisi
 
 // pathRulesWithDurableRule prepends the durable-base marker for a persisted
 // rule to its operation's list, replacing any equivalent existing
-// rule (same path and object kind).
+// stored pattern and object kind.
 func pathRulesWithDurableRule(list PathRules, rule permanentRule) PathRules {
 	rules := make([]PathRule, 0, len(list.Rules)+1)
 	rules = append(rules, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, ObjectKind: rule.kind})

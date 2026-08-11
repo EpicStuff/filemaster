@@ -433,6 +433,24 @@ func TestPermanentRulesKeepLearnedPathsLiteralInOverlay(t *testing.T) {
 	}
 }
 
+func TestPermanentRulesKeepLearnedPathsLiteralInDurableMarker(t *testing.T) {
+	rule, ok := canonicalPermanentRule("/tmp/a*b", OpRead, false, VerdictAllow)
+	if !ok {
+		t.Fatal("canonicalPermanentRule rejected literal path")
+	}
+	if rule.pattern != `/tmp/a\*b` || rule.entry != `+ /tmp/a\*b` {
+		t.Fatalf("canonical learned rule = %+v", rule)
+	}
+
+	snapshot := snapshotWithDurableRule(persistenceSnapshot("- /tmp/a*b"), rule)
+	if verdict, matched, ok := snapshot.Lookup("/tmp/a*b", OpRead, false); !ok || !matched || verdict != VerdictAllow {
+		t.Fatalf("durable literal marker did not win: (%v, %t, %t)", verdict, matched, ok)
+	}
+	if verdict, matched, ok := snapshot.Lookup("/tmp/axxb", OpRead, false); !ok || !matched || verdict != VerdictDeny {
+		t.Fatalf("durable marker matched a glob lookalike: (%v, %t, %t)", verdict, matched, ok)
+	}
+}
+
 func TestLegacyExactRulesAreRejected(t *testing.T) {
 	if _, ok := ParseRule(`+ @"/tmp/one/../two"`); ok {
 		t.Fatal("legacy @ exact rule was accepted")
