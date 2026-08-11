@@ -469,7 +469,7 @@ func durableRuleAtPrecedence(snapshot *DecisionSnapshot, rule permanentRule) boo
 		if !existing.Matches(rule.pattern) {
 			continue
 		}
-		return existing.Pattern == rule.pattern && existing.Verdict == rule.verdict && existing.ObjectKind == rule.kind
+		return existing.Pattern == escapePathPattern(rule.pattern) && existing.Verdict == rule.verdict && existing.ObjectKind == rule.kind
 	}
 	return false
 }
@@ -532,8 +532,9 @@ func mergeOverlayList(base PathRules, overlayRules []permanentRule) PathRules {
 	merged := make([]PathRule, 0, len(base.Rules)+len(overlayRules))
 	covered := make(map[overlayIdentity]struct{}, len(overlayRules))
 	for _, rule := range overlayRules {
-		merged = append(merged, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, ObjectKind: rule.kind})
-		covered[overlayIdentity{pattern: rule.pattern, kind: rule.kind}] = struct{}{}
+		pattern := escapePathPattern(rule.pattern)
+		merged = append(merged, PathRule{Pattern: pattern, Verdict: rule.verdict, ObjectKind: rule.kind})
+		covered[overlayIdentity{pattern: pattern, kind: rule.kind}] = struct{}{}
 	}
 	for _, rule := range base.Rules {
 		if _, ok := covered[overlayIdentity{pattern: rule.Pattern, kind: rule.ObjectKind}]; ok {

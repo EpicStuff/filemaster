@@ -413,20 +413,23 @@ func TestLiteralPermanentRulesRoundTripLiteralPaths(t *testing.T) {
 	}
 }
 
-func TestPermanentRulesUsePlainPatternSemantics(t *testing.T) {
+func TestPermanentRulesKeepLearnedPathsLiteralInOverlay(t *testing.T) {
 	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
-	merged := persistence.Apply(persistenceSnapshot("- /tmp/a*b"), &persistenceTestStore{}, "/tmp/a*b", VerdictAllow)
-	if len(merged.Read.Rules) != 1 {
-		t.Fatalf("merged rules = %#v, want one superseding plain rule", merged.Read.Rules)
+	store := &persistenceTestStore{started: make(chan struct{}, 1), release: make(chan struct{})}
+	defer close(store.release)
+	merged := persistence.Apply(persistenceSnapshot("- /tmp/a*b"), store, "/tmp/a*b", VerdictAllow)
+	<-store.started // Keep the learned rule dirty while inspecting its overlay.
+	if len(merged.Read.Rules) != 2 {
+		t.Fatalf("merged rules = %#v, want literal overlay plus base glob", merged.Read.Rules)
 	}
-	if rule := merged.Read.Rules[0]; rule.Pattern != "/tmp/a*b" || rule.Verdict != VerdictAllow {
-		t.Fatalf("plain learned rule = %+v", rule)
+	if rule := merged.Read.Rules[0]; rule.Pattern != `/tmp/a\*b` || rule.Verdict != VerdictAllow {
+		t.Fatalf("literal learned rule = %+v", rule)
 	}
 	if verdict, ok := merged.Read.Lookup("/tmp/a*b"); !ok || verdict != VerdictAllow {
 		t.Fatalf("learned rule did not win: %v, %v", verdict, ok)
 	}
-	if verdict, ok := merged.Read.Lookup("/tmp/axxb"); !ok || verdict != VerdictAllow {
-		t.Fatalf("plain wildcard semantics changed: %v, %v", verdict, ok)
+	if verdict, ok := merged.Read.Lookup("/tmp/axxb"); !ok || verdict != VerdictDeny {
+		t.Fatalf("dirty literal overlay matched a glob lookalike: %v, %v", verdict, ok)
 	}
 }
 
