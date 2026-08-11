@@ -95,6 +95,16 @@ rule-evaluation engine tests.
 5. Folder Read Allow with Folder Execute Deny permits listing but blocks reaching children where supported.
 6. Folder Execute rules apply to Create, Delete, Rename, Move, metadata access, and ordinary opens that traverse the folder.
 
+## Policy Routing and Default Hardening
+
+1. An unmatched Read, Write, or Execute decision uses `DecisionSnapshot.DefaultAction` regardless of how the snapshot was constructed; copied or zero-value `PathRules.Default` values cannot change policy.
+2. Permit defaults allow unmatched operations, Block defaults deny them, and Ask defaults prompt only on decision paths that explicitly support prompting; non-prompt Ask fails closed.
+3. Directly constructed and fallback snapshots obey the same no-match default semantics as normal profile snapshots.
+4. Unknown `FileOp` values are rejected before they can borrow an Access/Read list, reach an Allow-capable prompt, or select a persistence destination.
+5. Unknown `DecisionOp` values are rejected instead of falling through to Access/Read semantics.
+6. Unsupported operations cannot create in-memory learned-rule overlays, dirty retry state, or durable rules.
+7. Tests exercise these invariants through the complete production-style decision paths, not only the low-level routing helpers.
+
 ## Rule Migration
 
 1. Existing File Access rules copy to File Read and File Write.
