@@ -160,7 +160,7 @@ func canonicalPermanentRule(pattern string, operation FileOp, _ bool, verdict Ve
 		verdict:   verdict,
 		operation: operation,
 		kind:      ObjectKindAny,
-		entry:     FormatRule(pattern, verdict),
+		entry:     FormatLiteralRule(pattern, verdict),
 	}, true
 }
 

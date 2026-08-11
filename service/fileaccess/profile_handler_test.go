@@ -258,12 +258,12 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 		99: {id: "profile-B", defAct: profile.DefaultActionAsk},
 	}}
 	p := &scriptedPrompter{responses: map[string]string{
-		"/home/alice/notes.txt": ActionAllowAlways,
-		"/home/alice/projects":  ActionAllowAlways,
+		"/home/alice/notes?.txt": ActionAllowAlways,
+		"/home/alice/projects":   ActionAllowAlways,
 	}}
 	h := NewProfileHandler(lookup, p, time.Second, nopLogger{})
 
-	fileEvent := FileEvent{PID: 99, Path: "/home/alice/notes.txt"}
+	fileEvent := FileEvent{PID: 99, Path: "/home/alice/notes?.txt"}
 	v := h.Decide(context.Background(), &fileEvent)
 	if v != VerdictAllow {
 		t.Fatalf("first call: got %s, want allow", v)
@@ -282,7 +282,7 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 	// intentionally remain plain and unqualified because the prompt has no
 	// object-kind choice.
 	got := lookup.appendedFor(99)
-	want := []string{"+ /home/alice/notes.txt", "+ /home/alice/projects"}
+	want := []string{`+ /home/alice/notes\?.txt`, "+ /home/alice/projects"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("rule not persisted in profile store: %v", got)
 	}
@@ -303,6 +303,13 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 	}
 	if tripwire.called != 0 {
 		t.Errorf("prompter called %d times on second access; persisted rule should have matched", tripwire.called)
+	}
+
+	if v = h.Decide(context.Background(), &FileEvent{PID: 99, Path: "/home/alice/notesA.txt"}); v != VerdictDeny {
+		t.Errorf("glob lookalike: got %s, want deny from prompt", v)
+	}
+	if tripwire.called != 1 {
+		t.Errorf("prompter called %d times for literal-rule lookalike, want 1", tripwire.called)
 	}
 }
 
