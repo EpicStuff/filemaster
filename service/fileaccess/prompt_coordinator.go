@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,14 +23,10 @@ type promptKey struct {
 	op        FileOp
 	directory bool
 	path      string
-	process   string
 }
 
 func (key promptKey) String() string {
-	if key.profile != "" {
-		return key.profile + ":" + key.op.String() + ":" + key.path
-	}
-	return "unidentified:" + key.process + ":" + key.op.String() + ":" + key.path
+	return key.profile + ":" + key.op.String() + ":" + key.path
 }
 
 type promptEntry struct {
@@ -66,7 +61,6 @@ type PromptCoordinator struct {
 	groups                map[promptKey]*promptGroup
 	profiles              map[string]map[*promptGroup]struct{}
 	latestProfileSnapshot map[string]*DecisionSnapshot
-	unidentifiedSequence  atomic.Uint64
 	activePrompts         atomic.Int64
 	promptTimeouts        atomic.Uint64
 	promptChanged         chan struct{}
@@ -465,15 +459,7 @@ func (c *PromptCoordinator) latestSnapshotLocked(snapshot *DecisionSnapshot) *De
 }
 
 func (c *PromptCoordinator) newPromptKey(event *FileEvent, snapshot *DecisionSnapshot, path string) promptKey {
-	key := promptKey{profile: snapshot.Source + "/" + snapshot.ProfileID, op: event.Op, directory: event.IsDir, path: path}
-	if snapshot.ProfileID == "" {
-		key.profile = ""
-		key.process = event.ProcessIdentity
-		if key.process == "" {
-			key.process = "unidentified:" + strconv.FormatUint(c.unidentifiedSequence.Add(1), 10)
-		}
-	}
-	return key
+	return promptKey{profile: snapshot.Source + "/" + snapshot.ProfileID, op: event.Op, directory: event.IsDir, path: path}
 }
 
 func normalizePromptPath(path string) (string, error) {

@@ -2,7 +2,6 @@ package fileaccess
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -29,44 +28,18 @@ type RuleStore interface {
 	AppendRule(op FileOp, entry string) error
 }
 
-// fallbackRuleStore keeps an accepted Always rule durable when process profile
-// lookup is temporarily unavailable. It is deliberately scoped to the
-// executable bucket used by PromptHandler, never a mutable profile object.
-type fallbackRuleStore struct {
-	handler *PromptHandler
-	exe     string
-}
-
-func (s fallbackRuleStore) ID() string { return "fallback:" + s.exe }
-
-func (s fallbackRuleStore) AppendRule(op FileOp, entry string) error {
-	rule, ok := ParseRule(entry)
-	if !ok {
-		return errors.New("invalid fallback file access rule")
-	}
-	return s.handler.appendRuleEntry(s.exe, op, rule)
-}
-
 // LookupResult is everything a single ProfileLookup pass yields: the
-// resolved exe path (for the fallback handler + audit logging), the
-// rule store (nil if no profile resolved), the pre-parsed per-profile
-// rules, and the profile's default action.
+// resolved exe path, the rule store, the pre-parsed per-profile rules,
+// and the profile's default action.
 //
 // Bundling all four into one struct means we hit
-// process.GetProcessWithProfile exactly once per event -- both
-// ProfileHandler and the fallback path get what they need from a
-// single call.
+// process.GetProcessWithProfile exactly once per event.
 type LookupResult struct {
 	// Path is the process's resolved exe path, mirrored from
 	// Process.Path. Empty when the process couldn't be resolved.
 	Path string
 
-	// ProcessIdentity distinguishes a process lifetime from a reused PID when
-	// no profile can be resolved.
-	ProcessIdentity string
-
-	// Store is the rule store backing the matched profile, or nil
-	// when no profile resolved.
+	// Store is the rule store backing the matched profile.
 	Store RuleStore
 
 	// Snapshot is the immutable parsed policy used for this lookup. It is
@@ -75,13 +48,10 @@ type LookupResult struct {
 
 	// DefaultAction is the profile's default action constant from
 	// service/profile (DefaultActionNotSet / Block / Ask / Permit).
-	// DefaultActionAsk when no profile resolved, so default-deny isn't
-	// silently applied to processes the lookup couldn't identify.
 	DefaultAction uint8
 
-	// Profile metadata, mirrored into the FileEvent before the prompter
-	// is called so the UI can group + render the prompt. All empty when
-	// Store is nil.
+	// Profile metadata is mirrored into the FileEvent before the prompter
+	// is called so the UI can group + render the prompt.
 	ProfileSource     string
 	ProfileName       string
 	ProfileLinkedPath string
@@ -106,12 +76,6 @@ type ProfileHandler struct {
 	lifecycle                 *PipelineLifecycle
 	beforeSnapshotPublication func()
 	beforeProfilePublication  func()
-
-	// fallback is used when ProfileLookup returns an error or no
-	// profile resolves. Without it the daemon would default-deny every
-	// unidentified syscall; with it we keep the exe-keyed PromptHandler
-	// as a safety net.
-	fallback Handler
 
 	// log is used for noisy lookup failures so we don't break the
 	// kernel-blocking decide path. Nil means silent.
@@ -143,16 +107,11 @@ func (h *ProfileHandler) setLifecycle(lifecycle *PipelineLifecycle) {
 	}
 }
 
-// NewProfileHandler returns a profile-backed handler. The fallback
-// handler is invoked when ProfileLookup fails OR when no profile
-// resolves -- typically a plain PromptHandler so events from
-// processes-without-profiles still get to ask the user.
-func NewProfileHandler(lookup ProfileLookup, prompter Prompter, fallback Handler, timeout time.Duration, log logger) *ProfileHandler {
+// NewProfileHandler returns a profile-backed handler. Process lookup resolves
+// unidentifiable events to Portmaster's shared "Other Connections" profile.
+func NewProfileHandler(lookup ProfileLookup, prompter Prompter, timeout time.Duration, log logger) *ProfileHandler {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
-	}
-	if fallback == nil {
-		fallback = allowAll
 	}
 	if log == nil {
 		log = nopLogger{}
@@ -161,7 +120,6 @@ func NewProfileHandler(lookup ProfileLookup, prompter Prompter, fallback Handler
 		lookup:   lookup,
 		prompter: prompter,
 		timeout:  timeout,
-		fallback: fallback,
 		log:      log,
 	}
 	handler.standalonePersistence = newRulePersistence(handler.publishSnapshot, RulePersistenceOptions{}, NewPipelineLifecycle())
@@ -432,26 +390,24 @@ func (h *ProfileHandler) DecideForResponse(ctx context.Context, e *FileEvent) (V
 		var err error
 		res, err = h.lookup.Lookup(ctx, e.PID)
 		if err != nil {
-			h.log.Warn("profile lookup failed; using fallback handler",
+			h.log.Warn("profile lookup failed; denying event",
 				"pid", e.PID,
 				"path", e.Path,
 				"err", err,
 			)
-			if res.Path != "" {
-				e.Exe = res.Path
-			}
-			return h.fallbackDecision(ctx, e)
+			return VerdictDeny, nil
 		}
 	}
 
 	if res.Path != "" {
 		e.Exe = res.Path
 	}
-	if res.ProcessIdentity != "" {
-		e.ProcessIdentity = res.ProcessIdentity
-	}
 	if res.Store == nil {
-		return h.fallbackDecision(ctx, e)
+		h.log.Warn("profile lookup returned no profile; denying event",
+			"pid", e.PID,
+			"path", e.Path,
+		)
+		return VerdictDeny, nil
 	}
 
 	e.ProfileID = res.Store.ID()
@@ -548,36 +504,24 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 		var err error
 		res, err = h.lookup.Lookup(ctx, e.PID)
 		if err != nil {
-			if res.Path != "" {
-				e.Exe = res.Path
-			}
-			if res.ProcessIdentity != "" {
-				e.ProcessIdentity = res.ProcessIdentity
-			}
-			if coordinator := h.coordinator(); coordinator != nil {
-				store, snapshot := h.fallbackSnapshot(e)
-				handled, handedOff, verdict, afterResponse = coordinator.Admit(ctx, pending, store, snapshot)
-				return
-			}
-			verdict, afterResponse = h.fallbackDecision(ctx, e)
-			return false, false, true, verdict, afterResponse
+			h.log.Warn("profile lookup failed; denying event",
+				"pid", e.PID,
+				"path", e.Path,
+				"err", err,
+			)
+			return false, false, true, VerdictDeny, nil
 		}
 	}
 
 	if res.Path != "" {
 		e.Exe = res.Path
 	}
-	if res.ProcessIdentity != "" {
-		e.ProcessIdentity = res.ProcessIdentity
-	}
 	if res.Store == nil {
-		if coordinator := h.coordinator(); coordinator != nil {
-			store, snapshot := h.fallbackSnapshot(e)
-			handled, handedOff, verdict, afterResponse = coordinator.Admit(ctx, pending, store, snapshot)
-			return
-		}
-		verdict, afterResponse = h.fallbackDecision(ctx, e)
-		return false, false, true, verdict, afterResponse
+		h.log.Warn("profile lookup returned no profile; denying event",
+			"pid", e.PID,
+			"path", e.Path,
+		)
+		return false, false, true, VerdictDeny, nil
 	}
 
 	e.ProfileID = res.Store.ID()
@@ -607,36 +551,6 @@ func (h *ProfileHandler) DecidePending(ctx context.Context, pending PendingEvent
 	}
 	handled, handedOff, verdict, afterResponse = coordinator.Admit(ctx, pending, res.Store, snapshot)
 	return
-}
-
-func (h *ProfileHandler) fallbackSnapshot(event *FileEvent) (RuleStore, *DecisionSnapshot) {
-	if fallback, ok := h.fallback.(*PromptHandler); ok {
-		exe := event.Exe
-		if exe == "" {
-			exe = unknownExe
-		}
-		event.Exe = exe
-		store := fallbackRuleStore{handler: fallback, exe: exe}
-		event.ProfileID = store.ID()
-		event.ProfileSource = "fallback"
-		read, write, exec := fallback.ruleListsFor(exe)
-		return store, &DecisionSnapshot{
-			ProfileID:     event.ProfileID,
-			Source:        event.ProfileSource,
-			DefaultAction: profile.DefaultActionAsk,
-			Read:          read,
-			Write:         write,
-			Exec:          exec,
-		}
-	}
-	return nil, &DecisionSnapshot{DefaultAction: profile.DefaultActionAsk}
-}
-
-func (h *ProfileHandler) fallbackDecision(ctx context.Context, e *FileEvent) (Verdict, func()) {
-	if handler, ok := h.fallback.(postResponseDecisionHandler); ok {
-		return handler.DecideForResponse(ctx, e)
-	}
-	return h.fallback.Decide(ctx, e), nil
 }
 
 func (h *ProfileHandler) RefreshProcessMapping(ctx context.Context, pid int32) error {
@@ -766,7 +680,3 @@ func ParseRules(entries []string) PathRules {
 	}
 	return rs
 }
-
-// ErrNoProfile is returned by a ProfileLookup when no matching profile
-// could be found (process gone, detection disabled, etc).
-var ErrNoProfile = errors.New("no profile for process")

@@ -3,7 +3,6 @@ package fileaccess
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -17,6 +16,10 @@ import (
 // portmaster's auto-creation flow stays in-play whenever the var is
 // the default.
 var getProcessWithProfile = process.GetProcessWithProfile
+
+// getUnidentifiedProcess supplies Portmaster's shared "Other Connections"
+// process when a fanotify event cannot be attributed to a live process.
+var getUnidentifiedProcess = process.GetUnidentifiedProcess
 
 // processLayeredProfile is an indirection point for tests. Production reads
 // the layered profile carried by the process returned by process lookup.
@@ -80,19 +83,12 @@ type ruleCacheEntry struct {
 }
 
 func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupResult, error) {
-	p, err := getProcessWithProfile(ctx, int(pid))
+	p, _ := getProcessWithProfile(ctx, int(pid))
 	if p == nil {
-		if err != nil {
-			return LookupResult{}, err
-		}
-		return LookupResult{Path: ""}, ErrNoProfile
+		p = getUnidentifiedProcess(ctx)
 	}
 
 	res := LookupResult{Path: p.Path, DefaultAction: profile.DefaultActionAsk}
-	if p.CreatedAt != 0 {
-		res.ProcessIdentity = fmt.Sprintf("%d-%d", p.Pid, p.CreatedAt)
-	}
-
 	lp := processLayeredProfile(p)
 	if lp == nil {
 		return res, nil

@@ -24,8 +24,8 @@ func ruleScopeOp(op FileOp) FileOp {
 // fileAccessListOp folds an operation to the operation whose rule list governs
 // it -- OpRead, OpWrite or OpExec -- reporting ok=false for anything else. It is
 // the single routing primitive every decision and persistence path funnels
-// through (DecisionSnapshot.rulesFor, fileAccessRuleKey, the fallback
-// PromptHandler, and the permanent-rule overlay), so an unsupported operation
+// through (DecisionSnapshot.rulesFor, fileAccessRuleKey, and the
+// permanent-rule overlay), so an unsupported operation
 // can never silently select the Access, Write or Execute list by accident:
 // callers must fail closed on ok=false rather than defaulting to a list.
 func fileAccessListOp(op FileOp) (FileOp, bool) {

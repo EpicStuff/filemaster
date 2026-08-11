@@ -883,7 +883,7 @@ func TestShutdownWaitsForBlockedPermanentRuleWorkerAfterReport(t *testing.T) {
 		response:   ResponseWriterDiagnostics{CurrentFD: -1},
 	}
 	fileAccess := newShutdownTestFileAccess(source, lifecycle)
-	handler := NewProfileHandler(&fakeLookup{}, nil, nil, time.Second, nopLogger{})
+	handler := NewProfileHandler(&fakeLookup{}, nil, time.Second, nopLogger{})
 	handler.setLifecycle(lifecycle)
 	fileAccess.profileHandler = handler
 

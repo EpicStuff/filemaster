@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sync/atomic"
 	"time"
 
@@ -187,24 +186,12 @@ func New(svcCfg *ServiceConfig) (*Instance, error) {
 	//      existing portmaster infrastructure (per-operation rule lists
 	//      on the LocalProfile: fileaccess/readRules, /writeRules,
 	//      /execRules).
-	//   2. On profile-lookup failure (process gone, detection disabled,
-	//      etc.), fall back to the exe-keyed PromptHandler with its
-	//      JSON file under the data dir so unidentified processes still
-	//      get to ask the user.
+	//   2. Unidentified events use Portmaster's shared "Other Connections"
+	//      profile, so their rules persist through the normal profile system.
 	//   3. RecordingHandler wraps the chain to forward verdicts to filequery.
-	fallbackPrompt := fileaccess.NewPromptHandler(
-		&fileaccess.NotificationsPrompter{},
-		nil,
-		30*time.Second,
-	)
-	fallbackRulesPath := filepath.Join(svcCfg.DataDir, "fileaccess-fallback-rules.json")
-	if err := fallbackPrompt.SetPersistPath(fallbackRulesPath); err != nil {
-		return instance, fmt.Errorf("load fallback rules from %s: %w", fallbackRulesPath, err)
-	}
 	profileHandler := fileaccess.NewProfileHandler(
 		fileaccess.NewProcessProfileLookup(),
 		&fileaccess.NotificationsPrompter{},
-		fallbackPrompt,
 		30*time.Second,
 		instance.fileAccess.Manager(),
 	)

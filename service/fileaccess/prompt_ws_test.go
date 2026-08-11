@@ -114,8 +114,19 @@ qsubReady:
 	defer cancel()
 
 	done := make(chan error, 1)
+	prompter := &NotificationsPrompter{}
+	handler := HandlerFunc(func(ctx context.Context, event *FileEvent) Verdict {
+		action, ok := prompter.Prompt(ctx, *event, 3*time.Second)
+		if !ok {
+			return VerdictDeny
+		}
+		if action == ActionAllow {
+			return VerdictAllow
+		}
+		return VerdictDeny
+	})
 	go func() {
-		done <- source.Run(ctx, decisionPendingHandler{handler: NewPromptHandler(&NotificationsPrompter{}, nil, 3*time.Second)})
+		done <- source.Run(ctx, decisionPendingHandler{handler: handler})
 	}()
 
 	var promptKey string

@@ -124,13 +124,11 @@ func TestPromptCoordinatorGroupsOnlyExactDuplicates(t *testing.T) {
 	}
 }
 
-func TestPromptCoordinatorSeparatesDifferentKeysAndUnidentifiedProcesses(t *testing.T) {
+func TestPromptCoordinatorSeparatesDifferentProfileKeys(t *testing.T) {
 	prompter := &coordinatorPrompter{entered: make(chan FileEvent, 8), actions: make(chan string, 8)}
 	h := newCoordinatorHarness(prompter, 8)
 	profileA := coordinatorSnapshot("profile-a", 1, profile.DefaultActionAsk)
 	profileB := coordinatorSnapshot("profile-b", 1, profile.DefaultActionAsk)
-	unidentified := &DecisionSnapshot{DefaultAction: profile.DefaultActionAsk}
-
 	events := []struct {
 		event    FileEvent
 		snapshot *DecisionSnapshot
@@ -139,9 +137,6 @@ func TestPromptCoordinatorSeparatesDifferentKeysAndUnidentifiedProcesses(t *test
 		{FileEvent{Path: "/tmp/two", Op: OpOpen}, profileA},
 		{FileEvent{Path: "/tmp/one", Op: OpExec}, profileA},
 		{FileEvent{Path: "/tmp/one", Op: OpOpen}, profileB},
-		{FileEvent{PID: 10, ProcessIdentity: "10-1", Path: "/tmp/unknown", Op: OpOpen}, unidentified},
-		{FileEvent{PID: 10, ProcessIdentity: "10-1", Path: "/tmp/unknown", Op: OpOpen}, unidentified},
-		{FileEvent{PID: 10, ProcessIdentity: "10-2", Path: "/tmp/unknown", Op: OpOpen}, unidentified},
 	}
 	responses := make([]<-chan Verdict, 0, len(events))
 	for _, item := range events {
@@ -151,10 +146,10 @@ func TestPromptCoordinatorSeparatesDifferentKeysAndUnidentifiedProcesses(t *test
 			t.Fatal("event was not admitted")
 		}
 	}
-	for range 6 {
+	for range 4 {
 		waitCoordinatorPrompt(t, prompter)
 	}
-	for range 6 {
+	for range 4 {
 		prompter.actions <- ActionDeny
 	}
 	for _, responses := range responses {
@@ -167,7 +162,7 @@ func TestPromptCoordinatorSeparatesDifferentKeysAndUnidentifiedProcesses(t *test
 func TestPromptCoordinatorKeepsEveryGroupedEventInPipelineAccounting(t *testing.T) {
 	release := make(chan struct{})
 	prompter := &blockingPrompter{entered: make(chan struct{}, 1), release: release}
-	handler := NewProfileHandler(askLookup{store: &fakeRuleStore{id: "profile"}}, prompter, nil, time.Second, nopLogger{})
+	handler := NewProfileHandler(askLookup{store: &fakeRuleStore{id: "profile"}}, prompter, time.Second, nopLogger{})
 	pipeline := NewDecisionPipeline(handler, DecisionPipelineConfig{Workers: 2, QueueCapacity: 2, OutstandingLimit: 4, PerProfileAskLimit: 4})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

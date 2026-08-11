@@ -172,7 +172,7 @@ func (l askLookup) Lookup(context.Context, int32) (LookupResult, error) {
 func TestDecisionPipelinePerProfileAskBudget(t *testing.T) {
 	release := make(chan struct{})
 	prompter := &blockingPrompter{entered: make(chan struct{}, 1), release: release}
-	handler := NewProfileHandler(askLookup{store: &fakeRuleStore{id: "profile"}}, prompter, nil, time.Second, nopLogger{})
+	handler := NewProfileHandler(askLookup{store: &fakeRuleStore{id: "profile"}}, prompter, time.Second, nopLogger{})
 	pipeline := NewDecisionPipeline(handler, DecisionPipelineConfig{Workers: 2, QueueCapacity: 2, OutstandingLimit: 2, PerProfileAskLimit: 1})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -236,7 +236,7 @@ func TestDecisionPipelineProfileHandlerExecUsesLaunchingProfile(t *testing.T) {
 	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
 		91: {id: "launcher", defAct: profile.DefaultActionBlock},
 	}}
-	handler := NewProfileHandler(lookup, nil, nil, time.Second, nopLogger{})
+	handler := NewProfileHandler(lookup, nil, time.Second, nopLogger{})
 	pipeline := NewDecisionPipeline(handler, DecisionPipelineConfig{Workers: 1, QueueCapacity: 1, OutstandingLimit: 1})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -338,7 +338,7 @@ func TestDecisionPipelineRespondsBeforeObservation(t *testing.T) {
 
 func TestDecisionPipelineFilemasterSelfSnapshot(t *testing.T) {
 	lookup := &fakeLookup{err: errors.New("normal lookup must not run")}
-	handler := NewProfileHandler(lookup, &scriptedPrompter{}, nil, time.Second, nopLogger{})
+	handler := NewProfileHandler(lookup, &scriptedPrompter{}, time.Second, nopLogger{})
 	store := &fakeRuleStore{id: profile.PortmasterProfileID}
 	snapshot := newDecisionSnapshot(profile.PortmasterProfileID, "local", profile.DefaultActionAsk, ruleLists{read: []string{"- /tmp/self"}}, 1)
 	handler.setSelfProfile(77, LookupResult{

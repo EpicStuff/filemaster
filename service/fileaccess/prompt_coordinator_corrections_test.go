@@ -113,7 +113,7 @@ func waitPromptStart(t *testing.T, prompter *actionPrompter) {
 func TestPromptCoordinatorObservesEveryAcceptedGroupedEvent(t *testing.T) {
 	prompter := &actionPrompter{entered: make(chan struct{}, 1), actions: make(chan string, 1), completed: make(chan struct{}, 1)}
 	lookup := &refreshingAskLookup{store: &fakeRuleStore{id: "profile"}, refreshed: make(chan int32, 2)}
-	handler := NewProfileHandler(lookup, prompter, nil, time.Second, nopLogger{})
+	handler := NewProfileHandler(lookup, prompter, time.Second, nopLogger{})
 	observer := &promptResponseObserver{handler: handler}
 	pipeline := NewDecisionPipeline(observer, DecisionPipelineConfig{Workers: 2, QueueCapacity: 2, OutstandingLimit: 4, PerProfileAskLimit: 4})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -163,7 +163,7 @@ func TestPromptCoordinatorObservesEveryAcceptedGroupedEvent(t *testing.T) {
 func TestPromptCoordinatorUnacceptedResponseSkipsObservationAndRefresh(t *testing.T) {
 	prompter := &actionPrompter{entered: make(chan struct{}, 1), actions: make(chan string, 1)}
 	lookup := &refreshingAskLookup{store: &fakeRuleStore{id: "profile"}, refreshed: make(chan int32, 1)}
-	handler := NewProfileHandler(lookup, prompter, nil, time.Second, nopLogger{})
+	handler := NewProfileHandler(lookup, prompter, time.Second, nopLogger{})
 	observer := &promptResponseObserver{handler: handler}
 	pipeline := NewDecisionPipeline(observer, DecisionPipelineConfig{Workers: 1, QueueCapacity: 1, OutstandingLimit: 2, PerProfileAskLimit: 2})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -352,7 +352,7 @@ func TestPromptCoordinatorAlwaysPersistsAfterMixedResponsesAndReleasesEachEntry(
 
 func TestPromptCoordinatorMixedResponseGroupReleasesPipelineAccountingOnce(t *testing.T) {
 	prompter := &actionPrompter{entered: make(chan struct{}, 1), actions: make(chan string, 1)}
-	handler := NewProfileHandler(askLookup{store: &fakeRuleStore{id: "profile"}}, prompter, nil, time.Second, nopLogger{})
+	handler := NewProfileHandler(askLookup{store: &fakeRuleStore{id: "profile"}}, prompter, time.Second, nopLogger{})
 	pipeline := NewDecisionPipeline(handler, DecisionPipelineConfig{Workers: 2, QueueCapacity: 2, OutstandingLimit: 4, PerProfileAskLimit: 4})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -485,22 +485,4 @@ func TestSnapshotObserverCanReenterSnapshotLookup(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("snapshot observer reentry deadlocked")
 	}
-}
-
-func TestPromptCoordinatorUnknownPIDDoesNotGroupWithoutLifetimeIdentity(t *testing.T) {
-	prompter := &actionPrompter{entered: make(chan struct{}, 2), actions: make(chan string, 2)}
-	h := newCoordinatorHarness(prompter, 4)
-	snapshot := &DecisionSnapshot{DefaultAction: profile.DefaultActionAsk}
-	first, _ := coordinatorPending(FileEvent{PID: 42, Exe: "/usr/bin/app", Path: "/tmp/file", Op: OpOpen})
-	second, _ := coordinatorPending(FileEvent{PID: 42, Exe: "/usr/bin/app", Path: "/tmp/file", Op: OpOpen})
-	if handled, handedOff, _, _ := h.coordinator.Admit(context.Background(), first, nil, snapshot); !handled || !handedOff {
-		t.Fatal("first unidentified event was not admitted")
-	}
-	if handled, handedOff, _, _ := h.coordinator.Admit(context.Background(), second, nil, snapshot); !handled || !handedOff {
-		t.Fatal("second unidentified event was not admitted")
-	}
-	waitPromptStart(t, prompter)
-	waitPromptStart(t, prompter)
-	prompter.actions <- ActionDeny
-	prompter.actions <- ActionDeny
 }

@@ -3,7 +3,6 @@ package fileaccess
 import (
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/safing/portmaster/service/profile"
 )
@@ -116,28 +115,6 @@ func TestUnknownOperationFailsClosed(t *testing.T) {
 	// fileAccessRuleKey (the persistence-side router) must fail closed too.
 	if _, ok := fileAccessRuleKey(FileOp(200)); ok {
 		t.Fatalf("fileAccessRuleKey must fail closed on an unknown operation")
-	}
-}
-
-func TestFallbackHandlerRoutesFailClosed(t *testing.T) {
-	// The fallback PromptHandler's per-exe router must fail closed on an
-	// unsupported operation instead of defaulting to the read list, and its
-	// per-operation lists must not leak across operations.
-	h := NewPromptHandler(&scriptedPrompter{}, nil, time.Second)
-	if err := h.appendRuleEntry("exe", OpExec, PathRule{Pattern: "/x", Verdict: VerdictAllow}); err != nil {
-		t.Fatalf("seed exec rule: %v", err)
-	}
-	if _, ok := h.lookup("exe", "/x", FileOp(200), false); ok {
-		t.Fatalf("fallback lookup must fail closed on an unsupported operation")
-	}
-	if _, ok := h.lookup("exe", "/x", OpRead, false); ok {
-		t.Fatalf("exec-list rule leaked into a read lookup")
-	}
-	if _, ok := h.lookup("exe", "/x", OpExec, false); !ok {
-		t.Fatalf("exec-list rule did not answer an exec lookup")
-	}
-	if err := h.appendRuleEntry("exe", FileOp(200), PathRule{Pattern: "/y", Verdict: VerdictAllow}); err == nil {
-		t.Fatalf("appendRuleEntry must reject an unsupported operation")
 	}
 }
 

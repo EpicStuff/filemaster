@@ -45,8 +45,8 @@ type fakeProfile struct {
 	defAct uint8 // profile.DefaultAction* constants
 }
 
-// fakeLookup keys fakeProfiles by PID. err != nil short-circuits to
-// the fallback regardless.
+// fakeLookup keys fakeProfiles by PID. An injected error models a broken
+// ProfileLookup, which the handler denies defensively.
 type fakeLookup struct {
 	profiles map[int32]*fakeProfile
 	err      error
@@ -65,7 +65,7 @@ func (l *fakeLookup) Lookup(_ context.Context, pid int32) (LookupResult, error) 
 	}
 	fp, ok := l.profiles[pid]
 	if !ok {
-		return LookupResult{Path: "", DefaultAction: profile.DefaultActionAsk}, ErrNoProfile
+		return LookupResult{DefaultAction: profile.DefaultActionAsk}, nil
 	}
 
 	l.mu.Lock()
@@ -240,7 +240,7 @@ func TestProfileHandlerRuleHit(t *testing.T) {
 	}}
 	p := &scriptedPrompter{}
 
-	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
+	h := NewProfileHandler(lookup, p, time.Second, nopLogger{})
 	v := h.Decide(context.Background(), &FileEvent{PID: 42, Path: "/etc/passwd"})
 	if v != VerdictAllow {
 		t.Errorf("got %s, want allow", v)
@@ -261,7 +261,7 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 		"/home/alice/notes.txt": ActionAllowAlways,
 		"/home/alice/projects":  ActionAllowAlways,
 	}}
-	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
+	h := NewProfileHandler(lookup, p, time.Second, nopLogger{})
 
 	fileEvent := FileEvent{PID: 99, Path: "/home/alice/notes.txt"}
 	v := h.Decide(context.Background(), &fileEvent)
@@ -316,7 +316,7 @@ func TestProfileHandlerPerProfileIsolation(t *testing.T) {
 	p := &scriptedPrompter{responses: map[string]string{
 		"/home/alice/notes.txt": ActionAllowAlways,
 	}}
-	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
+	h := NewProfileHandler(lookup, p, time.Second, nopLogger{})
 
 	if v := h.Decide(context.Background(), &FileEvent{PID: 100, Path: "/home/alice/notes.txt"}); v != VerdictAllow {
 		t.Fatalf("vim: got %s, want allow", v)
@@ -353,7 +353,7 @@ func TestProfileHandlerCoordinatorlessAlwaysUsesDurableOverlayAndRetry(t *testin
 		stores:   map[int32]*fakeRuleStore{77: store},
 	}
 	prompter := &scriptedPrompter{responses: map[string]string{path: ActionAllowAlways}}
-	handler := NewProfileHandler(lookup, prompter, nil, time.Second, nopLogger{})
+	handler := NewProfileHandler(lookup, prompter, time.Second, nopLogger{})
 
 	if verdict := handler.Decide(context.Background(), &FileEvent{PID: 77, Path: path}); verdict != VerdictAllow {
 		t.Fatalf("first verdict = %s, want allow", verdict)
@@ -393,7 +393,7 @@ func TestProfileHandlerCoordinatorlessAlwaysDoesNotPersistBeforeAcceptedResponse
 		profiles: map[int32]*fakeProfile{78: {id: "profile-D", defAct: profile.DefaultActionAsk}},
 		stores:   map[int32]*fakeRuleStore{78: store},
 	}
-	handler := NewProfileHandler(lookup, &scriptedPrompter{responses: map[string]string{path: ActionAllowAlways}}, nil, time.Second, nopLogger{})
+	handler := NewProfileHandler(lookup, &scriptedPrompter{responses: map[string]string{path: ActionAllowAlways}}, time.Second, nopLogger{})
 	verdict, afterResponse := handler.DecideForResponse(context.Background(), &FileEvent{PID: 78, Path: path})
 	if verdict != VerdictAllow || afterResponse == nil {
 		t.Fatalf("Always decision = %s, callback=%v", verdict, afterResponse != nil)
@@ -413,7 +413,7 @@ func TestProfileHandlerDefaultActionPermit(t *testing.T) {
 		1: {id: "permit-app", defAct: profile.DefaultActionPermit},
 	}}
 	p := &scriptedPrompter{}
-	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
+	h := NewProfileHandler(lookup, p, time.Second, nopLogger{})
 
 	v := h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/anything"})
 	if v != VerdictAllow {
@@ -431,7 +431,7 @@ func TestProfileHandlerDefaultActionBlock(t *testing.T) {
 		1: {id: "block-app", defAct: profile.DefaultActionBlock},
 	}}
 	p := &scriptedPrompter{}
-	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
+	h := NewProfileHandler(lookup, p, time.Second, nopLogger{})
 
 	v := h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/anything"})
 	if v != VerdictDeny {
@@ -456,7 +456,7 @@ func TestProfileHandlerDefaultActionAskFiresPrompter(t *testing.T) {
 			p := &scriptedPrompter{responses: map[string]string{
 				"/anything": ActionAllow,
 			}}
-			h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
+			h := NewProfileHandler(lookup, p, time.Second, nopLogger{})
 
 			v := h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/anything"})
 			if v != VerdictAllow {
@@ -476,7 +476,7 @@ func TestProfileHandlerDecidePendingExecUsesLaunchingProfile(t *testing.T) {
 	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{
 		1: {id: "launcher", defAct: profile.DefaultActionPermit},
 	}}
-	h := NewProfileHandler(lookup, nil, nil, time.Second, nopLogger{})
+	h := NewProfileHandler(lookup, nil, time.Second, nopLogger{})
 	pending := newPendingEvent(&FileEvent{PID: 1, Path: "/tmp/target", Op: OpExec}, func(Verdict) responseResult {
 		return responseResult{accepted: true}
 	})
@@ -502,47 +502,10 @@ func TestProfileHandlerDecidePendingExecUsesLaunchingProfile(t *testing.T) {
 	}
 }
 
-// TestProfileHandlerFallbackPopulatesExe: a lookup that errors still
-// returns a Path; the handler propagates it onto the event so the
-// fallback can key by exe even though no profile resolved.
-func TestProfileHandlerFallbackPopulatesExe(t *testing.T) {
-	var seenExe string
-	fallback := HandlerFunc(func(_ context.Context, e *FileEvent) Verdict {
-		seenExe = e.Exe
-		return VerdictAllow
-	})
-	lookup := &fakeLookup{
-		err: errors.New("transient"),
-	}
-	h := NewProfileHandler(lookup, &scriptedPrompter{}, fallback, time.Second, nopLogger{})
-
-	_ = h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/x"})
-	if seenExe != "" {
-		t.Errorf("fallback saw exe %q; lookup error means no Path was resolved", seenExe)
-	}
-}
-
-// TestProfileHandlerNoProfilePopulatesExeAndFallback: ErrNoProfile is
-// the same path as any other no-profile result -- delegate to the
-// fallback, and propagate the resolved exe so the fallback can key by it.
-func TestProfileHandlerNoProfilePopulatesExeAndFallback(t *testing.T) {
-	var seen FileEvent
-	fallback := HandlerFunc(func(_ context.Context, e *FileEvent) Verdict {
-		seen = *e
-		return VerdictDeny
-	})
-	// The fake lookup returns no profile for unknown PIDs but doesn't
-	// give an exe back. To exercise the propagation, give it a known
-	// entry with Path but no rule data.
-	lookup := &fakeLookup{profiles: map[int32]*fakeProfile{}}
-	h := NewProfileHandler(lookup, &scriptedPrompter{}, fallback, time.Second, nopLogger{})
-
-	v := h.Decide(context.Background(), &FileEvent{PID: 999, Path: "/x"})
-	if v != VerdictDeny {
-		t.Errorf("got %s, want deny (from fallback)", v)
-	}
-	if seen.Path != "/x" {
-		t.Errorf("fallback saw path %q, want /x", seen.Path)
+func TestProfileHandlerLookupFailureDenies(t *testing.T) {
+	h := NewProfileHandler(&fakeLookup{err: errors.New("transient")}, &scriptedPrompter{}, time.Second, nopLogger{})
+	if got := h.Decide(context.Background(), &FileEvent{PID: 1, Path: "/x"}); got != VerdictDeny {
+		t.Fatalf("lookup failure verdict = %s, want deny", got)
 	}
 }
 
@@ -551,7 +514,6 @@ func TestProfileHandlerSelfProfileUsesInMemorySnapshot(t *testing.T) {
 	h := NewProfileHandler(
 		&fakeLookup{err: errors.New("normal lookup must not run for self")},
 		&scriptedPrompter{},
-		HandlerFunc(func(context.Context, *FileEvent) Verdict { return VerdictDeny }),
 		time.Second,
 		nopLogger{},
 	)
@@ -577,51 +539,5 @@ func TestProfileHandlerSelfProfileUsesInMemorySnapshot(t *testing.T) {
 
 	if got := h.Decide(context.Background(), &FileEvent{PID: 4242, Path: "/etc/shadow"}); got != VerdictDeny {
 		t.Fatalf("self default verdict = %s, want deny", got)
-	}
-}
-
-func TestProfileHandlerFallbackAlwaysPersistsThroughCoordinator(t *testing.T) {
-	path := "/tmp/fallback-coordinator-rule"
-	prompter := &scriptedPrompter{responses: map[string]string{path: ActionAllowAlways}}
-	fallback := NewPromptHandler(prompter, nil, time.Second)
-	persistPath := t.TempDir() + "/fallback-rules.json"
-	if err := fallback.SetPersistPath(persistPath); err != nil {
-		t.Fatalf("SetPersistPath: %v", err)
-	}
-	handler := NewProfileHandler(&fakeLookup{err: ErrNoProfile}, prompter, fallback, time.Second, nopLogger{})
-	pipeline := NewDecisionPipeline(handler, DecisionPipelineConfig{Workers: 1, QueueCapacity: 1, OutstandingLimit: 1, PerProfileAskLimit: 1})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	pipeline.Start(ctx)
-
-	first, firstResponses := pipelinePending(FileEvent{PID: 91, Exe: "/usr/bin/fallback-app", Path: path, Op: OpOpen})
-	if err := pipeline.Handle(ctx, first); err != nil {
-		t.Fatalf("first Handle: %v", err)
-	}
-	if got := waitPipelineVerdict(t, firstResponses); got != VerdictAllow {
-		t.Fatalf("first verdict = %s, want allow", got)
-	}
-	flushCtx, flushCancel := context.WithTimeout(context.Background(), time.Second)
-	defer flushCancel()
-	if err := handler.coordinator().FlushPermanentRules(flushCtx); err != nil {
-		t.Fatalf("FlushPermanentRules: %v", err)
-	}
-
-	reloaded := NewPromptHandler(&scriptedPrompter{responses: map[string]string{path: ActionDeny}}, nil, time.Second)
-	if err := reloaded.SetPersistPath(persistPath); err != nil {
-		t.Fatalf("reload SetPersistPath: %v", err)
-	}
-	reloadedHandler := NewProfileHandler(&fakeLookup{err: ErrNoProfile}, reloaded.prompter, reloaded, time.Second, nopLogger{})
-	reloadedPipeline := NewDecisionPipeline(reloadedHandler, DecisionPipelineConfig{Workers: 1, QueueCapacity: 1, OutstandingLimit: 1, PerProfileAskLimit: 1})
-	reloadedPipeline.Start(ctx)
-	second, secondResponses := pipelinePending(FileEvent{PID: 92, Exe: "/usr/bin/fallback-app", Path: path, Op: OpOpen})
-	if err := reloadedPipeline.Handle(ctx, second); err != nil {
-		t.Fatalf("second Handle: %v", err)
-	}
-	if got := waitPipelineVerdict(t, secondResponses); got != VerdictAllow {
-		t.Fatalf("reloaded fallback verdict = %s, want persisted allow", got)
-	}
-	if reloaded.prompter.(*scriptedPrompter).called != 0 {
-		t.Fatal("reloaded fallback prompted despite the persisted exact rule")
 	}
 }
