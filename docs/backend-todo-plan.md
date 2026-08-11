@@ -56,9 +56,9 @@ A rule for `/folder` controls the folder itself and operations involving its ent
 
 The Access, Write, and Execute rules are stored in three separate profile config keys (`fileaccess/readRules`, `fileaccess/writeRules`, `fileaccess/execRules`) and are also kept **separate after parsing**: a `DecisionSnapshot` holds one parsed `PathRules` list per operation plus one shared default action, all published together as one immutable value. Deciding an event determines the operation, selects the matching list via `DecisionSnapshot.rulesFor` (the single routing point; opens fold to the Read list, an unsupported operation fails closed and never borrows another list), then runs the one shared matcher over that list, applying the shared default on no match. Each rule's operation is implied by the list it lives in — it is not encoded in the parsed rule or in the stored string. Stored rules are untagged: a glob/recursive `+ /foo/**`, an exact file `+ @"/foo"`, or an exact directory `+ @dir:"/foo"`.
 
-**LSM prerequisite — currently unimplemented.** `ParseRules` initializes each individual `PathRules.Default` to Allow, and `DecisionSnapshot.DecideOperation` currently returns that per-list default when no rule matches. Before Phase 5 wires this engine to LSM, make no-match decisions apply `DecisionSnapshot.DefaultAction` instead, and add coverage for a Block profile default with an unmatched Write rule. Current fanotify Access and Execute decisions are unaffected: `ProfileHandler` uses `snapshot.Lookup` and then applies `snapshot.DefaultAction` itself.
+**LSM default-action prerequisite.** Current fanotify Access and Execute decisions already use `snapshot.Lookup` and then apply `DecisionSnapshot.DefaultAction`, and constructor-built snapshots currently copy the resolved shared default into each parsed list for the future non-prompt engine. Before Phase 5 wires LSM enforcement, make the no-match invariant structural: every `DecisionSnapshot` decision path, including directly constructed/fallback snapshots, must resolve an unmatched operation from `DecisionSnapshot.DefaultAction` rather than depending on a copied or zero-value `PathRules.Default`. Add explicit tests for unmatched Write/Read/Execute with Block and Ask defaults; non-prompt Ask must fail closed unless that path has an explicit prompt mechanism.
 
-**LSM hardening prerequisite — secondary routers must fail closed.** The authoritative `DecisionSnapshot` router and persistence destination-key router reject unknown operations, but the fallback `PromptHandler` selector currently sends them to the Read list for matching and learned-rule insertion. The permanent overlay has the same default-to-Read behavior while publishing and updating its durable base. This is not reachable from the current fanotify source, which emits only Open and Execute events, but before adding LSM, another source, or synthetic event tooling, change every secondary router to reject unknown operations so no operation can borrow another list.
+**LSM/source hardening prerequisite — unsupported operations must fail closed end-to-end.** The current `FileOp` routing primitive, profile persistence routing, fallback list selection, and permanent-rule overlay reject unsupported operations. Before adding LSM, another runtime source, or synthetic production events, verify the invariant across the complete decision path for both `FileOp` and `DecisionOp`: an unknown operation must not default to the Access/Read list, reach a prompt that can Allow it, enter an in-memory learned-rule overlay, or create a durable rule. In particular, operation-to-list conversion for logical `DecisionOp` values must distinguish known Access/Read operations from unknown values, and fallback handling must treat an unsupported `FileOp` as a definitive deny rather than ordinary "no matching rule". Add end-to-end tests covering unknown `FileOp` and unknown `DecisionOp` values.
 
 **Development reset requirement.** This refactor removed the internal operation-tagged rule representation and changed the on-disk schema of the fallback per-exe rules file (`persistedFileVersion` 1 → 2, now three lists per exe). A version-1 fallback file is refused rather than silently dropped. Backward compatibility with existing development databases is intentionally not provided: **after pulling this change, delete and recreate the Filemaster/profile database (and any fallback rules file) so special profiles are re-seeded.** The stored per-operation rule strings themselves are unchanged, so profile rule content is not lost by editing, but a clean reset is the supported path and avoids the refused fallback file.
 
@@ -312,21 +312,21 @@ UI done: the mount is surfaced in the Angular monitor event-details panel (a "Mo
 
 Still deferred to a later session: filequery filter + group-by on mount ID/path (self-contained in the query handler, works off the already-persisted columns).
 
-### Phase 3: Rewrite Rule Evaluation — ✅ Done (engine + unit tests; enforcement deferred to Phase 5)
+### Phase 3: Rewrite Rule Evaluation — ✅ Done (matching engine + unit tests; enforcement/hardening deferred to Phase 5)
 
-Implemented in `service/fileaccess/rule_decision.go` (engine) and `rule_decision_test.go` (unit tests covering the worked examples in sections 3, 9-12, and Links). Layered additively on the existing `PathRule`/`PathRules` matching so the current runtime open/exec prompt path is untouched; `DecideOperation` is the verdict-or-default engine future non-prompt enforcement will call.
+Implemented in `service/fileaccess/rule_decision.go` (engine) and `rule_decision_test.go` (unit tests covering the worked examples in sections 3, 9-12, and Links). Layered additively on the existing `PathRule`/`PathRules` matching so the current runtime open/exec prompt path is untouched; `DecideOperation` is the verdict-or-default engine future non-prompt enforcement will call. Phase 3 marks the rule-applicability and ordering semantics complete; it does **not** mark the Phase 5 LSM default-action and unsupported-operation hardening prerequisites above as complete.
 
 1. ✅ Put file and folder rules in shared ordered lists. (Per-operation lists each mix files and folders; applicability is operation-scoped so within-list order is decisive.)
 2. ✅ Determine rule applicability based on the operation. (`ruleAppliesToDecision` + `DecisionOp.scopeOp`/`entryOp`.)
 3. ✅ Make the first applicable matching rule decisive.
-4. ✅ Use the profile default only when no applicable rule matches.
+4. ✅ Define the semantic that the profile default is used only when no applicable rule matches. Constructor-built snapshots currently propagate that default into the operation lists; Phase 5 must make the invariant structural at the `DecisionSnapshot` decision layer for every snapshot construction path.
 5. ✅ Support Delete decisions. (`DecisionDelete`; folder rule applies to the entry.)
 6. ✅ Support Create decisions for nonexistent paths. (`DecisionCreate`.)
 7. ✅ Support Source Delete and Destination Create or Write for Rename and Move. (`DecideRename`.)
 8. ✅ Treat replacement differently from creation. (`RenameRequest.DestExists` → Write on existing dest.)
 9. ✅ Preserve rule priority. (Engine iterates rules in stored order.)
 
-Items 5 through 8 build the rule-evaluation engine and its unit tests only. Delete, Create, Rename, Move, and Replacement are not observable by the current fanotify backend and are not enforced until Phase 5. The engine is written now so that enforcement can be wired to it later without reworking rule matching.
+Items 5 through 8 build the rule-evaluation engine and its unit tests only. Delete, Create, Rename, Move, and Replacement are not observable by the current fanotify backend and are not enforced until Phase 5. The engine is written now so that enforcement can be wired to it later without reworking rule matching. Before that wiring, complete the default-action and unsupported-operation hardening prerequisites documented in section 3 and Phase 5.
 
 ### Phase 4: Prepare Future Permissions — ✅ Done (structural prep folded into Phase 3)
 
@@ -346,6 +346,8 @@ Items 5 through 8 build the rule-evaluation engine and its unit tests only. Dele
 6. Block denied Read or Write operations after open.
 7. Enforce Create, Delete, Rename, Move, Replacement, Metadata, Truncate, Append, file mappings, and Links.
 8. Use the matching rule or profile default for operations that cannot wait for a prompt.
+9. Make no-match handling structurally use `DecisionSnapshot.DefaultAction` for every operation and every snapshot construction path, including fallback/direct snapshots; do not rely on copied or zero-value per-list defaults. Test unmatched Read/Write/Execute under Permit, Block, and Ask.
+10. Fail closed on unsupported `FileOp` and `DecisionOp` values end-to-end. Unknown operations must not borrow Access/Read policy, reach an Allow-capable prompt, enter learned-rule overlays, or persist rules. Cover both operation types through complete decision-path tests.
 
 ### Phase 6: Migration and Compatibility
 
