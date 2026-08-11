@@ -69,9 +69,9 @@ func TestOperationListsAreIsolated(t *testing.T) {
 		otherOps   []FileOp
 		deniedPath string
 	}{
-		{"access-only", []string{`- @"/x"`}, nil, nil, OpRead, []FileOp{OpWrite, OpExec}, "/x"},
-		{"write-only", nil, []string{`- @"/x"`}, nil, OpWrite, []FileOp{OpRead, OpExec}, "/x"},
-		{"exec-only", nil, nil, []string{`- @"/x"`}, OpExec, []FileOp{OpRead, OpWrite}, "/x"},
+		{"access-only", []string{`- /x`}, nil, nil, OpRead, []FileOp{OpWrite, OpExec}, "/x"},
+		{"write-only", nil, []string{`- /x`}, nil, OpWrite, []FileOp{OpRead, OpExec}, "/x"},
+		{"exec-only", nil, nil, []string{`- /x`}, OpExec, []FileOp{OpRead, OpWrite}, "/x"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -91,7 +91,7 @@ func TestOperationListsAreIsolated(t *testing.T) {
 func TestOpenEventsUseAccessList(t *testing.T) {
 	// OpOpen folds to the Read list (ruleScopeOp); a Read-list rule governs opens,
 	// while Write/Exec rules for the same path do not.
-	s := snapshotOf([]string{`- @"/secret"`}, []string{`+ @"/secret"`}, []string{`+ @"/secret"`})
+	s := snapshotOf([]string{`- /secret`}, []string{`+ /secret`}, []string{`+ /secret`})
 	if got := lookupVerdict(t, s, "/secret", OpOpen, false); got != VerdictDeny {
 		t.Fatalf("open governed by access list: got %v, want deny", got)
 	}
@@ -124,7 +124,7 @@ func TestFallbackHandlerRoutesFailClosed(t *testing.T) {
 	// unsupported operation instead of defaulting to the read list, and its
 	// per-operation lists must not leak across operations.
 	h := NewPromptHandler(&scriptedPrompter{}, nil, time.Second)
-	if err := h.appendRuleEntry("exe", OpExec, PathRule{Pattern: "/x", Verdict: VerdictAllow, Exact: true}); err != nil {
+	if err := h.appendRuleEntry("exe", OpExec, PathRule{Pattern: "/x", Verdict: VerdictAllow}); err != nil {
 		t.Fatalf("seed exec rule: %v", err)
 	}
 	if _, ok := h.lookup("exe", "/x", FileOp(200), false); ok {
@@ -136,7 +136,7 @@ func TestFallbackHandlerRoutesFailClosed(t *testing.T) {
 	if _, ok := h.lookup("exe", "/x", OpExec, false); !ok {
 		t.Fatalf("exec-list rule did not answer an exec lookup")
 	}
-	if err := h.appendRuleEntry("exe", FileOp(200), PathRule{Pattern: "/y", Verdict: VerdictAllow, Exact: true}); err == nil {
+	if err := h.appendRuleEntry("exe", FileOp(200), PathRule{Pattern: "/y", Verdict: VerdictAllow}); err == nil {
 		t.Fatalf("appendRuleEntry must reject an unsupported operation")
 	}
 }
@@ -182,11 +182,11 @@ func TestDecideOperationUsesSharedDefault(t *testing.T) {
 
 func TestFirstMatchWinsWithinList(t *testing.T) {
 	// The earlier rule in a list decides even when a later rule also matches.
-	s := snapshotOf([]string{`+ @"/x"`, `- @"/x"`}, nil, nil)
+	s := snapshotOf([]string{`+ /x`, `- /x`}, nil, nil)
 	if got := lookupVerdict(t, s, "/x", OpRead, false); got != VerdictAllow {
 		t.Fatalf("first-match: got %v, want allow (earlier rule wins)", got)
 	}
-	s = snapshotOf([]string{`- @"/x"`, `+ @"/x"`}, nil, nil)
+	s = snapshotOf([]string{`- /x`, `+ /x`}, nil, nil)
 	if got := lookupVerdict(t, s, "/x", OpRead, false); got != VerdictDeny {
 		t.Fatalf("first-match: got %v, want deny (earlier rule wins)", got)
 	}
@@ -194,10 +194,10 @@ func TestFirstMatchWinsWithinList(t *testing.T) {
 
 func TestPatternSemanticsWithinList(t *testing.T) {
 	s := snapshotOf([]string{
-		`- @"/exact/file"`,  // exact literal
+		`- /exact/file`,     // literal path
 		`+ /glob/*.txt`,     // single-segment glob
 		`- /tree/**`,        // recursive
-		`+ @dir:"/onlydir"`, // directory-only exact
+		`+ folder:/onlydir`, // folder-only literal
 	}, nil, nil)
 
 	if got := lookupVerdict(t, s, "/exact/file", OpRead, false); got != VerdictDeny {
@@ -245,8 +245,8 @@ func TestSharedDefaultAcrossLists(t *testing.T) {
 func TestSnapshotReplacementIsAtomicPerList(t *testing.T) {
 	// A replacement snapshot is a wholly new value; a reader holding the old one
 	// never observes a mix of new Access rules with old Execute rules.
-	old := snapshotOf([]string{`- @"/x"`}, nil, []string{`- @"/y"`})
-	newSnap := snapshotOf([]string{`+ @"/x"`}, nil, []string{`+ @"/y"`})
+	old := snapshotOf([]string{`- /x`}, nil, []string{`- /y`})
+	newSnap := snapshotOf([]string{`+ /x`}, nil, []string{`+ /y`})
 	if got := lookupVerdict(t, old, "/x", OpRead, false); got != VerdictDeny {
 		t.Fatalf("old snapshot access: got %v, want deny", got)
 	}
@@ -268,7 +268,7 @@ func TestConcurrentReadsDuringSnapshotSwap(t *testing.T) {
 		mu sync.RWMutex
 		s  *DecisionSnapshot
 	}
-	current.s = snapshotOf([]string{`- @"/x"`}, nil, nil)
+	current.s = snapshotOf([]string{`- /x`}, nil, nil)
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -294,9 +294,9 @@ func TestConcurrentReadsDuringSnapshotSwap(t *testing.T) {
 		}()
 	}
 	for i := 0; i < 200; i++ {
-		swap := snapshotOf([]string{`+ @"/x"`}, nil, nil)
+		swap := snapshotOf([]string{`+ /x`}, nil, nil)
 		if i%2 == 0 {
-			swap = snapshotOf([]string{`- @"/x"`}, nil, nil)
+			swap = snapshotOf([]string{`- /x`}, nil, nil)
 		}
 		current.mu.Lock()
 		current.s = swap
@@ -332,8 +332,8 @@ func TestDecideOperationRoutesByOperation(t *testing.T) {
 	// rule governs Write/Create/Delete, an Exec-list rule governs Execute, and
 	// neither leaks into Access.
 	s := newDecisionSnapshot("p", "local", profile.DefaultActionPermit, ruleLists{
-		write: []string{`- @"/w"`},
-		exec:  []string{`- @"/e"`},
+		write: []string{`- /w`},
+		exec:  []string{`- /e`},
 	}, 1)
 	if got := s.DecideOperation("/w", DecisionWrite, false); got != VerdictDeny {
 		t.Fatalf("write rule must govern write: got %v, want deny", got)

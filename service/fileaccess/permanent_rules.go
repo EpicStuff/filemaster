@@ -42,18 +42,18 @@ type permanentRule struct {
 	pattern    string
 	verdict    Verdict
 	operation  FileOp
-	directory  bool
+	kind       ObjectKind
 	entry      string
 	generation uint64
 }
 
 // key identifies a permanent rule within its operation list: two rules with the
-// same operation, directory-ness and path are the same learned rule. The
+// same operation, object kind and path are the same learned rule. The
 // operation is part of the key so an equivalent path learned for a different
 // operation is tracked and deduplicated independently, never suppressing an
 // equivalent rule belonging to another operation.
 func (r permanentRule) key() string {
-	return fmt.Sprintf("%d:%t:%s", r.operation, r.directory, r.pattern)
+	return fmt.Sprintf("%d:%d:%s", r.operation, r.kind, r.pattern)
 }
 
 // overlayIdentity identifies a learned exact rule within a single operation
@@ -61,8 +61,8 @@ func (r permanentRule) key() string {
 // merged separately, so the identity only needs to distinguish rules inside one
 // list.
 type overlayIdentity struct {
-	pattern   string
-	directory bool
+	pattern string
+	kind    ObjectKind
 }
 
 type dirtyRuleProfile struct {
@@ -150,7 +150,7 @@ func profileSnapshotKey(snapshot *DecisionSnapshot) string {
 	return snapshot.Source + "/" + snapshot.ProfileID
 }
 
-func canonicalPermanentRule(pattern string, operation FileOp, directory bool, verdict Verdict) (permanentRule, bool) {
+func canonicalPermanentRule(pattern string, operation FileOp, _ bool, verdict Verdict) (permanentRule, bool) {
 	pattern = filepath.Clean(pattern)
 	if pattern == "." || !filepath.IsAbs(pattern) || (verdict != VerdictAllow && verdict != VerdictDeny) {
 		return permanentRule{}, false
@@ -159,8 +159,8 @@ func canonicalPermanentRule(pattern string, operation FileOp, directory bool, ve
 		pattern:   pattern,
 		verdict:   verdict,
 		operation: operation,
-		directory: directory,
-		entry:     formatStoredExactRule(pattern, directory, verdict),
+		kind:      ObjectKindAny,
+		entry:     FormatRule(pattern, verdict),
 	}, true
 }
 
@@ -335,7 +335,7 @@ func (p *RulePersistence) apply(snapshot *DecisionSnapshot, store RuleStore, pat
 		p.mu.Unlock()
 		return merged, false
 	}
-	if len(state.dirty) == 0 && len(state.applied) == 0 && durableExactRuleAtPrecedence(base, rule) {
+	if len(state.dirty) == 0 && len(state.applied) == 0 && durableRuleAtPrecedence(base, rule) {
 		p.mu.Unlock()
 		return base, false
 	}
@@ -388,7 +388,7 @@ func (p *RulePersistence) Merge(snapshot *DecisionSnapshot) *DecisionSnapshot {
 		(base.Revision > previousBase.Revision ||
 			(base.Revision == previousBase.Revision && !sameDecisionSnapshotPolicy(base, previousBase)))
 	for pattern, rule := range state.applied {
-		if durableExactRuleAtPrecedence(base, rule) {
+		if durableRuleAtPrecedence(base, rule) {
 			delete(state.applied, pattern)
 			state.policyEpoch++
 			continue
@@ -424,7 +424,7 @@ func samePathRulesPolicy(left, right PathRules) bool {
 	}
 	for i, rule := range left.Rules {
 		other := right.Rules[i]
-		if rule.Pattern != other.Pattern || rule.Verdict != other.Verdict || rule.Exact != other.Exact || rule.DirectoryOnly != other.DirectoryOnly {
+		if rule.Pattern != other.Pattern || rule.Verdict != other.Verdict || rule.ObjectKind != other.ObjectKind {
 			return false
 		}
 	}
@@ -453,11 +453,11 @@ func (state *dirtyRuleProfile) baseForLocked(snapshot *DecisionSnapshot) *Decisi
 	return snapshot
 }
 
-// durableExactRuleAtPrecedence confirms that the profile itself currently
-// decides the exact canonical path with this exact canonical rule. Merely
+// durableRuleAtPrecedence confirms that the profile itself currently
+// decides the canonical path with this canonical rule. Merely
 // finding a matching rule below an opposite or broader first match is not
 // durable confirmation.
-func durableExactRuleAtPrecedence(snapshot *DecisionSnapshot, rule permanentRule) bool {
+func durableRuleAtPrecedence(snapshot *DecisionSnapshot, rule permanentRule) bool {
 	if snapshot == nil {
 		return false
 	}
@@ -469,7 +469,7 @@ func durableExactRuleAtPrecedence(snapshot *DecisionSnapshot, rule permanentRule
 		if !existing.Matches(rule.pattern) {
 			continue
 		}
-		return existing.Exact && existing.Pattern == rule.pattern && existing.Verdict == rule.verdict && existing.DirectoryOnly == rule.directory
+		return existing.Pattern == rule.pattern && existing.Verdict == rule.verdict && existing.ObjectKind == rule.kind
 	}
 	return false
 }
@@ -526,17 +526,17 @@ func (state *dirtyRuleProfile) publishLocked(base *DecisionSnapshot) *DecisionSn
 
 // mergeOverlayList prepends one operation's learned rules (already sorted
 // newest-first) onto that operation's base list, dropping any base rule an
-// overlay rule supersedes (same path and directory-ness). The operation is
+// overlay rule supersedes (same path and object kind). The operation is
 // implied by the list, so it is not part of the identity here.
 func mergeOverlayList(base PathRules, overlayRules []permanentRule) PathRules {
 	merged := make([]PathRule, 0, len(base.Rules)+len(overlayRules))
 	covered := make(map[overlayIdentity]struct{}, len(overlayRules))
 	for _, rule := range overlayRules {
-		merged = append(merged, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, Exact: true, DirectoryOnly: rule.directory})
-		covered[overlayIdentity{pattern: rule.pattern, directory: rule.directory}] = struct{}{}
+		merged = append(merged, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, ObjectKind: rule.kind})
+		covered[overlayIdentity{pattern: rule.pattern, kind: rule.kind}] = struct{}{}
 	}
 	for _, rule := range base.Rules {
-		if _, ok := covered[overlayIdentity{pattern: rule.Pattern, directory: rule.DirectoryOnly}]; ok && rule.Exact {
+		if _, ok := covered[overlayIdentity{pattern: rule.Pattern, kind: rule.ObjectKind}]; ok {
 			continue
 		}
 		merged = append(merged, rule)
@@ -657,7 +657,7 @@ func (p *RulePersistence) persisted(key string, expected *dirtyRuleProfile, rule
 		// profile reload. Retaining that canonical fact lets Merge distinguish an
 		// equal-revision, content-identical reload from one that removed or
 		// changed this accepted exact rule.
-		state.base = snapshotWithDurableExactRule(state.base, rule)
+		state.base = snapshotWithDurableRule(state.base, rule)
 		state.policyEpoch++
 	}
 	if len(state.dirty) == 0 {
@@ -667,7 +667,7 @@ func (p *RulePersistence) persisted(key string, expected *dirtyRuleProfile, rule
 	p.mu.Unlock()
 }
 
-func snapshotWithDurableExactRule(base *DecisionSnapshot, rule permanentRule) *DecisionSnapshot {
+func snapshotWithDurableRule(base *DecisionSnapshot, rule permanentRule) *DecisionSnapshot {
 	if base == nil {
 		return nil
 	}
@@ -678,23 +678,23 @@ func snapshotWithDurableExactRule(base *DecisionSnapshot, rule permanentRule) *D
 	updated := *base
 	switch listOp {
 	case OpWrite:
-		updated.Write = pathRulesWithDurableExactRule(base.Write, rule)
+		updated.Write = pathRulesWithDurableRule(base.Write, rule)
 	case OpExec:
-		updated.Exec = pathRulesWithDurableExactRule(base.Exec, rule)
+		updated.Exec = pathRulesWithDurableRule(base.Exec, rule)
 	default:
-		updated.Read = pathRulesWithDurableExactRule(base.Read, rule)
+		updated.Read = pathRulesWithDurableRule(base.Read, rule)
 	}
 	return &updated
 }
 
-// pathRulesWithDurableExactRule prepends the durable-base marker for a persisted
-// exact rule to its operation's list, replacing any equivalent existing exact
-// rule (same path and directory-ness).
-func pathRulesWithDurableExactRule(list PathRules, rule permanentRule) PathRules {
+// pathRulesWithDurableRule prepends the durable-base marker for a persisted
+// rule to its operation's list, replacing any equivalent existing
+// rule (same path and object kind).
+func pathRulesWithDurableRule(list PathRules, rule permanentRule) PathRules {
 	rules := make([]PathRule, 0, len(list.Rules)+1)
-	rules = append(rules, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, Exact: true, DirectoryOnly: rule.directory})
+	rules = append(rules, PathRule{Pattern: rule.pattern, Verdict: rule.verdict, ObjectKind: rule.kind})
 	for _, existing := range list.Rules {
-		if existing.Exact && existing.Pattern == rule.pattern && existing.DirectoryOnly == rule.directory {
+		if existing.Pattern == rule.pattern && existing.ObjectKind == rule.kind {
 			continue
 		}
 		rules = append(rules, existing)

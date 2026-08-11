@@ -2,11 +2,10 @@ package fileaccess
 
 import "testing"
 
-// exactRule builds an exact rule, matching how a stored literal file/folder rule
-// parses (a literal absolute path). The operation is no longer carried by the
+// literalRule builds a literal rule without glob metacharacters. The operation is no longer carried by the
 // rule; it is carried by which list the rule is placed in.
-func exactRule(v Verdict, pattern string) PathRule {
-	return PathRule{Pattern: pattern, Verdict: v, Exact: true}
+func literalRule(v Verdict, pattern string) PathRule {
+	return PathRule{Pattern: pattern, Verdict: v}
 }
 
 // globRule builds a glob rule (e.g. "/folder/**").
@@ -80,8 +79,8 @@ func TestDecisionOpRuntimeObservable(t *testing.T) {
 // denied (deletion changes a folder entry, so the folder Deny applies first).
 func TestDecideContentWriteVsDeleteFolderFirst(t *testing.T) {
 	snapshot := decisionSnapshot(VerdictDeny, nil, []PathRule{
-		exactRule(VerdictDeny, "/folder"),
-		exactRule(VerdictAllow, "/folder/file.txt"),
+		literalRule(VerdictDeny, "/folder"),
+		literalRule(VerdictAllow, "/folder/file.txt"),
 	}, nil)
 
 	if got := snapshot.DecideOperation("/folder/file.txt", DecisionWrite, false); got != VerdictAllow {
@@ -96,8 +95,8 @@ func TestDecideContentWriteVsDeleteFolderFirst(t *testing.T) {
 // delete allowed -- the first applicable matching rule decides.
 func TestDecideDeleteFileRuleFirst(t *testing.T) {
 	snapshot := decisionSnapshot(VerdictDeny, nil, []PathRule{
-		exactRule(VerdictAllow, "/folder/file.txt"),
-		exactRule(VerdictDeny, "/folder"),
+		literalRule(VerdictAllow, "/folder/file.txt"),
+		literalRule(VerdictDeny, "/folder"),
 	}, nil)
 	if got := snapshot.DecideOperation("/folder/file.txt", DecisionDelete, false); got != VerdictAllow {
 		t.Errorf("delete = %s, want allow (file Allow is first applicable rule)", got)
@@ -107,7 +106,7 @@ func TestDecideDeleteFileRuleFirst(t *testing.T) {
 // Section 9: a nonrecursive parent-folder rule does not apply to content writes,
 // but a recursive "/folder/**" rule does.
 func TestDecideContentWriteRecursiveVsNonrecursive(t *testing.T) {
-	nonrecursive := decisionSnapshot(VerdictAllow, nil, []PathRule{exactRule(VerdictDeny, "/folder")}, nil)
+	nonrecursive := decisionSnapshot(VerdictAllow, nil, []PathRule{literalRule(VerdictDeny, "/folder")}, nil)
 	if got := nonrecursive.DecideOperation("/folder/file.txt", DecisionWrite, false); got != VerdictAllow {
 		t.Errorf("content write with nonrecursive folder Deny = %s, want allow (rule must not apply)", got)
 	}
@@ -121,12 +120,12 @@ func TestDecideContentWriteRecursiveVsNonrecursive(t *testing.T) {
 // Section 11: creating an object can match an exact rule for the (nonexistent)
 // destination path, or a rule for the destination folder.
 func TestDecideCreate(t *testing.T) {
-	exactDest := decisionSnapshot(VerdictDeny, nil, []PathRule{exactRule(VerdictAllow, "/destination/new-file.txt")}, nil)
-	if got := exactDest.DecideOperation("/destination/new-file.txt", DecisionCreate, false); got != VerdictAllow {
+	literalDest := decisionSnapshot(VerdictDeny, nil, []PathRule{literalRule(VerdictAllow, "/destination/new-file.txt")}, nil)
+	if got := literalDest.DecideOperation("/destination/new-file.txt", DecisionCreate, false); got != VerdictAllow {
 		t.Errorf("create with exact destination rule = %s, want allow", got)
 	}
 
-	folderDest := decisionSnapshot(VerdictDeny, nil, []PathRule{exactRule(VerdictAllow, "/destination")}, nil)
+	folderDest := decisionSnapshot(VerdictDeny, nil, []PathRule{literalRule(VerdictAllow, "/destination")}, nil)
 	if got := folderDest.DecideOperation("/destination/new-file.txt", DecisionCreate, false); got != VerdictAllow {
 		t.Errorf("create with destination folder rule = %s, want allow", got)
 	}
@@ -134,7 +133,7 @@ func TestDecideCreate(t *testing.T) {
 
 // Section 3: when no applicable rule matches, the profile default decides.
 func TestDecideDefaultFallback(t *testing.T) {
-	snapshot := decisionSnapshot(VerdictDeny, nil, []PathRule{exactRule(VerdictAllow, "/other")}, nil)
+	snapshot := decisionSnapshot(VerdictDeny, nil, []PathRule{literalRule(VerdictAllow, "/other")}, nil)
 	if got := snapshot.DecideOperation("/unmatched/path", DecisionCreate, false); got != VerdictDeny {
 		t.Errorf("unmatched create = %s, want deny (default)", got)
 	}
@@ -143,7 +142,7 @@ func TestDecideDefaultFallback(t *testing.T) {
 // Operation scoping: a Write-list rule must not decide an Access (Read-list)
 // operation, and vice versa.
 func TestDecideRespectsListScope(t *testing.T) {
-	snapshot := decisionSnapshot(VerdictAllow, nil, []PathRule{exactRule(VerdictDeny, "/secret")}, nil)
+	snapshot := decisionSnapshot(VerdictAllow, nil, []PathRule{literalRule(VerdictDeny, "/secret")}, nil)
 	if got := snapshot.DecideOperation("/secret", DecisionAccess, false); got != VerdictAllow {
 		t.Errorf("access decided by write-list rule = %s, want allow (default; write rule out of scope)", got)
 	}
@@ -156,9 +155,9 @@ func TestDecideRespectsListScope(t *testing.T) {
 // direct-match, first-match-wins over the operation's list.
 func TestDecideAccessAndExecute(t *testing.T) {
 	snapshot := decisionSnapshot(VerdictDeny,
-		[]PathRule{exactRule(VerdictAllow, "/home/user/doc.txt")},
+		[]PathRule{literalRule(VerdictAllow, "/home/user/doc.txt")},
 		nil,
-		[]PathRule{exactRule(VerdictDeny, "/usr/bin/danger")},
+		[]PathRule{literalRule(VerdictDeny, "/usr/bin/danger")},
 	)
 	if got := snapshot.DecideOperation("/home/user/doc.txt", DecisionAccess, false); got != VerdictAllow {
 		t.Errorf("access = %s, want allow", got)
@@ -167,9 +166,33 @@ func TestDecideAccessAndExecute(t *testing.T) {
 		t.Errorf("execute = %s, want deny", got)
 	}
 	// Folder Access is opening the folder: a direct match on the folder path.
-	folder := decisionSnapshot(VerdictAllow, []PathRule{exactRule(VerdictDeny, "/private")}, nil, nil)
+	folder := decisionSnapshot(VerdictAllow, []PathRule{literalRule(VerdictDeny, "/private")}, nil, nil)
 	if got := folder.DecideOperation("/private", DecisionAccess, true); got != VerdictDeny {
 		t.Errorf("folder access = %s, want deny", got)
+	}
+}
+
+func TestDecideObjectKindsStayOperationScoped(t *testing.T) {
+	snapshot := decisionSnapshot(VerdictDeny,
+		[]PathRule{{Pattern: "/same", Verdict: VerdictAllow, ObjectKind: ObjectKindFile}},
+		[]PathRule{{Pattern: "/same", Verdict: VerdictAllow, ObjectKind: ObjectKindFolder}},
+		[]PathRule{{Pattern: "/same", Verdict: VerdictDeny, ObjectKind: ObjectKindFile}},
+	)
+	for _, c := range []struct {
+		op    DecisionOp
+		isDir bool
+		want  Verdict
+	}{
+		{DecisionAccess, false, VerdictAllow},
+		{DecisionAccess, true, VerdictDeny},
+		{DecisionWrite, false, VerdictDeny},
+		{DecisionWrite, true, VerdictAllow},
+		{DecisionExecute, false, VerdictDeny},
+		{DecisionExecute, true, VerdictDeny},
+	} {
+		if got := snapshot.DecideOperation("/same", c.op, c.isDir); got != c.want {
+			t.Fatalf("DecideOperation(%s, dir=%t) = %v, want %v", c.op, c.isDir, got, c.want)
+		}
 	}
 }
 
@@ -179,8 +202,8 @@ func TestDecideRename(t *testing.T) {
 	// Source delete denied by the source's containing folder -> whole rename
 	// denied even though the destination would be creatable.
 	sourceDenied := decisionSnapshot(VerdictDeny, nil, []PathRule{
-		exactRule(VerdictDeny, "/src"),
-		exactRule(VerdictAllow, "/dst"),
+		literalRule(VerdictDeny, "/src"),
+		literalRule(VerdictAllow, "/dst"),
 	}, nil)
 	if got := sourceDenied.DecideRename(RenameRequest{Source: "/src/a.txt", Dest: "/dst/a.txt"}); got != VerdictDeny {
 		t.Errorf("rename with source-folder deny = %s, want deny", got)
@@ -188,8 +211,8 @@ func TestDecideRename(t *testing.T) {
 
 	// Both source delete and destination create allowed.
 	allowed := decisionSnapshot(VerdictDeny, nil, []PathRule{
-		exactRule(VerdictAllow, "/src/a.txt"),
-		exactRule(VerdictAllow, "/dst"),
+		literalRule(VerdictAllow, "/src/a.txt"),
+		literalRule(VerdictAllow, "/dst"),
 	}, nil)
 	if got := allowed.DecideRename(RenameRequest{Source: "/src/a.txt", Dest: "/dst/a.txt"}); got != VerdictAllow {
 		t.Errorf("rename allowed = %s, want allow", got)
@@ -198,9 +221,9 @@ func TestDecideRename(t *testing.T) {
 	// Replacing an existing destination: a Deny on the existing destination's own
 	// Write blocks the rename even though the folders permit it.
 	replaceBlocked := decisionSnapshot(VerdictDeny, nil, []PathRule{
-		exactRule(VerdictAllow, "/src/a.txt"),
-		exactRule(VerdictDeny, "/dst/a.txt"),
-		exactRule(VerdictAllow, "/dst"),
+		literalRule(VerdictAllow, "/src/a.txt"),
+		literalRule(VerdictDeny, "/dst/a.txt"),
+		literalRule(VerdictAllow, "/dst"),
 	}, nil)
 	if got := replaceBlocked.DecideRename(RenameRequest{Source: "/src/a.txt", Dest: "/dst/a.txt", DestExists: true}); got != VerdictDeny {
 		t.Errorf("replace with destination Write deny = %s, want deny", got)
@@ -213,12 +236,12 @@ func TestDecideLinks(t *testing.T) {
 	// Source is readable and executable but not writable -> hard link denied,
 	// symlink still allowed (symlink needs no source access).
 	snapshot := decisionSnapshot(VerdictDeny,
-		[]PathRule{exactRule(VerdictAllow, "/src/a.txt")},
+		[]PathRule{literalRule(VerdictAllow, "/src/a.txt")},
 		[]PathRule{
-			exactRule(VerdictDeny, "/src/a.txt"),
-			exactRule(VerdictAllow, "/dst"),
+			literalRule(VerdictDeny, "/src/a.txt"),
+			literalRule(VerdictAllow, "/dst"),
 		},
-		[]PathRule{exactRule(VerdictAllow, "/src/a.txt")},
+		[]PathRule{literalRule(VerdictAllow, "/src/a.txt")},
 	)
 	req := LinkRequest{Source: "/src/a.txt", Dest: "/dst/link.txt"}
 	if got := snapshot.DecideHardLink(req); got != VerdictDeny {

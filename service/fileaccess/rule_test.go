@@ -11,7 +11,7 @@ func TestMatchPathPattern(t *testing.T) {
 		path    string
 		want    bool
 	}{
-		// Exact.
+		// Literal path.
 		{"/etc/passwd", "/etc/passwd", true},
 		{"/etc/passwd", "/etc/passwd.bak", false},
 		{"/etc/passwd", "/etc/shadow", false},
@@ -67,6 +67,52 @@ func TestPathRulesDecide(t *testing.T) {
 	}
 }
 
+func TestPathRulesObjectKinds(t *testing.T) {
+	rules := PathRules{
+		Rules: []PathRule{
+			{Pattern: "/tree/**", Verdict: VerdictDeny, ObjectKind: ObjectKindFile},
+			{Pattern: "/tree/**", Verdict: VerdictAllow, ObjectKind: ObjectKindFolder},
+			{Pattern: "/shared", Verdict: VerdictAllow, ObjectKind: ObjectKindFile},
+			{Pattern: "/shared", Verdict: VerdictDeny, ObjectKind: ObjectKindFolder},
+			{Pattern: "/plain", Verdict: VerdictAllow},
+		},
+		Default: VerdictDeny,
+	}
+
+	for _, c := range []struct {
+		path  string
+		isDir bool
+		want  Verdict
+	}{
+		{"/tree/report", false, VerdictDeny},
+		{"/tree/report", true, VerdictAllow},
+		{"/tree", false, VerdictDeny},
+		{"/tree", true, VerdictAllow},
+		{"/shared", false, VerdictAllow},
+		{"/shared", true, VerdictDeny},
+		{"/plain", false, VerdictAllow},
+		{"/plain", true, VerdictAllow},
+	} {
+		if got, matched := rules.match(c.path, c.isDir); !matched || got != c.want {
+			t.Fatalf("match(%q, dir=%t) = (%v, %t), want (%v, true)", c.path, c.isDir, got, matched, c.want)
+		}
+	}
+
+	ordered := PathRules{Rules: []PathRule{
+		{Pattern: "/ordered", Verdict: VerdictDeny},
+		{Pattern: "/ordered", Verdict: VerdictAllow, ObjectKind: ObjectKindFile},
+	}}
+	if got, matched := ordered.match("/ordered", false); !matched || got != VerdictDeny {
+		t.Fatalf("unqualified first rule did not win: (%v, %t)", got, matched)
+	}
+	if _, matched := (PathRules{Rules: []PathRule{{Pattern: "/only-file", Verdict: VerdictAllow, ObjectKind: ObjectKindFile}}}).match("/only-file", true); matched {
+		t.Fatal("file rule matched a folder")
+	}
+	if _, matched := (PathRules{Rules: []PathRule{{Pattern: "/only-folder", Verdict: VerdictAllow, ObjectKind: ObjectKindFolder}}}).match("/only-folder", false); matched {
+		t.Fatal("folder rule matched a file")
+	}
+}
+
 // TestPathRulesAsHandler proves PathRules can be plugged into a Source.
 func TestPathRulesAsHandler(t *testing.T) {
 	rs := PathRules{
@@ -83,8 +129,8 @@ func TestPathRulesScopeRulesToOperationAndDirectory(t *testing.T) {
 	snapshot := &DecisionSnapshot{
 		Read: PathRules{
 			Rules: []PathRule{
-				{Pattern: "/tmp/report", Verdict: VerdictDeny, Exact: true},
-				{Pattern: "/tmp/folder", Verdict: VerdictDeny, Exact: true, DirectoryOnly: true},
+				{Pattern: "/tmp/report", Verdict: VerdictDeny},
+				{Pattern: "/tmp/folder", Verdict: VerdictDeny, ObjectKind: ObjectKindFolder},
 			},
 			Default: VerdictAllow,
 		},

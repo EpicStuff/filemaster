@@ -109,7 +109,7 @@ func TestPermanentRulesFailureStaysDirtyAndRetries(t *testing.T) {
 	wait <- time.Now()
 	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
 	entries, _ = store.snapshot()
-	if len(entries) != 2 || entries[0] != FormatExactRule("/tmp/retry", VerdictAllow) || entries[1] != FormatExactRule("/tmp/retry", VerdictAllow) {
+	if len(entries) != 2 || entries[0] != FormatRule("/tmp/retry", VerdictAllow) || entries[1] != FormatRule("/tmp/retry", VerdictAllow) {
 		t.Fatalf("retry writes = %v", entries)
 	}
 	if diagnostics := persistence.Diagnostics()["local/profile"]; diagnostics.PersistentFailure || diagnostics.LastError != nil {
@@ -159,7 +159,7 @@ func TestPermanentRulesCoalesceAndNewerOppositeWins(t *testing.T) {
 	store.release <- struct{}{}
 	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
 	entries, _ := store.snapshot()
-	if len(entries) != 2 || entries[0] != FormatExactRule("/tmp/same", VerdictAllow) || entries[1] != FormatExactRule("/tmp/same", VerdictDeny) {
+	if len(entries) != 2 || entries[0] != FormatRule("/tmp/same", VerdictAllow) || entries[1] != FormatRule("/tmp/same", VerdictDeny) {
 		t.Fatalf("serialized writes = %v", entries)
 	}
 }
@@ -240,7 +240,7 @@ func TestPermanentRulesFailedMemoryMutationRemainsDirtyUntilRealSave(t *testing.
 	}
 }
 
-func TestPermanentRulesRequireEffectiveExactDurablePrecedence(t *testing.T) {
+func TestPermanentRulesRequireEffectiveDurablePrecedence(t *testing.T) {
 	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
 	store := &persistenceTestStore{release: make(chan struct{}, 2)}
 
@@ -393,13 +393,13 @@ func TestRuleStoreIdentityUsesProfilePointerOnly(t *testing.T) {
 	}
 }
 
-func TestExactPermanentRulesRoundTripLiteralPaths(t *testing.T) {
+func TestLiteralPermanentRulesRoundTripLiteralPaths(t *testing.T) {
 	paths := []string{"/tmp/a*b", "/tmp/a?b", "/tmp/a[b]", "/tmp/back\\slash\"quote ", "/tmp/trailing "}
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
-			entry := FormatExactRule(path, VerdictAllow)
+			entry := FormatLiteralRule(path, VerdictAllow)
 			rule, ok := ParseRule(entry)
-			if !ok || !rule.Exact || rule.Pattern != path || rule.Verdict != VerdictAllow {
+			if !ok || rule.Verdict != VerdictAllow || !rule.Matches(path) || rule.Matches(path+"x") {
 				t.Fatalf("literal rule round trip = %+v, %v", rule, ok)
 			}
 			if !rule.Matches(path) || rule.Matches(path+"x") {
@@ -408,38 +408,31 @@ func TestExactPermanentRulesRoundTripLiteralPaths(t *testing.T) {
 		})
 	}
 	legacy, ok := ParseRule("+ /tmp/a*")
-	if !ok || legacy.Exact || !legacy.Matches("/tmp/abc") {
+	if !ok || !legacy.Matches("/tmp/abc") {
 		t.Fatalf("legacy wildcard compatibility broken: %+v, %v", legacy, ok)
 	}
 }
 
-func TestPermanentRulesKeepExactAndLegacyPatternsDistinct(t *testing.T) {
+func TestPermanentRulesUsePlainPatternSemantics(t *testing.T) {
 	persistence := NewRulePersistence(nil, RulePersistenceOptions{})
 	merged := persistence.Apply(persistenceSnapshot("- /tmp/a*b"), &persistenceTestStore{}, "/tmp/a*b", VerdictAllow)
-	if len(merged.Read.Rules) != 2 {
-		t.Fatalf("merged rules = %#v, want exact and legacy rules", merged.Read.Rules)
+	if len(merged.Read.Rules) != 1 {
+		t.Fatalf("merged rules = %#v, want one superseding plain rule", merged.Read.Rules)
 	}
-	if exact := merged.Read.Rules[0]; !exact.Exact || exact.Pattern != "/tmp/a*b" || exact.Verdict != VerdictAllow {
-		t.Fatalf("exact rule was not first: %+v", exact)
-	}
-	if legacy := merged.Read.Rules[1]; legacy.Exact || legacy.Pattern != "/tmp/a*b" || legacy.Verdict != VerdictDeny {
-		t.Fatalf("legacy wildcard was incorrectly coalesced: %+v", legacy)
+	if rule := merged.Read.Rules[0]; rule.Pattern != "/tmp/a*b" || rule.Verdict != VerdictAllow {
+		t.Fatalf("plain learned rule = %+v", rule)
 	}
 	if verdict, ok := merged.Read.Lookup("/tmp/a*b"); !ok || verdict != VerdictAllow {
-		t.Fatalf("literal exact rule did not win: %v, %v", verdict, ok)
+		t.Fatalf("learned rule did not win: %v, %v", verdict, ok)
 	}
-	if verdict, ok := merged.Read.Lookup("/tmp/axxb"); !ok || verdict != VerdictDeny {
-		t.Fatalf("legacy wildcard no longer controlled neighboring path: %v, %v", verdict, ok)
+	if verdict, ok := merged.Read.Lookup("/tmp/axxb"); !ok || verdict != VerdictAllow {
+		t.Fatalf("plain wildcard semantics changed: %v, %v", verdict, ok)
 	}
 }
 
-func TestTaggedExactRulesAreCanonicalAbsolutePaths(t *testing.T) {
-	rule, ok := ParseRule(`+ @"/tmp/one/../two"`)
-	if !ok || !rule.Exact || rule.Pattern != "/tmp/two" {
-		t.Fatalf("tagged exact rule was not canonicalized: %+v, %v", rule, ok)
-	}
-	if _, ok := ParseRule(`+ @"relative/path"`); ok {
-		t.Fatal("tagged relative exact rule was accepted")
+func TestLegacyExactRulesAreRejected(t *testing.T) {
+	if _, ok := ParseRule(`+ @"/tmp/one/../two"`); ok {
+		t.Fatal("legacy @ exact rule was accepted")
 	}
 }
 
@@ -483,7 +476,7 @@ func TestPermanentRulesEqualRevisionDivergenceDoesNotRestoreCleanRule(t *testing
 	base := persistenceSnapshot()
 	persistence.Apply(base, store, "/tmp/equal-revision", VerdictAllow)
 	waitRule(t, func() bool { return persistence.Diagnostics()["local/profile"].DirtyCount == 0 })
-	identical := persistence.Merge(newDecisionSnapshot("profile", "local", 2, ruleLists{read: []string{FormatExactRule("/tmp/equal-revision", VerdictAllow)}}, base.Revision))
+	identical := persistence.Merge(newDecisionSnapshot("profile", "local", 2, ruleLists{read: []string{FormatLiteralRule("/tmp/equal-revision", VerdictAllow)}}, base.Revision))
 	if verdict, ok := identical.Read.Lookup("/tmp/equal-revision"); !ok || verdict != VerdictAllow {
 		t.Fatalf("equal-revision identical content changed durable policy: %v, %v", verdict, ok)
 	}
@@ -607,7 +600,7 @@ func TestPermanentRulesKeepAlwaysRulesOperationScoped(t *testing.T) {
 		return len(entries) == 1
 	})
 	entries, _ := store.snapshot()
-	if got := entries[0]; got != formatStoredExactRule("/tmp/data", false, VerdictAllow) {
+	if got := entries[0]; got != FormatRule("/tmp/data", VerdictAllow) {
 		t.Fatalf("stored rule = %q", got)
 	}
 	if ops := store.opSnapshot(); len(ops) != 1 || ops[0] != OpRead {

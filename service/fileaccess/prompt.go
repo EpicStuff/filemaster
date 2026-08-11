@@ -191,8 +191,8 @@ func (h *PromptHandler) lookup(exe, path string, op FileOp, isDir bool) (Verdict
 	return list.match(path, isDir)
 }
 
-func (h *PromptHandler) appendRule(exe, pattern string, op FileOp, isDir bool, v Verdict) {
-	_ = h.appendRuleEntry(exe, op, PathRule{Pattern: pattern, Verdict: v, Exact: true, DirectoryOnly: isDir})
+func (h *PromptHandler) appendRule(exe, pattern string, op FileOp, _ bool, v Verdict) {
+	_ = h.appendRuleEntry(exe, op, PathRule{Pattern: escapePathPattern(pattern), Verdict: v})
 }
 
 // seedRuleSet builds a new per-exe rule set, seeding each operation list from
@@ -226,7 +226,7 @@ func (h *PromptHandler) appendRuleEntry(exe string, op FileOp, rule PathRule) er
 	rules := make([]PathRule, 0, len(list.Rules)+1)
 	rules = append(rules, rule)
 	for _, existing := range list.Rules {
-		if existing.Pattern == rule.Pattern && existing.Verdict == rule.Verdict && existing.Exact == rule.Exact && existing.DirectoryOnly == rule.DirectoryOnly {
+		if existing.Pattern == rule.Pattern && existing.Verdict == rule.Verdict && existing.ObjectKind == rule.ObjectKind {
 			continue
 		}
 		rules = append(rules, existing)

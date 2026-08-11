@@ -2,6 +2,7 @@ package profile
 
 import (
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -61,6 +62,11 @@ func TestFilemasterSpecialProfileSeedsEditableRules(t *testing.T) {
 	}
 	if got := p.GetFileAccessWriteRules(); len(got) != 0 {
 		t.Fatalf("inactive write seed rules = %#v, want none", got)
+	}
+	for _, rule := range append(p.GetFileAccessReadRules(), p.GetFileAccessExecRules()...) {
+		if strings.HasPrefix(rule, "+ folder:") {
+			t.Fatalf("recursive seed must retain file access, got %q", rule)
+		}
 	}
 }
 

@@ -23,10 +23,9 @@ type persistedRuleSet struct {
 	Exec  []PathRule `json:"exec"`
 }
 
-// persistedFileVersion is 2 since the split of the single per-exe rule list into
-// three per-operation lists (and the removal of PathRule's operation fields).
-// A version-1 file is refused; development databases must be recreated.
-const persistedFileVersion = 2
+// persistedFileVersion is 3 because learned literal paths are glob-escaped.
+// Earlier files are refused; development databases must be recreated.
+const persistedFileVersion = 3
 
 // Save writes the handler's per-exe rule map to disk as JSON. Safe to
 // call from any goroutine; takes the handler's read lock.

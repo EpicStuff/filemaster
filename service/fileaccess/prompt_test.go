@@ -77,16 +77,16 @@ func TestPromptHandlerAllowOnce(t *testing.T) {
 
 func TestPromptHandlerAllowAlwaysPersists(t *testing.T) {
 	p := &scriptedPrompter{responses: map[string]string{
-		"/home/alice/notes.txt": ActionAllowAlways,
+		"/home/alice/notes?.txt": ActionAllowAlways,
 	}}
 	h := NewPromptHandler(p, nil, time.Second)
 
-	e := FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes.txt"}
+	e := FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notes?.txt"}
 	v := h.Decide(context.Background(), &e)
 	if v != VerdictAllow {
 		t.Fatalf("first call: got %s, want allow", v)
 	}
-	if got := h.RulesFor("/usr/bin/vim"); len(got) != 1 || got[0].Pattern != "/home/alice/notes.txt" || got[0].Verdict != VerdictAllow {
+	if got := h.RulesFor("/usr/bin/vim"); len(got) != 1 || got[0].Pattern != "/home/alice/notes\\?.txt" || got[0].Verdict != VerdictAllow {
 		t.Fatalf("rule not persisted for /usr/bin/vim: %+v", got)
 	}
 
@@ -99,6 +99,15 @@ func TestPromptHandlerAllowAlwaysPersists(t *testing.T) {
 	}
 	if tripwire.called != 0 {
 		t.Errorf("prompter called %d times after persisted rule should match", tripwire.called)
+	}
+
+	// The literal question mark must not become a one-character glob.
+	tripwire.responses = map[string]string{"/home/alice/notesA.txt": ActionDeny}
+	if v = h.Decide(context.Background(), &FileEvent{Exe: "/usr/bin/vim", Path: "/home/alice/notesA.txt"}); v != VerdictDeny {
+		t.Errorf("similar glob path: got %s, want deny from prompt", v)
+	}
+	if tripwire.called != 1 {
+		t.Errorf("prompter called %d times for non-literal match, want 1", tripwire.called)
 	}
 }
 

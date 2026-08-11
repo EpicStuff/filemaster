@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -657,37 +656,58 @@ func FormatRule(pattern string, v Verdict) string {
 	return "- " + pattern
 }
 
-// FormatExactRule stores a normalized literal file path using a Go-quoted
-// payload: "@\"/path\"". Legacy +/- rules remain globs; only this @-quoted form
-// is exact. The operation is carried by which per-operation list the entry is
-// stored in, never encoded in the string.
-func FormatExactRule(path string, v Verdict) string {
-	return formatStoredExactRule(path, false, v)
+// FormatLiteralRule stores a normalized literal path by escaping the existing
+// glob metacharacters. The operation is carried by which per-operation list the
+// entry is stored in, never encoded in the string.
+func FormatLiteralRule(path string, v Verdict) string {
+	return formatStoredLiteralRule(path, ObjectKindAny, v)
 }
 
-// formatStoredExactRule encodes a canonical literal path as its untagged storage
-// entry: @"path" for a file, @dir:"path" for a directory-only rule. This is the
-// exact form ParseRule reads back. It is deliberately distinct from a plain glob
-// entry, and the "@dir:" prefix is the only remaining tag -- it is a directory
-// discriminator, not an operation tag.
-func formatStoredExactRule(path string, directory bool, v Verdict) string {
+// FormatLiteralRuleForKind stores a normalized literal path. The object-kind
+// qualifier precedes the escaped path, for example file:/tmp/report\\?.txt.
+func FormatLiteralRuleForKind(path string, kind ObjectKind, v Verdict) string {
+	return formatStoredLiteralRule(path, kind, v)
+}
+
+// formatStoredLiteralRule encodes a canonical literal path using the ordinary
+// rule grammar. Backslash escaping is the same syntax filepath.Match already
+// uses for literal glob metacharacters.
+func formatStoredLiteralRule(path string, kind ObjectKind, v Verdict) string {
 	path = filepath.Clean(path)
 	sign := "- "
 	if v == VerdictAllow {
 		sign = "+ "
 	}
-	if directory {
-		return sign + "@dir:" + strconv.Quote(path)
+	prefix := ""
+	switch kind {
+	case ObjectKindFile:
+		prefix = "file:"
+	case ObjectKindFolder:
+		prefix = "folder:"
 	}
-	return sign + "@" + strconv.Quote(path)
+	return sign + prefix + escapePathPattern(path)
+}
+
+func escapePathPattern(path string) string {
+	var escaped strings.Builder
+	escaped.Grow(len(path))
+	for _, char := range path {
+		switch char {
+		case '\\', '*', '?', '[', ']':
+			escaped.WriteByte('\\')
+		}
+		escaped.WriteRune(char)
+	}
+	return escaped.String()
 }
 
 // ParseRule decodes a "<+|-> <pattern>" storage entry into a PathRule. Returns
 // false on malformed input. Recognized forms:
 //
-//   - "+ /foo/**"        -- glob/recursive/exact-path pattern (see PathRule).
-//   - "+ @\"/foo/bar\""  -- exact literal file path.
-//   - "+ @dir:\"/foo\""  -- exact literal path, directory events only.
+//   - "+ /foo/**"        -- glob/recursive/literal-path pattern (see PathRule).
+//   - "+ file:/foo/**"   -- file-only glob or recursive pattern.
+//   - "+ folder:/foo"    -- folder-only pattern.
+//   - "+ file:/foo/\\*.txt" -- file-only literal '*' path.
 //
 // The operation is not encoded here: the caller parses each per-operation list
 // separately, so the list a rule came from carries its operation.
@@ -704,24 +724,34 @@ func ParseRule(entry string) (PathRule, bool) {
 	default:
 		return PathRule{}, false
 	}
-	payload := entry[2:]
-	if strings.HasPrefix(payload, "@") {
-		payload = payload[1:]
-		directory := strings.HasPrefix(payload, "dir:")
-		if directory {
-			payload = payload[len("dir:"):]
-		}
-		path, err := strconv.Unquote(payload)
-		if err != nil {
+	// Leading spacing is formatting; trailing spacing can be part of a literal
+	// filename and must reach the matcher unchanged.
+	payload := strings.TrimLeft(entry[2:], " \t")
+	kind := ObjectKindAny
+	switch {
+	case strings.HasPrefix(payload, "file:"):
+		kind = ObjectKindFile
+		payload = payload[len("file:"):]
+	case strings.HasPrefix(payload, "folder:"):
+		kind = ObjectKindFolder
+		payload = payload[len("folder:"):]
+	default:
+		if colon := strings.IndexByte(payload, ':'); colon > 0 && !strings.ContainsAny(payload[:colon], "/\\*?[]@\"' ") {
+			// A qualifier-like prefix must be recognised rather than accidentally
+			// becoming an unqualified pattern.
 			return PathRule{}, false
 		}
-		path = filepath.Clean(path)
-		if path == "." || !filepath.IsAbs(path) {
-			return PathRule{}, false
-		}
-		return PathRule{Pattern: path, Verdict: v, Exact: true, DirectoryOnly: directory}, true
 	}
-	return PathRule{Pattern: strings.TrimSpace(payload), Verdict: v}, true
+	if payload == "" {
+		return PathRule{}, false
+	}
+	if strings.HasPrefix(payload, "@") {
+		return PathRule{}, false
+	}
+	if _, err := filepath.Match(payload, ""); err != nil {
+		return PathRule{}, false
+	}
+	return PathRule{Pattern: payload, Verdict: v, ObjectKind: kind}, true
 }
 
 // ParseRules parses a []string of rule entries (as stored in a profile)

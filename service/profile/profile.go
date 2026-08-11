@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -421,21 +420,38 @@ func coalesceFileAccessRuleEntries(list []string, newEntry string) []string {
 	return append([]string{newEntry}, list...)
 }
 
-func parseFileAccessRule(entry string) (sign byte, pattern string, exact bool, ok bool) {
+func parseFileAccessRule(entry string) (sign byte, pattern string, literal bool, ok bool) {
 	if len(entry) < 3 || entry[1] != ' ' || (entry[0] != '+' && entry[0] != '-') {
 		return 0, "", false, false
 	}
-	payload := entry[2:]
-	if strings.HasPrefix(payload, "@") {
-		literal, err := strconv.Unquote(payload[1:])
-		if err != nil {
-			return 0, "", false, false
-		}
-		pattern = filepath.Clean(literal)
-		return entry[0], pattern, true, filepath.IsAbs(pattern)
+	pattern = filepath.Clean(strings.TrimLeft(entry[2:], " \t"))
+	if !filepath.IsAbs(pattern) {
+		return 0, "", false, false
 	}
-	pattern = filepath.Clean(strings.TrimSpace(payload))
-	return entry[0], pattern, false, filepath.IsAbs(pattern)
+	if literalPath, literal := unescapeLiteralFileAccessPattern(pattern); literal {
+		return entry[0], filepath.Clean(literalPath), true, true
+	}
+	return entry[0], pattern, false, true
+}
+
+func unescapeLiteralFileAccessPattern(pattern string) (string, bool) {
+	var literal strings.Builder
+	literal.Grow(len(pattern))
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '\\':
+			if i+1 == len(pattern) {
+				return "", false
+			}
+			i++
+			literal.WriteByte(pattern[i])
+		case '*', '?', '[':
+			return "", false
+		default:
+			literal.WriteByte(pattern[i])
+		}
+	}
+	return literal.String(), true
 }
 
 func fileAccessRuleMatches(rulePattern, path string) bool {

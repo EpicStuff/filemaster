@@ -154,36 +154,74 @@ func TestParseAndFormatRuleRoundTrip(t *testing.T) {
 	}
 }
 
-func TestOperationExactRuleRoundTripAndProfileDecision(t *testing.T) {
+func TestQualifiedRuleParseAndFormatRoundTrip(t *testing.T) {
+	cases := []struct {
+		entry   string
+		pattern string
+		kind    ObjectKind
+	}{
+		{"+ /tmp/item", "/tmp/item", ObjectKindAny},
+		{"+ file:/tmp/item", "/tmp/item", ObjectKindFile},
+		{"- folder:/tmp/item", "/tmp/item", ObjectKindFolder},
+		{"+ file:/opt/app/*", "/opt/app/*", ObjectKindFile},
+		{"+ folder:/opt/app/**", "/opt/app/**", ObjectKindFolder},
+		{`+ file:/tmp/exact\?.txt`, `/tmp/exact\?.txt`, ObjectKindFile},
+		{`- folder:/tmp/exact-dir`, "/tmp/exact-dir", ObjectKindFolder},
+	}
+	for _, c := range cases {
+		rule, ok := ParseRule(c.entry)
+		if !ok {
+			t.Fatalf("ParseRule(%q) failed", c.entry)
+		}
+		if rule.Pattern != c.pattern || rule.ObjectKind != c.kind {
+			t.Fatalf("ParseRule(%q) = %#v", c.entry, rule)
+		}
+	}
+
+	if got := FormatRule("folder:/var/cache/*", VerdictAllow); got != "+ folder:/var/cache/*" {
+		t.Fatalf("FormatRule qualified glob = %q", got)
+	}
+	if got := FormatLiteralRuleForKind("/tmp/exact?.txt", ObjectKindFile, VerdictAllow); got != `+ file:/tmp/exact\?.txt` {
+		t.Fatalf("FormatLiteralRuleForKind file = %q", got)
+	}
+	if got := FormatLiteralRuleForKind("/tmp/exact-dir", ObjectKindFolder, VerdictDeny); got != `- folder:/tmp/exact-dir` {
+		t.Fatalf("FormatLiteralRuleForKind folder = %q", got)
+	}
+	if _, ok := ParseRule(`+ @"/tmp/legacy"`); ok {
+		t.Fatal("legacy @ exact syntax parsed unexpectedly")
+	}
+}
+
+func TestOperationLiteralRuleRoundTripAndProfileDecision(t *testing.T) {
 	// The operation is no longer encoded in the stored string; it is carried by
 	// the list the entry lives in. The stored form is untagged.
-	entry := formatStoredExactRule("/tmp/data", false, VerdictAllow)
+	entry := formatStoredLiteralRule("/tmp/data?", ObjectKindAny, VerdictAllow)
 	rule, ok := ParseRule(entry)
-	if !ok || !rule.Exact || rule.DirectoryOnly {
-		t.Fatalf("parsed exact rule = %#v, ok=%t", rule, ok)
+	if !ok || rule.ObjectKind != ObjectKindAny || !rule.Matches("/tmp/data?") || rule.Matches("/tmp/datax") {
+		t.Fatalf("parsed literal rule = %#v, ok=%t", rule, ok)
 	}
 	// Placed in the read list, the rule governs opens (which fold to reads) and
 	// reads, but nothing in the write list matches.
 	snapshot := newDecisionSnapshot("profile", "local", 2, ruleLists{read: []string{entry}}, 1)
-	if _, matched, ok := snapshot.Lookup("/tmp/data", OpOpen, false); !ok || !matched {
+	if _, matched, ok := snapshot.Lookup("/tmp/data?", OpOpen, false); !ok || !matched {
 		t.Fatal("read rule did not match open (opens are governed by read rules)")
 	}
-	if _, matched, ok := snapshot.Lookup("/tmp/data", OpRead, false); !ok || !matched {
+	if _, matched, ok := snapshot.Lookup("/tmp/data?", OpRead, false); !ok || !matched {
 		t.Fatal("read rule did not match read")
 	}
-	if _, matched, ok := snapshot.Lookup("/tmp/data", OpWrite, false); !ok || matched {
+	if _, matched, ok := snapshot.Lookup("/tmp/data?", OpWrite, false); !ok || matched {
 		t.Fatal("read rule leaked into write")
 	}
 
-	directoryEntry := formatStoredExactRule("/tmp/folder", true, VerdictDeny)
+	directoryEntry := formatStoredLiteralRule("/tmp/folder", ObjectKindFolder, VerdictDeny)
 	directoryRule, ok := ParseRule(directoryEntry)
-	if !ok || !directoryRule.DirectoryOnly || !directoryRule.applies("/tmp/folder", true) || directoryRule.applies("/tmp/folder", false) {
+	if !ok || directoryRule.ObjectKind != ObjectKindFolder || !directoryRule.applies("/tmp/folder", true) || directoryRule.applies("/tmp/folder", false) {
 		t.Fatalf("directory rule did not preserve discriminator: %#v", directoryRule)
 	}
 }
 
 func TestParseRuleRejectsMalformed(t *testing.T) {
-	for _, bad := range []string{"", "+", "+a", "x /foo", "/foo", "++ /foo"} {
+	for _, bad := range []string{"", "+", "+a", "x /foo", "/foo", "++ /foo", "+ file:", "+ folder:", "+ device:/tmp", "+ unknown:/tmp", `+ file:@dir:"/tmp"`} {
 		if _, ok := ParseRule(bad); ok {
 			t.Errorf("ParseRule(%q) parsed unexpectedly", bad)
 		}
@@ -221,36 +259,47 @@ func TestProfileHandlerAllowAlwaysPersistsInProfile(t *testing.T) {
 	}}
 	p := &scriptedPrompter{responses: map[string]string{
 		"/home/alice/notes.txt": ActionAllowAlways,
+		"/home/alice/projects":  ActionAllowAlways,
 	}}
 	h := NewProfileHandler(lookup, p, nil, time.Second, nopLogger{})
 
-	e := FileEvent{PID: 99, Path: "/home/alice/notes.txt"}
-	v := h.Decide(context.Background(), &e)
+	fileEvent := FileEvent{PID: 99, Path: "/home/alice/notes.txt"}
+	v := h.Decide(context.Background(), &fileEvent)
 	if v != VerdictAllow {
 		t.Fatalf("first call: got %s, want allow", v)
+	}
+	folderEvent := FileEvent{PID: 99, Path: "/home/alice/projects", IsDir: true}
+	v = h.Decide(context.Background(), &folderEvent)
+	if v != VerdictAllow {
+		t.Fatalf("folder first call: got %s, want allow", v)
 	}
 	flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := h.FlushPermanentRules(flushCtx); err != nil {
 		t.Fatalf("FlushPermanentRules: %v", err)
 	}
-	// The event carries no operation (OpOpen), which folds to a read: the
-	// overlay emits an untagged exact rule and routes it to the read list
-	// (OpRead). The operation is carried by the destination list, not the string.
+	// The events carry no operation (OpOpen), which folds to read. Always rules
+	// intentionally remain plain and unqualified because the prompt has no
+	// object-kind choice.
 	got := lookup.appendedFor(99)
-	if len(got) != 1 || got[0] != `+ @"/home/alice/notes.txt"` {
+	want := []string{"+ /home/alice/notes.txt", "+ /home/alice/projects"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("rule not persisted in profile store: %v", got)
 	}
-	if ops := lookup.appendedOpFor(99); len(ops) != 1 || ops[0] != OpRead {
+	if ops := lookup.appendedOpFor(99); len(ops) != 2 || ops[0] != OpRead || ops[1] != OpRead {
 		t.Fatalf("persisted rule op routing = %v, want [OpRead]", ops)
 	}
 
 	// Tripwire on the second call: prompter must not be invoked.
 	tripwire := &scriptedPrompter{}
 	h.prompter = tripwire
-	v = h.Decide(context.Background(), &e)
+	v = h.Decide(context.Background(), &fileEvent)
 	if v != VerdictAllow {
 		t.Errorf("second call: got %s, want allow (from persisted rule)", v)
+	}
+	v = h.Decide(context.Background(), &folderEvent)
+	if v != VerdictAllow {
+		t.Errorf("folder second call: got %s, want allow (from persisted rule)", v)
 	}
 	if tripwire.called != 0 {
 		t.Errorf("prompter called %d times on second access; persisted rule should have matched", tripwire.called)

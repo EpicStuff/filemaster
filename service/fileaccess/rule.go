@@ -10,7 +10,8 @@ import (
 //
 // Pattern syntax:
 //
-//   - "/foo/bar" -- exact match.
+//   - "/foo/bar" -- literal match when it has no glob characters.
+//   - "/foo/\\*.txt" -- literal '*' in a path segment.
 //   - "/foo/*.txt" -- filepath.Match against the full path (single segment
 //     wildcards only, as per stdlib).
 //   - "/foo/**" -- recursive match: anything at or below /foo, including
@@ -26,19 +27,33 @@ import (
 type PathRule struct {
 	Pattern string
 	Verdict Verdict
-	Exact   bool
 
-	// DirectoryOnly restricts the rule to directory events (FAN_ONDIR). A
-	// file-only variant is not needed: a plain rule already applies to both.
-	DirectoryOnly bool
+	// ObjectKind restricts the rule to file or folder events. Its zero value is
+	// ObjectKindAny, which preserves the legacy unqualified-rule behaviour.
+	ObjectKind ObjectKind
+}
+
+// ObjectKind selects the kind of object a path rule applies to.
+type ObjectKind uint8
+
+const (
+	ObjectKindAny ObjectKind = iota
+	ObjectKindFile
+	ObjectKindFolder
+)
+
+// ObjectKindForDirectory converts the FAN_ONDIR event classification to a
+// rule object kind without a filesystem lookup on the decision path.
+func ObjectKindForDirectory(isDir bool) ObjectKind {
+	if isDir {
+		return ObjectKindFolder
+	}
+	return ObjectKindFile
 }
 
 // Matches reports whether the rule's path pattern applies to path, ignoring the
 // directory discriminator.
 func (r PathRule) Matches(path string) bool {
-	if r.Exact {
-		return r.Pattern == path
-	}
 	return matchPathPattern(r.Pattern, path)
 }
 
@@ -49,7 +64,7 @@ func (r PathRule) applies(path string, isDir bool) bool {
 	if !r.Matches(path) {
 		return false
 	}
-	return !r.DirectoryOnly || isDir
+	return r.ObjectKind == ObjectKindAny || r.ObjectKind == ObjectKindForDirectory(isDir)
 }
 
 // PathRules is an ordered list of PathRules governing a single operation. First
@@ -82,12 +97,12 @@ func (rs PathRules) Decide(_ context.Context, e *FileEvent) Verdict {
 	return rs.Default
 }
 
-// Lookup returns the first matching verdict for path with the directory
-// discriminator ignored -- a DirectoryOnly rule still matches by path -- or
+// Lookup returns the first matching verdict for path with the object-kind
+// selector ignored -- a qualified rule still matches by path -- or
 // (0, false) if no rule applies. Unlike Decide it does not fall back to Default;
 // the caller decides what "no match" means. It is an inspection helper (tests,
 // diagnostics); event decisions use match/Lookup on the snapshot, which honor
-// DirectoryOnly.
+// ObjectKind.
 func (rs PathRules) Lookup(path string) (Verdict, bool) {
 	for _, r := range rs.Rules {
 		if r.Matches(path) {

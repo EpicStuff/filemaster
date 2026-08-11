@@ -45,32 +45,36 @@ func TestFileAccessRuleKeyRoutesOperations(t *testing.T) {
 	}
 }
 
-// TestStoredExactRuleRoundTrip verifies the untagged stored form the overlay
-// persists survives formatStoredExactRule -> ParseRule for both an exact file and
-// an exact directory-only rule. The operation is not encoded in the string; it is
+// TestStoredLiteralRuleRoundTrip verifies the untagged stored form the overlay
+// persists survives formatStoredLiteralRule -> ParseRule for both a literal file and
+// a literal directory-only rule. The operation is not encoded in the string; it is
 // carried by the list the entry lives in.
-func TestStoredExactRuleRoundTrip(t *testing.T) {
+func TestStoredLiteralRuleRoundTrip(t *testing.T) {
 	cases := []struct {
 		path      string
 		directory bool
 		verdict   Verdict
 		want      string
 	}{
-		{"/home/alice/notes.txt", false, VerdictAllow, `+ @"/home/alice/notes.txt"`},
-		{"/etc/shadow", false, VerdictDeny, `- @"/etc/shadow"`},
-		{"/var/data", true, VerdictAllow, `+ @dir:"/var/data"`},
+		{"/home/alice/notes?.txt", false, VerdictAllow, `+ file:/home/alice/notes\?.txt`},
+		{"/etc/shadow", false, VerdictDeny, `- file:/etc/shadow`},
+		{"/var/data", true, VerdictAllow, `+ folder:/var/data`},
 	}
 	for _, c := range cases {
-		entry := formatStoredExactRule(c.path, c.directory, c.verdict)
+		kind := ObjectKindFile
+		if c.directory {
+			kind = ObjectKindFolder
+		}
+		entry := formatStoredLiteralRule(c.path, kind, c.verdict)
 		if entry != c.want {
-			t.Fatalf("formatStoredExactRule(%q, %t, %s) = %q, want %q", c.path, c.directory, c.verdict, entry, c.want)
+			t.Fatalf("formatStoredLiteralRule(%q, %t, %s) = %q, want %q", c.path, c.directory, c.verdict, entry, c.want)
 		}
 		pr, ok := ParseRule(entry)
 		if !ok {
 			t.Fatalf("ParseRule(%q) failed", entry)
 		}
-		if !pr.Exact || pr.Pattern != c.path || pr.Verdict != c.verdict || pr.DirectoryOnly != c.directory {
-			t.Fatalf("ParseRule(%q) = %#v, want exact %q dir=%t verdict=%s", entry, pr, c.path, c.directory, c.verdict)
+		if pr.Verdict != c.verdict || pr.ObjectKind != kind || !pr.Matches(c.path) || pr.Matches(c.path+"x") {
+			t.Fatalf("ParseRule(%q) = %#v, want literal %q dir=%t verdict=%s", entry, pr, c.path, c.directory, c.verdict)
 		}
 	}
 }
