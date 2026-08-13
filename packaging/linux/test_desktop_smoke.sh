@@ -30,6 +30,14 @@ unavailable() {
 
 fail() {
 	echo "desktop smoke test FAILED: $1" >&2
+	# The API exposes the complete, structured scope-coverage report. Print it
+	# before preserving logs so a release-gate failure directly identifies the
+	# configured/canonical scopes, unmarked mount IDs, and mountinfo rows.
+	if [ -n "${core_pid:-}" ] && [ -n "${port:-}" ] && kill -0 "$core_pid" 2>/dev/null; then
+		echo '--- file access diagnostics ---' >&2
+		curl -sf "http://127.0.0.1:$port/api/v1/fileaccess/diagnostics" >&2 || \
+			echo 'file access diagnostics unavailable' >&2
+	fi
 	# Keep the full logs: the interesting evidence (scope activation, coverage
 	# diagnostics, self-storage registration) is emitted at startup, far outside
 	# any tail window.
