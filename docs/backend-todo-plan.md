@@ -1,5 +1,14 @@
 # Filemaster Backend Rewrite Plan
 
+> **Status: unreviewed historical plan.** This document is retained as context
+> for past design work. It is not a current implementation plan or a statement
+> of supported behaviour; verify anything in it against the code and tests.
+>
+> **Terminology superseded:** the current operation is **Open**, not Access.
+> Future **Read** and **Write** mean permissions requested at Open, not
+> fanotify read/write events. This historical plan does not define current
+> backend direction.
+
 ## 1. Goals
 
 Filemaster will use the same user facing Read, Write, and Execute rule lists for files and folders. Files and folders may appear together in each ordered list. Rules are checked from highest priority to lowest priority. The first matching rule that applies to the requested operation decides. If no applicable rule matches, the profile default action decides. The current release exposes only the rule lists it can enforce: file and folder Access (opens) and file and folder Execute. Folder Execute is shown but inactive. Write is hidden until it becomes enforceable with LSM support. The future full model exposes all three lists (see sections 16 and 17).

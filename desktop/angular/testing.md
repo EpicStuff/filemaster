@@ -120,15 +120,14 @@ namespace. Use the fake source only for deterministic debugging:
 npm run e2e:fileaccess:fake
 ```
 
-The file-access test starts a test `portmaster-core`, points Angular at it,
-tries a watched-file write like `echo test > <file>`, clicks `Allow`, checks the
-file was written, and confirms a second write is auto-allowed by the persisted
-per-app rule. It then tries a read like `cat <file>`, clicks `Block`, checks the
-read is denied, then opens `/monitor` and confirms the write and read activity
-rows are shown (and reachable from the per-app "File Events" tab).
+The file-access test starts a test `filemaster-core` and points Angular at it.
+It first allows a command that opens a watched file for writing, then blocks a
+different command that opens the same file for reading. The monitor must show
+two **Open** rows, one for each command. This verifies open-time decisions; it
+does not classify events as separate Read or Write operations.
 
 The prompt exposes only `Allow` and `Block`; both persist a permanent per-app
-File Access rule (there is no one-time option in the current backend).
+Open rule (there is no one-time option in the current backend).
 
 ## Legacy Protractor
 

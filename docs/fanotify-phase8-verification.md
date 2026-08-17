@@ -1,5 +1,9 @@
 # Fanotify Phase 8 Verification Matrix
 
+> **Status: historical verification record.** The commands and results below
+> describe the implementation at the recorded point in time. They are not a
+> current support matrix; use the current test suite for present behaviour.
+
 This matrix records the ordinary Phase 8 implementation state at commit time.
 Host-dependent verification is deliberately not inferred from unit tests.
 

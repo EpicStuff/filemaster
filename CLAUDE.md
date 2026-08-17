@@ -7,6 +7,20 @@ network-connection prompts/monitoring with file-access prompts/monitoring using 
 The network stack (`service/network`, `service/netquery`, `service/firewall`, etc.) was
 deleted; see `FORK_NOTES.md` for the full deletion log.
 
+## File-access terminology
+
+Use these terms consistently in code, tests, plans, and user-facing text:
+
+- **Open** is the current `FAN_OPEN_PERM` decision. It is the current file
+  permission operation.
+- **Read** and **Write** are future permissions requested at open time. A
+  read/write (`O_RDWR`) open requests both permissions.
+- Read and Write do **not** mean fanotify read/write events. Do not add, use,
+  test, or propose fanotify read/write interception or classification.
+
+Use “file access” only as the general product category, not as the operation
+name in rules, prompts, events, or tests.
+
 ## Reuse upstream Portmaster code
 
 Before writing a new utility, search the upstream Portmaster codebase (git remote

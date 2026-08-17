@@ -1,5 +1,8 @@
 # filemaster — fork notes
 
+> **Status: historical record.** This file records changes made while creating
+> the fork. It is not a description of the current supported behaviour.
+
 Forked from safing/portmaster @ 1219d15 (development branch) on 2026-06-11.
 Goal: repurpose Portmaster's per-app prompt/rule machinery for file
 read/write access instead of network connections.

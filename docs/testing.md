@@ -1,6 +1,7 @@
 # Testing
 
-Run commands from `desktop/angular`.
+Run Angular and Playwright commands from `desktop/angular`. Run `go` commands
+from the repository root unless a command says otherwise.
 
 ## Quick Checks
 
@@ -100,15 +101,14 @@ namespace. Use the fake source only for deterministic debugging:
 npm run e2e:fileaccess:fake
 ```
 
-The file-access test starts a test `filemaster-core`, points Angular at it,
-tries a watched-file write like `echo test > <file>`, clicks `Allow`, checks the
-file was written, and confirms a second write is auto-allowed by the persisted
-per-app rule. It then tries a read like `cat <file>`, clicks `Block`, checks the
-read is denied, and finally opens `/monitor` and confirms the write and read
-activity rows are shown (and reachable from the per-app "File Events" tab).
+The file-access test starts a test `filemaster-core` and points Angular at it.
+It first allows a command that opens a watched file for writing, then blocks a
+different command that opens the same file for reading. The monitor must show
+two **Open** rows, one for each command. This verifies open-time decisions; it
+does not classify events as separate Read or Write operations.
 
 The prompt exposes only `Allow` and `Block`; both persist a permanent per-app
-File Access rule (there is no one-time option in the current backend).
+Open rule (there is no one-time option in the current backend).
 
 ## Confined fanotify integration harness
 
@@ -128,13 +128,14 @@ FM_FANOTIFY_INTEGRATION=1 \
 The test parent starts the Go test binary in a `CLONE_NEWNS` child. The child
 makes its mount tree private, creates one temporary bind mount below `t.TempDir`,
 and configures that mount as the only watch scope. It never configures or marks
-`/`; root-scope benchmarking still needs the separate explicit acknowledgement
-described by `cmds/fanotify-root-bench`.
+`/`; this harness is not evidence for whole-system watch scopes.
 
-Within that confined child, the harness verifies a real file open/read,
-directory open/readdir (`FAN_ONDIR` with read interception), decision queue
-admission, prompt coordinator ownership transfer and response, descriptor
-accounting drain, mount mark removal, fanotify-group closure, and reader exit.
+Within that confined child, the harness verifies a real file Open followed by a
+read, plus directory Open/readdir (`FAN_ONDIR`). The permission decision is the
+Open; the later read and readdir are application behaviour, not separate Read
+operations. It also verifies decision-queue admission, prompt coordinator
+ownership transfer and response, descriptor accounting drain, mount mark
+removal, fanotify-group closure, and reader exit.
 The surrounding focused unit tests cover synthetic malformed batches, queue
 saturation, failure retention, nested/bind mount planning, and shutdown failure
 paths that cannot be reliably induced from a real kernel group.
