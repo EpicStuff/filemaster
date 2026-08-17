@@ -1,12 +1,16 @@
 import { ChangeDetectionStrategy, ChangeDetectorRef, Component, DestroyRef, Input, OnInit, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { ActivatedRoute, Router } from '@angular/router';
 import { Condition, FileAccessRecord, Filequery, OrderBy, Select } from '@safing/portmaster-api';
 import { Datasource, DynamicItemsPaginator } from '@safing/ui';
 import { BehaviorSubject, Observable, Subject } from 'rxjs';
 import { debounceTime, map, switchMap } from 'rxjs/operators';
 import { mergeConditions } from '../netquery/utils';
 import { ChartConfig } from '../netquery/line-chart/line-chart';
+import { Parser } from '../netquery/textql/parser';
 
+// Ported from shared/netquery/netquery.component.ts: q-route lifecycle and
+// TextQL serialization, adapted only for FileQuery records and fields.
 const PAGE_SIZE = 25;
 
 const freeTextFields: (keyof FileAccessRecord)[] = ['app_name', 'exe', 'path'];
@@ -17,6 +21,7 @@ export const keyTranslation: { [key: string]: string } = {
 	op: 'Operation',
 	verdict: 'Verdict',
 	path: 'File Path',
+	mount_path: 'Mount Path',
 	profile: 'Profile',
 	exe: 'Executable',
 };
@@ -77,9 +82,13 @@ export class FilequeryViewerComponent implements OnInit {
 	private destroyRef = inject(DestroyRef);
 	private cdr = inject(ChangeDetectorRef);
 	private filequery = inject(Filequery);
+	private route = inject(ActivatedRoute);
+	private router = inject(Router);
 
 	private search$ = new Subject<void>();
 	private reload$ = new BehaviorSubject<void>(undefined);
+	private skipUrlUpdate = false;
+	private skipNextRouteUpdate = false;
 
 	@Input() showAppColumn = true;
 
@@ -105,10 +114,12 @@ export class FilequeryViewerComponent implements OnInit {
 	textSearch = '';
 	selectedVerdicts: string[] = [];
 	selectedFiles: string[] = [];
+	selectedMounts: string[] = [];
 	selectedApps: string[] = [];
 	selectedOperations: string[] = [];
 	selectedGroupBy: string[] = [];
 	selectedOrderBy: string[] = [];
+	selectedAdditionalFilters: ActiveFilter[] = [];
 	fileSuggestions: FilterSuggestion[] = [];
 	appSuggestions: FilterSuggestion[] = [];
 	loading = false;
@@ -125,8 +136,10 @@ export class FilequeryViewerComponent implements OnInit {
 		return [
 			...this.selectedVerdicts.map(value => ({ key: 'verdict', value, label: keyTranslation.verdict })),
 			...this.selectedFiles.map(value => ({ key: 'path', value, label: keyTranslation.path })),
+			...this.selectedMounts.map(value => ({ key: 'mount_path', value, label: keyTranslation.mount_path })),
 			...this.selectedApps.map(value => ({ key: 'app_name', value, label: keyTranslation.app_name })),
 			...this.selectedOperations.map(value => ({ key: 'op', value, label: keyTranslation.op })),
+			...this.selectedAdditionalFilters,
 		];
 	}
 
@@ -182,8 +195,26 @@ export class FilequeryViewerComponent implements OnInit {
 				});
 				this.activityChart = Array.from(points.values()).sort((a, b) => a.timestamp - b.timestamp);
 				this.paginator.reset(total);
+				this.updateQueryParam();
 				this.loading = false;
 				this.cdr.markForCheck();
+			});
+
+		this.route.queryParamMap
+			.pipe(takeUntilDestroyed(this.destroyRef))
+			.subscribe(params => {
+				if (this.skipNextRouteUpdate) {
+					this.skipNextRouteUpdate = false;
+					return;
+				}
+
+				const query = params.get('q');
+				if (query !== null) {
+					this.applyQuery(query);
+				}
+
+				this.skipUrlUpdate = true;
+				this.performSearch();
 			});
 
 		this.reload$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.search$.next());
@@ -236,10 +267,14 @@ export class FilequeryViewerComponent implements OnInit {
 			this.selectedVerdicts = this.selectedVerdicts.filter(value => value !== filter.value);
 		} else if (filter.key === 'path') {
 			this.selectedFiles = this.selectedFiles.filter(value => value !== filter.value);
+		} else if (filter.key === 'mount_path') {
+			this.selectedMounts = this.selectedMounts.filter(value => value !== filter.value);
 		} else if (filter.key === 'app_name') {
 			this.selectedApps = this.selectedApps.filter(value => value !== filter.value);
 		} else if (filter.key === 'op') {
 			this.selectedOperations = this.selectedOperations.filter(value => value !== filter.value);
+		} else {
+			this.selectedAdditionalFilters = this.selectedAdditionalFilters.filter(value => value !== filter);
 		}
 		this.performSearch();
 	}
@@ -249,7 +284,9 @@ export class FilequeryViewerComponent implements OnInit {
 		this.selectedOperations = [];
 		this.selectedVerdicts = [];
 		this.selectedFiles = [];
+		this.selectedMounts = [];
 		this.selectedApps = [];
+		this.selectedAdditionalFilters = [];
 		this.performSearch();
 	}
 
@@ -306,12 +343,80 @@ export class FilequeryViewerComponent implements OnInit {
 				: { $in: this.selectedFiles };
 		}
 
+		if (this.selectedMounts.length) {
+			cond.mount_path = this.selectedMounts.length === 1
+				? this.selectedMounts[0]
+				: { $in: this.selectedMounts };
+		}
+
 		if (this.selectedApps.length) {
 			cond.app_name = this.selectedApps.length === 1
 				? this.selectedApps[0]
 				: { $in: this.selectedApps };
 		}
 
+		this.selectedAdditionalFilters.forEach(filter => {
+			cond[filter.key] = filter.value;
+		});
+
 		return this.presetCondition ? mergeConditions(cond, this.presetCondition) : cond;
+	}
+
+	private applyQuery(query: string): void {
+		const result = Parser.parse(query);
+		const knownFilters = new Set(['op', 'verdict', 'path', 'mount_path', 'app_name']);
+		const values = (key: string): string[] => (result.conditions[key] || [])
+			.filter(value => typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
+			.map(String);
+
+		this.selectedOperations = values('op');
+		this.selectedVerdicts = values('verdict');
+		this.selectedFiles = values('path');
+		this.selectedMounts = values('mount_path');
+		this.selectedApps = values('app_name');
+		this.selectedAdditionalFilters = Object.entries(result.conditions)
+			.filter(([key]) => !knownFilters.has(key))
+			.flatMap(([key, filterValues]) => filterValues
+				.filter(value => typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
+				.map(value => ({ key, value: String(value), label: keyTranslation[key] || key })));
+		this.selectedGroupBy = result.groupBy || [];
+		this.selectedOrderBy = result.orderBy || [];
+		this.textSearch = result.textQuery;
+	}
+
+	private updateQueryParam(): void {
+		if (this.skipUrlUpdate) {
+			this.skipUrlUpdate = false;
+			return;
+		}
+
+		this.skipNextRouteUpdate = true;
+		this.router.navigate([], {
+			relativeTo: this.route,
+			queryParams: {
+				...this.route.snapshot.queryParams,
+				q: this.getQueryString(),
+			},
+		});
+	}
+
+	private getQueryString(): string {
+		const filters = [
+			...this.selectedOperations.map(value => ({ key: 'op', value })),
+			...this.selectedVerdicts.map(value => ({ key: 'verdict', value })),
+			...this.selectedFiles.map(value => ({ key: 'path', value })),
+			...this.selectedMounts.map(value => ({ key: 'mount_path', value })),
+			...this.selectedApps.map(value => ({ key: 'app_name', value })),
+			...this.selectedAdditionalFilters,
+		];
+		const query = filters.map(filter => `${filter.key}:${JSON.stringify(filter.value)}`);
+		query.push(...this.selectedGroupBy.map(key => `groupby:${JSON.stringify(key)}`));
+		query.push(...this.selectedOrderBy.map(key => `orderby:${JSON.stringify(key)}`));
+
+		if (this.textSearch.trim()) {
+			query.push(this.textSearch.trim());
+		}
+
+		return query.join(' ');
 	}
 }

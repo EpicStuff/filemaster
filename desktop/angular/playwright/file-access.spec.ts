@@ -94,6 +94,22 @@ test('prompts for watched file open decisions and records them in the app', asyn
 		await expect(page.getByText('File Accesses', { exact: true })).toBeVisible();
 		await expect(page.locator('sfng-netquery-line-chart svg')).toBeVisible();
 
+		const fileQuery = `path:${JSON.stringify(target)} verdict:"deny"`;
+		await page.goto(`/monitor?api-port=${core.apiPort}&q=${encodeURIComponent(fileQuery)}`);
+		await expect(page.locator('sfng-file-event-row').filter({ hasText: target })).toHaveCount(1);
+		await expect(page).toHaveURL(/q=path:/);
+		const monitorIntroDialog = page.locator('sfng-dialog-container').filter({ hasText: 'Filemaster Protects Your Privacy' });
+		if (await monitorIntroDialog.isVisible()) {
+			await monitorIntroDialog.locator('svg').first().click();
+			await expect(monitorIntroDialog).toBeHidden();
+		}
+		if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
+			await page.screenshot({
+				path: path.join(repoRoot, 'tmp', 'monitor-q-filter.png'),
+				fullPage: true,
+			});
+		}
+
 		await page.goto(`/settings?api-port=${core.apiPort}`);
 		await expect(page.getByText('Keep File Event History', { exact: true })).toBeVisible();
 		const introDialog = page.locator('sfng-dialog-container').filter({ hasText: 'Filemaster Protects Your Privacy' });
