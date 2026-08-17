@@ -1,6 +1,6 @@
 [package]
 name = "filemaster"
-version = "2.1.21"
+version = "2.1.22"
 description = "Filemaster UI"
 authors = ["Safing"]
 license = ""

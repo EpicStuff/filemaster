@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "filemaster"
-version = "2.1.21"
+version = "2.1.22"
 dependencies = [
  "assert_matches",
  "bytes",
