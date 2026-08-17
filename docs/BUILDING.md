@@ -89,11 +89,15 @@ the UI cannot manage the core; run it directly with `sudo
 /opt/filemaster/filemaster-core --log info` and start the UI with `filemaster`.
 
 `--bin-dir` must point at `INSTALL_DIR` (the application directory), **not**
-`BIN_DIR`. The API authenticator only trusts clients whose executable lives
-under `--bin-dir`, and the real desktop binary lives in `INSTALL_DIR` (the
-`BIN_DIR` launcher `exec`s it, so the connecting process resolves to
-`INSTALL_DIR/filemaster`). Pointing `--bin-dir` at the launcher directory
-instead denies the UI with a 403. The bundled systemd unit already passes
-`--bin-dir /opt/filemaster`; only manual invocations need care. For local
-development you can instead enable Development Mode (`core/devMode`), which
-disables API authentication entirely.
+`BIN_DIR`. The system service creates `/run/filemaster/api.sock`; the native
+desktop client connects over that Unix-domain socket. The core receives the
+peer PID directly from the kernel and only grants it access when its executable
+lives under `--bin-dir` (or is explicitly passed with `--allowed-clients`).
+The `BIN_DIR` launcher `exec`s the real desktop binary in `INSTALL_DIR`, so the
+bundled service's `--bin-dir /opt/filemaster` setting is correct.
+
+The loopback TCP API remains available for browser and headless clients, but it
+does not infer process ownership. Use an API key there, or enable Development
+Mode (`core/devMode`) for local development. The socket's permissions let a
+desktop user attempt a connection; executable verification remains the access
+control.

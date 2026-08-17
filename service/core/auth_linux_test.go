@@ -6,74 +6,78 @@ import (
 	"context"
 	"net"
 	"os"
-	"strconv"
+	"path/filepath"
 	"testing"
-
-	"github.com/safing/portmaster/service/process"
 )
 
-// TestPidFromLoopbackConn verifies that the /proc-based lookup (which replaced
-// the deleted network-stack connection→PID attribution) resolves a live
-// loopback client socket back to the owning process.
-func TestPidFromLoopbackConn(t *testing.T) {
-	t.Parallel()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+func TestPeerPID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "api.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close() //nolint:errcheck
+	defer listener.Close() //nolint:errcheck
 
-	client, err := net.Dial("tcp", ln.Addr().String())
+	client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer client.Close() //nolint:errcheck
 
-	server, err := ln.Accept()
+	conn, err := listener.AcceptUnix()
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	defer server.Close() //nolint:errcheck
+	defer conn.Close() //nolint:errcheck
 
-	// The server sees the client's ephemeral address; that socket is owned by
-	// this test process.
-	host, portStr, err := net.SplitHostPort(server.RemoteAddr().String())
+	pid, err := peerPID(conn)
 	if err != nil {
-		t.Fatalf("split remote addr: %v", err)
+		t.Fatalf("peerPID: %v", err)
 	}
-	ip := net.ParseIP(host)
-	port, err := strconv.ParseUint(portStr, 10, 16)
-	if err != nil {
-		t.Fatalf("parse port: %v", err)
-	}
-
-	pid := pidFromLoopbackConn(ip, uint16(port))
 	if pid != os.Getpid() {
-		t.Fatalf("pidFromLoopbackConn = %d, want this process %d", pid, os.Getpid())
-	}
-
-	// The identified process must resolve to this test binary's real path, which
-	// is what the trusted-directory check compares against.
-	proc, err := process.GetOrFindProcess(context.Background(), pid)
-	if err != nil {
-		t.Fatalf("GetOrFindProcess(%d): %v", pid, err)
-	}
-	if proc.Path == "" {
-		t.Fatalf("resolved process has empty path")
-	}
-	if _, err := os.Stat(proc.Path); err != nil {
-		t.Fatalf("resolved process path %q does not exist: %v", proc.Path, err)
+		t.Fatalf("peerPID = %d, want this process %d", pid, os.Getpid())
 	}
 }
 
-// TestPidFromLoopbackConnUnknown verifies an unresolvable address returns -1
-// (which the authenticator treats as "failed to identify" → deny).
-func TestPidFromLoopbackConnUnknown(t *testing.T) {
-	t.Parallel()
+func TestWithAPIPeerPID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "api.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close() //nolint:errcheck
 
-	// Port 0 with no matching socket row must not resolve to a process.
-	if pid := pidFromLoopbackConn(net.ParseIP("127.0.0.1"), 0); pid != -1 {
-		t.Fatalf("pidFromLoopbackConn for unknown socket = %d, want -1", pid)
+	client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close() //nolint:errcheck
+
+	conn, err := listener.AcceptUnix()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	pid, ok := peerPIDFromContext(withAPIPeerPID(context.Background(), conn))
+	if !ok || pid != os.Getpid() {
+		t.Fatalf("peer PID context = (%d, %t), want (%d, true)", pid, ok, os.Getpid())
+	}
+}
+
+func TestListenAPISocketPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "api.sock")
+	listener, err := listenAPISocket(path)
+	if err != nil {
+		t.Fatalf("listenAPISocket: %v", err)
+	}
+	defer listener.Close() //nolint:errcheck
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o666 {
+		t.Fatalf("socket permissions = %o, want 666", got)
 	}
 }

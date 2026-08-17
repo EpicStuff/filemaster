@@ -1,5 +1,8 @@
 use super::PortmasterExt;
+#[cfg(not(target_os = "linux"))]
 use crate::portapi::client::connect;
+#[cfg(target_os = "linux")]
+use crate::portapi::client::connect_unix;
 use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Runtime};
@@ -27,11 +30,14 @@ pub fn start_websocket_thread<R: Runtime>(app: AppHandle<R>) {
 
             debug!("Trying to connect to websocket endpoint");
 
-            let api = connect(&format!(
-                "ws://{}/api/database/v1",
-                super::api_address()
-            ))
+            #[cfg(target_os = "linux")]
+            let api = connect_unix(
+                super::API_SOCKET_PATH,
+                &format!("ws://{}/api/database/v1", super::api_address()),
+            )
             .await;
+            #[cfg(not(target_os = "linux"))]
+            let api = connect(&format!("ws://{}/api/database/v1", super::api_address())).await;
 
             match api {
                 Ok(cli) => {
@@ -47,12 +53,12 @@ pub fn start_websocket_thread<R: Runtime>(app: AppHandle<R>) {
                             debug!("Shutdown signal received, closing connection");
                             break;
                         }
-                        
+
                         if cli.is_closed() {
                             warn!("Connection to filemaster lost");
                             break;
                         }
-                        
+
                         sleep(Duration::from_secs(1)).await;
                     }
 
@@ -92,7 +98,7 @@ pub fn start_websocket_thread<R: Runtime>(app: AppHandle<R>) {
                 }
             }
         }
-        
+
         info!("WebSocket thread terminated");
     });
 }

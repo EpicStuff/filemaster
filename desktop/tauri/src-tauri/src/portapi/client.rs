@@ -1,13 +1,14 @@
+use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http::Uri;
 use log::{debug, error, warn};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
 use tokio::time::{interval, Duration, Instant};
-use tokio_websockets::{ClientBuilder, Error};
-use bytes::Bytes;
+use tokio_websockets::{ClientBuilder, Error, WebSocketStream};
 
 use super::message::*;
 use super::types::*;
@@ -39,6 +40,7 @@ type SubscriberMap = RwLock<HashMap<usize, Sender<Response>>>;
 /// This method will launch a new async thread on the `tauri::async_runtime`
 /// that will handle message to transmit and also multiplex server responses
 /// to the appropriate subscriber.
+#[cfg(not(target_os = "linux"))]
 pub async fn connect(uri: &str) -> Result<PortAPI, Error> {
     let parsed = match uri.parse::<Uri>() {
         Ok(u) => u,
@@ -47,19 +49,39 @@ pub async fn connect(uri: &str) -> Result<PortAPI, Error> {
         }
     };
 
-    let (mut client, _) = ClientBuilder::from_uri(parsed).connect().await?;
+    let (client, _) = ClientBuilder::from_uri(parsed).connect().await?;
+    Ok(start_client(client))
+}
+
+/// Connect to PortAPI through a Unix-domain socket while retaining the HTTP
+/// request URI required for the WebSocket upgrade.
+#[cfg(target_os = "linux")]
+pub async fn connect_unix(socket_path: &str, uri: &str) -> Result<PortAPI, Error> {
+    let parsed = match uri.parse::<Uri>() {
+        Ok(uri) => uri,
+        Err(_) => return Err(Error::NoUriConfigured),
+    };
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (client, _) = ClientBuilder::from_uri(parsed).connect_on(stream).await?;
+    Ok(start_client(client))
+}
+
+fn start_client<S>(mut client: WebSocketStream<S>) -> PortAPI
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let (tx, mut dispatch) = channel::<Command>(64);
 
     tauri::async_runtime::spawn(async move {
         let subscribers: SubscriberMap = RwLock::new(HashMap::new());
         let next_id = AtomicUsize::new(0);
-        
+
         // Ping/pong keep-alive mechanism
-        let mut ping_interval = interval(Duration::from_secs(10));  // Send ping every 10 seconds
-        let mut timeout_check = interval(Duration::from_secs(1));   // Check for timeout every 1 second
+        let mut ping_interval = interval(Duration::from_secs(10)); // Send ping every 10 seconds
+        let mut timeout_check = interval(Duration::from_secs(1)); // Check for timeout every 1 second
         let mut last_ping = Instant::now();
         let mut last_pong = Instant::now();
-        const PONG_TIMEOUT: Duration = Duration::from_secs(5);      // Declare connection dead if no pong within 5 seconds after ping
+        const PONG_TIMEOUT: Duration = Duration::from_secs(5); // Declare connection dead if no pong within 5 seconds after ping
 
         loop {
             tokio::select! {
@@ -113,7 +135,7 @@ pub async fn connect(uri: &str) -> Result<PortAPI, Error> {
                                 // debug!("received websocket ping");
                                 continue;
                             }
-                            
+
                             let text = unsafe {
                                 std::str::from_utf8_unchecked(msg.as_payload())
                             };
@@ -187,7 +209,7 @@ pub async fn connect(uri: &str) -> Result<PortAPI, Error> {
         }
     });
 
-    Ok(PortAPI { dispatch: tx })
+    PortAPI { dispatch: tx }
 }
 
 impl PortAPI {

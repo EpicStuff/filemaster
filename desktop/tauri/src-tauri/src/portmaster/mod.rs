@@ -35,9 +35,11 @@ use log::{debug, error};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use url::Url;
 
 // Default matches the daemon's default listen address (service/core/base/module.go).
 const DEFAULT_API_ADDRESS: &str = "127.0.0.1:818";
+pub const API_SOCKET_PATH: &str = "/run/filemaster/api.sock";
 
 static API_ADDRESS: OnceLock<String> = OnceLock::new();
 
@@ -55,9 +57,48 @@ pub fn api_address() -> &'static str {
         .unwrap_or(DEFAULT_API_ADDRESS)
 }
 
-/// Returns the API base URL, e.g. "http://127.0.0.1:818/api/v1/".
-fn api_base_url() -> String {
-    format!("http://{}/api/v1/", api_address())
+/// Converts a configured Filemaster API URL into the path sent over the native
+/// Unix-domain socket. It deliberately rejects other origins.
+pub fn api_request_path(raw_url: &str) -> Result<String, String> {
+    let request_url = Url::parse(raw_url).map_err(|err| err.to_string())?;
+    let expected_url =
+        Url::parse(&format!("http://{}/", api_address())).map_err(|err| err.to_string())?;
+    if request_url.scheme() != "http"
+        || request_url.host_str() != expected_url.host_str()
+        || request_url.port_or_known_default() != expected_url.port_or_known_default()
+        || !request_url.username().is_empty()
+        || request_url.password().is_some()
+    {
+        return Err("Tauri may only send requests to the configured Filemaster API".to_string());
+    }
+
+    let mut path = request_url.path().to_string();
+    if path.is_empty() {
+        path.push('/');
+    }
+    if let Some(query) = request_url.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+    Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::api_request_path;
+
+    #[test]
+    fn api_request_path_preserves_path_and_query() {
+        let path = api_request_path("http://127.0.0.1:818/api/v1/config?key=value")
+            .expect("configured API URL should be accepted");
+        assert_eq!(path, "/api/v1/config?key=value");
+    }
+
+    #[test]
+    fn api_request_path_rejects_other_origins() {
+        assert!(api_request_path("http://example.com/api/v1/config").is_err());
+        assert!(api_request_path("https://127.0.0.1:818/api/v1/config").is_err());
+    }
 }
 
 pub trait Handler {
@@ -99,7 +140,7 @@ pub struct PortmasterInterface<R: Runtime> {
     // handle to the tray handler task so we can abort it when reconnecting
     pub tray_handler_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 
-    // Marks that a UI process restart event was observed (e.g. on upgrade) 
+    // Marks that a UI process restart event was observed (e.g. on upgrade)
     // and the UI process should relaunch after the next successful reconnect.
     pending_restart: AtomicBool,
 }
@@ -231,12 +272,7 @@ impl<R: Runtime> PortmasterInterface<R> {
     /// Send Shutdown request to portmaster
     pub fn trigger_shutdown(&self) {
         tauri::async_runtime::spawn(async move {
-            let client = reqwest::Client::new();
-            match client
-                .post(format!("{}core/shutdown", api_base_url()))
-                .send()
-                .await
-            {
+            match crate::commands::tauri_http::post_api("/api/v1/core/shutdown", Vec::new()).await {
                 Ok(v) => {
                     debug!("shutdown request sent {:?}", v);
                 }
@@ -249,11 +285,7 @@ impl<R: Runtime> PortmasterInterface<R> {
 
     pub fn set_resume(&self) {
         tauri::async_runtime::spawn(async move {
-            let client = reqwest::Client::new();
-            match client
-                .post(format!("{}control/resume", api_base_url()))
-                .send()
-                .await
+            match crate::commands::tauri_http::post_api("/api/v1/control/resume", Vec::new()).await
             {
                 Ok(v) => {
                     debug!("resume request sent {:?}", v);
@@ -265,19 +297,14 @@ impl<R: Runtime> PortmasterInterface<R> {
         });
     }
 
-
     pub fn set_pause(&self, duration_seconds: u64, spn_only: bool) {
         tauri::async_runtime::spawn(async move {
-            let client = reqwest::Client::new();
-            match client
-                .post(format!("{}control/pause", api_base_url()))
-                .json(&serde_json::json!({
+            let body = serde_json::to_vec(&serde_json::json!({
                 "duration": duration_seconds,
-                "onlySPN": spn_only
+                "onlySPN": spn_only,
             }))
-                .send()
-                .await
-            {
+            .expect("pause payload must serialize");
+            match crate::commands::tauri_http::post_api("/api/v1/control/pause", body).await {
                 Ok(v) => {
                     debug!("pause request sent {:?}", v);
                 }

@@ -165,6 +165,10 @@ func registerAPIEndpoints() error {
 		return err
 	}
 
+	if err := registerAPISocket(); err != nil {
+		return err
+	}
+
 	return api.SetAuthenticator(apiAuthenticator)
 }
 

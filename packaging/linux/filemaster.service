@@ -17,6 +17,8 @@ MemoryDenyWriteExecute=yes
 MemoryLow=2G
 NoNewPrivileges=yes
 PIDFile=/var/lib/filemaster/core-lock.pid
+RuntimeDirectory=filemaster
+RuntimeDirectoryMode=0755
 Environment=LOGLEVEL=info
 Environment=FILEMASTER_ARGS=
 EnvironmentFile=-/etc/default/filemaster

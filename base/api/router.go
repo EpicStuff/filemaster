@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -36,7 +37,34 @@ var (
 		"127.0.0.1",
 		"localhost",
 	}
+
+	additionalListeners []Listener
 )
+
+// Listener configures an additional API listener. It must be registered before
+// the API module starts.
+type Listener struct {
+	Name        string
+	Listener    net.Listener
+	ConnContext func(context.Context, net.Conn) context.Context
+	server      *http.Server
+}
+
+// RegisterListener registers an additional listener that serves the same API.
+// It is intended for local transports such as Unix-domain sockets.
+func RegisterListener(listener Listener) error {
+	if module.online.Load() {
+		return ErrListenerImmutable
+	}
+	if listener.Listener == nil {
+		return errors.New("api listener is nil")
+	}
+	if listener.Name == "" {
+		listener.Name = "additional api listener"
+	}
+	additionalListeners = append(additionalListeners, listener)
+	return nil
+}
 
 // RegisterHandler registers a handler with the API endpoint.
 func RegisterHandler(path string, handler http.Handler) *mux.Route {
@@ -67,6 +95,17 @@ func startServer() {
 
 	// Start server manager.
 	module.mgr.Go("http server manager", serverManager)
+	for i := range additionalListeners {
+		listener := &additionalListeners[i]
+		listener.server = &http.Server{
+			Handler:           server.Handler,
+			ReadHeaderTimeout: server.ReadHeaderTimeout,
+			ConnContext:       listener.ConnContext,
+		}
+		module.mgr.Go(listener.Name, func(ctx *mgr.WorkerCtx) error {
+			return listenerManager(ctx, listener)
+		})
+	}
 }
 
 func stopServer() error {
@@ -76,10 +115,30 @@ func stopServer() error {
 	}
 
 	if server.Addr != "" {
-		return server.Shutdown(context.Background())
+		if err := server.Shutdown(context.Background()); err != nil {
+			return err
+		}
+	}
+	for _, listener := range additionalListeners {
+		if listener.server != nil {
+			if err := listener.server.Shutdown(context.Background()); err != nil {
+				return err
+			}
+		} else if err := listener.Listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			return err
+		}
 	}
 
 	return nil
+}
+
+func listenerManager(_ *mgr.WorkerCtx, listener *Listener) error {
+	log.Infof("api: starting to listen on %s", listener.Listener.Addr())
+	err := listener.server.Serve(listener.Listener)
+	if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
 }
 
 // Serve starts serving the API endpoint.
