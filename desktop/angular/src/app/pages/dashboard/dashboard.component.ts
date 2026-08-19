@@ -26,18 +26,22 @@ interface News { cards: NewsCard[]; }
 
 interface DecisionChartPoint {
 	timestamp: number;
-	allowed: number;
-	blocked: number;
+	openAllowed: number;
+	openBlocked: number;
+	executeAllowed: number;
+	executeBlocked: number;
 }
 
 const newsResourceIdentifier = 'intel/news.yaml';
-const openChartConfig: ChartConfig<DecisionChartPoint> = {
+const decisionChartConfig: ChartConfig<DecisionChartPoint> = {
 	series: {
-		allowed: { lineColor: 'text-green-200', areaColor: 'text-green-100 text-opacity-25' },
-		blocked: { lineColor: 'text-red-200', areaColor: 'text-red-100 text-opacity-25' },
+		openAllowed: { lineColor: 'text-green-300', areaColor: 'text-green-100 text-opacity-25' },
+		openBlocked: { lineColor: 'text-red-300', areaColor: 'text-red-100 text-opacity-25' },
+		executeAllowed: { lineColor: 'text-blue', areaColor: 'text-deepPurple-700 text-opacity-25' },
+		executeBlocked: { lineColor: 'text-yellow-300', areaColor: 'text-yellow-100 text-opacity-25' },
 	},
 	time: { from: -10 * 60 },
-	tooltipFormat: point => `Allowed: ${point.allowed}\nBlocked: ${point.blocked}`,
+	tooltipFormat: point => `Open allowed: ${point.openAllowed}\nOpen blocked: ${point.openBlocked}\nExecute allowed: ${point.executeAllowed}\nExecute blocked: ${point.executeBlocked}`,
 	showDataPoints: true,
 	fillEmptyTicks: { interval: 60 },
 };
@@ -54,8 +58,7 @@ export class DashboardPageComponent implements OnInit {
 	private readonly filequery = inject(Filequery);
 	private readonly portapi = inject(PortapiService);
 
-	readonly openChartConfig = openChartConfig;
-	readonly executeChartConfig = openChartConfig;
+	readonly decisionChartConfig = decisionChartConfig;
 	fileBlocked = 0;
 	folderBlocked = 0;
 	recentApplications = 0;
@@ -63,8 +66,7 @@ export class DashboardPageComponent implements OnInit {
 	executeAllowed = 0;
 	blockedApplications: ApplicationActivity[] = [];
 	activeApplications: ApplicationActivity[] = [];
-	openDecisionChart: DecisionChartPoint[] = [];
-	executeDecisionChart: DecisionChartPoint[] = [];
+	decisionChart: DecisionChartPoint[] = [];
 	mounts: MountRow[] = [];
 	coverage: ProtectedMountsResponse | null = null;
 	diagnostics: FileAccessDiagnostics | null = null;
@@ -125,8 +127,8 @@ export class DashboardPageComponent implements OnInit {
 	private loadDashboard(): void {
 		forkJoin({
 			stats: this.filequery.batch({
-				fileBlocked: { query: { verdict: 'deny' }, select: [{ $count: { field: '*', as: 'count' } }] as unknown as Select[] },
-				folderBlocked: { query: { verdict: 'deny', is_dir: 'true' }, select: [{ $count: { field: '*', as: 'count' } }] as unknown as Select[] },
+				fileBlocked: { query: { op: 'open', verdict: 'deny', is_dir: 'false' }, select: [{ $count: { field: '*', as: 'count' } }] as unknown as Select[] },
+				folderBlocked: { query: { op: 'open', verdict: 'deny', is_dir: 'true' }, select: [{ $count: { field: '*', as: 'count' } }] as unknown as Select[] },
 				openAllowed: { query: { op: 'open', verdict: 'allow' }, select: [{ $count: { field: '*', as: 'count' } }] as unknown as Select[] },
 				executeAllowed: { query: { op: 'exec', verdict: 'allow' }, select: [{ $count: { field: '*', as: 'count' } }] as unknown as Select[] },
 				blockedApplications: { query: { verdict: 'deny' }, select: ['profile', 'app_name', { $count: { field: '*', as: 'count' } }] as unknown as Select[], groupBy: ['profile', 'app_name'], orderBy: [{ field: 'count', desc: true }], pageSize: 12 },
@@ -144,8 +146,7 @@ export class DashboardPageComponent implements OnInit {
 			this.blockedApplications = this.applications(stats.blockedApplications);
 			this.activeApplications = this.applications(stats.activeApplications);
 			this.recentApplications = this.activeApplications.length;
-			this.openDecisionChart = chart.map(point => ({ timestamp: point.timestamp, allowed: point.open_allowed, blocked: point.open_blocked }));
-			this.executeDecisionChart = chart.map(point => ({ timestamp: point.timestamp, allowed: point.execute_allowed, blocked: point.execute_blocked }));
+			this.decisionChart = chart.map(point => ({ timestamp: point.timestamp, openAllowed: point.open_allowed, openBlocked: point.open_blocked, executeAllowed: point.execute_allowed, executeBlocked: point.execute_blocked }));
 			this.coverage = mounts;
 			this.mounts = this.combineMounts(mounts, activity);
 			this.diagnostics = diagnostics;

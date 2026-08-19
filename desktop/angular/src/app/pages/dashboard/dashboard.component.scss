@@ -20,7 +20,7 @@
 
 #header { grid-area: header; }
 #stats { grid-area: stats; }
-#charts { grid-area: charts; }
+#charts { grid-area: charts; min-height: 256px; }
 #countries { grid-area: countries; }
 #blocked { grid-area: blocked; }
 #connmap { grid-area: map; min-height: 400px; }
@@ -31,8 +31,7 @@
 #pipeline { grid-area: pipeline; }
 #delivery { grid-area: delivery; }
 
-.mini-stats-list, .chart-list { @apply grid gap-3 w-full; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-.chart-list { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.mini-stats-list { @apply grid gap-3 w-full; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 .auto-grid-3, .auto-grid-4 { @apply grid gap-3; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 
 app-dashboard-widget label { @apply text-xs uppercase text-secondary font-light flex flex-row items-center gap-2 pb-2; }
@@ -48,8 +47,8 @@ app-dashboard-widget label { @apply text-xs uppercase text-secondary font-light 
 }
 
 .todo-value { @apply text-xs text-tertiary; }
-.chart-panel { @apply flex-col p-3 cursor-pointer hover:bg-gray-400; }
-.chart-panel label { @apply cursor-pointer; }
+.combined-chart { @apply block w-full cursor-pointer; }
+.combined-chart sfng-netquery-line-chart { @apply h-48; }
 .mount-item, .application-item { @apply flex-row items-center gap-2 p-2 cursor-pointer hover:bg-gray-400; }
 .mount-item { @apply justify-between; }
 .mount-path { @apply text-xs text-secondary truncate; }

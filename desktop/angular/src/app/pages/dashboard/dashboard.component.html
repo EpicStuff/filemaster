@@ -4,13 +4,12 @@
 			<h1>Dashboard <sfng-tipup key="dashboardIntro" placement="left"></sfng-tipup></h1>
 			<span class="text-sm text-secondary">Recent Open and Execute decisions from protected paths.</span>
 		</div>
-		<a class="btn bg-blue text-white" routerLink="/monitor">Open Monitor</a>
 	</header>
 
 	<app-dashboard-widget id="stats" label="Recent File Activity">
 		<div class="mini-stats-list">
-			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('verdict:deny')"><label>File Blocked</label><span>{{ fileBlocked }}</span></a>
-			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('verdict:deny is_dir:true')"><label>Folder Blocked</label><span>{{ folderBlocked }}</span></a>
+			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:open verdict:deny is_dir:false')"><label>File Open Blocked</label><span>{{ fileBlocked }}</span></a>
+			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:open verdict:deny is_dir:true')"><label>Folder Open Blocked</label><span>{{ folderBlocked }}</span></a>
 			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('groupby:app_name')"><label>Recent Applications</label><span>{{ recentApplications }}</span></a>
 			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:open verdict:allow')"><label>Open Allowed</label><span>{{ openAllowed }}</span></a>
 			<div class="mini-stat"><label>Future Write Allowed</label><span class="todo-value">TODO</span></div>
@@ -18,17 +17,10 @@
 		</div>
 	</app-dashboard-widget>
 
-	<app-dashboard-widget id="charts">
-		<div class="chart-list">
-			<a class="chart-panel" routerLink="/monitor" [queryParams]="monitorQuery('op:open')">
-				<label>Open Decisions over Time</label>
-				<sfng-netquery-line-chart class="w-full h-36" [config]="openChartConfig" [data]="openDecisionChart"></sfng-netquery-line-chart>
-			</a>
-			<a class="chart-panel" routerLink="/monitor" [queryParams]="monitorQuery('op:exec')">
-				<label>Execute Decisions over Time</label>
-				<sfng-netquery-line-chart class="w-full h-36" [config]="executeChartConfig" [data]="executeDecisionChart"></sfng-netquery-line-chart>
-			</a>
-		</div>
+	<app-dashboard-widget id="charts" label="Open and Execute Decisions over Time">
+		<a class="combined-chart" routerLink="/monitor">
+			<sfng-netquery-line-chart class="w-full h-48" [config]="decisionChartConfig" [data]="decisionChart"></sfng-netquery-line-chart>
+		</a>
 	</app-dashboard-widget>
 
 	<app-dashboard-widget class="flex-grow" id="countries" label="Recently Protected Mounts">
@@ -42,11 +34,8 @@
 
 	<app-dashboard-widget class="flex-grow" id="blocked" label="Recently Blocked Applications">
 		<div class="block w-full h-full">
-			<span *ngIf="!blockedApplications.length" class="empty-state">No applications have been blocked in the retained file history.</span>
 			<ul class="list-none auto-grid-3">
-				<ng-container *ngFor="let application of blockedApplications; trackBy: trackApplication">
-					<li *ngIf="application.profileID | toAppProfile as profile" [routerLink]="['/app', profile.Source, profile.ID]" class="application-item"><app-icon [profile]="profile"></app-icon><span>{{ application.name }}</span><strong>{{ application.count }}</strong></li>
-				</ng-container>
+				<li *ngFor="let application of blockedApplications; trackBy: trackApplication" routerLink="/monitor" [queryParams]="monitorQuery('profile:' + (application.profileID | json))" class="application-item"><span>{{ application.name }}</span><strong>{{ application.count }}</strong></li>
 			</ul>
 		</div>
 	</app-dashboard-widget>

@@ -118,12 +118,12 @@ test('prompts for watched file open decisions and records them in the app', asyn
 			await expect(dashboardIntroDialog).toBeHidden();
 		}
 		await expect(page.getByText('Recent File Activity', { exact: true })).toBeVisible();
-		await expect(page.getByText('Open Decisions over Time', { exact: true })).toBeVisible();
+		await expect(page.getByText('Open and Execute Decisions over Time', { exact: true })).toBeVisible();
 		await expect(page.getByText('Protected Mounts', { exact: true })).toBeVisible();
-		await expect(page.locator('sfng-netquery-line-chart svg')).toHaveCount(2);
+		await expect(page.locator('sfng-netquery-line-chart svg')).toHaveCount(1);
 		if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
 			await page.screenshot({
-				path: path.join(repoRoot, 'tmp', 'file-access-dashboard.png'),
+				path: path.join(repoRoot, 'tmp', 'file-access-dashboard-empty.png'),
 			});
 		}
 
