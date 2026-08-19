@@ -107,4 +107,9 @@ These are deliberately not UI substitutions. They require a separately scoped ba
 
 ## Follow-on UI cleanup
 
-After the dashboard is complete, remove or repurpose the remaining network-era surfaces: the network scout side-dash; residual SPN profile subscription and netquery callers with no file-access replacement; per-app Insights and Internet/History quick settings; network-history and active-connection header details; and stale Portmaster-era side-dash, feature-scout, intro, support, and Tauri-shell claims. Retain standalone SPN pages unless their separate scope is changed. Extend E2E coverage so missing backend data cannot leave empty or broken widgets behind.
+After the dashboard is complete, remove or repurpose the remaining network-era surfaces: the network scout side-dash; residual SPN profile subscription and netquery callers with no file-access replacement; per-app Insights and Internet/History quick settings; network-history and active-connection header details; and stale Portmaster-era side-dash, feature-scout, intro, support, and Tauri-shell claims. Replace or remove the tracker-blocking and DNS onboarding steps: they make network-product claims and write network settings. Retain standalone SPN pages unless their separate scope is changed. Extend E2E coverage so missing backend data cannot leave empty or broken widgets behind.
+
+
+
+
+- the last 4 cards still need work
