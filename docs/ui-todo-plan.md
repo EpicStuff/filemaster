@@ -2,11 +2,10 @@
 
 ## Purpose
 
-Replace every dashboard surface that relies on the removed network backend with truthful file-access information. Existing cards retain their current order, relative grid location, and size. The empty Features card is deleted. New enforcement cards are added to the bottom. The News widget remains unchanged for future Filemaster news.
-
-The current CSS grid reserves a two-row `feature` area. Delete it and make sure to keep the size/shape/relative positions of the existing cards that are being replaced.
-
-Implemented: the dashboard now uses the current fanotify backend and presents
+✅ Completed: every dashboard surface that relied on the removed network backend
+now presents truthful file-access information. The empty Features card is
+deleted, the News widget remains for future Filemaster news, and the dashboard
+uses the current fanotify backend and presents
 only Open and Execute. It deliberately excludes operations the current backend
 cannot enforce: Read and Write are not dashboard metrics.
 
@@ -24,24 +23,23 @@ cannot enforce: Read and Write are not dashboard metrics.
 - Every Access and Execute record includes its mount ID and mount path when
   mount attribution is available.
 
-## Dashboard card mapping
+## Dashboard card mapping — ✅ Completed
 
 
 | Dashboard order and existing card            | Replacement                       | Data and behaviour                                                                                                                           |
 | -------------------------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `features` / Features (currently empty)      | **Delete**                        | This is an SPN package-feature container.                                                                                                    |
-| `stats` / Recent Activity                    | **Recent File Activity**          | Keep the six existing mini-stat positions. The exact old-to-new mapping is below. Each available count links to the matching Monitor filter. |
+| `features` / Features (currently empty)      | **Deleted**                       | This SPN package-feature container is removed.                                                                                                |
+| `stats` / Recent Activity                    | **Recent File Activity**          | The six mini-stat positions are retained. Each available count links to the matching Monitor filter.                                         |
 | `news` / News                                | **News**                          | Leave unchanged for future Filemaster news.                                                                                                  |
-| `charts` / Active/Blocked Connections        | **Open Decisions over Time**      | Replace the first existing chart panel with allowed and blocked Open decisions over time.                                                    |
-| `charts` / Connections Tunneled through SPN  | **Execute Decisions over Time**  | The current panel is hidden unless SPN is enabled. Replace it with an always-rendered Execute chart in the same second panel position.       |
-| `blocked` / Recently Blocked Applications    | **Recently Blocked Applications** | Preserve the card, group denied file-access records by application, and link each row to that application's app page, matching Portmaster.    |
-| `countries` / Recent Connections per Country | **Recently Protected Mounts**     | Render every returned mount in Portmaster's responsive list style: coverage badge, mount path, and literal `-1` placeholder number. Order degraded/pending mounts first, then the most recently active protected mounts. Each row links to Monitor with that mount filter. Empty state is an empty list. |
-| `connmap` / Recent Connection Countries map  | **Protected Mounts**              | Reuse the large map-sized slot for the full per-mount coverage and recent-activity table described below.                                    |
-| `bwvis-bar` / Recent Top Consumers           | **Most Active Applications**      | rank applications by recent file-access operations instead of transferred bytes.                                                             |
-| `bwvis-line` / Recent Bandwidth Usage        | **Opens and Executes**            | operation-focused time chart: Open and Execute only.                                                                                         |
-| new cards                                    | **Open Enforcement**              | Append the three compact enforcement cards described below. They are new cards; no existing card is moved to make space for them.            |
+| `charts` / connection charts                 | **Open and Execute Decisions over Time** | One combined four-series chart: Open allowed/blocked and Execute allowed/blocked.                                                       |
+| `blocked` / Recently Blocked Applications    | **Recently Blocked Applications** | Denied file-access records grouped by application; each row opens the corresponding Monitor profile filter.                                  |
+| `countries` / Recent Connections per Country | **Recently Protected Mounts**     | Reuses Portmaster's protection shield: green protected, yellow pending, red degraded; then mount path and literal `-1` placeholder. Degraded/pending mounts sort first, then most recently active protected mounts. Each row links to its Monitor mount filter. Empty state is an empty list. |
+| `connmap` / Recent Connection Countries map  | **Protected Mounts**              | The large slot now contains the complete per-mount coverage and recent-activity table below.                                                  |
+| `bwvis-bar` / Recent Top Consumers           | **Most Active Applications**      | Applications ranked by recent file-access operations.                                                                                         |
+| `bwvis-line` / Recent Bandwidth Usage        | **Opens and Executes**            | Open and Execute decision summary.                                                                                                            |
+| new cards                                    | **Enforcement health**            | Three compact enforcement cards: Enforcement State, Decision Pipeline, and Event Delivery.                                                   |
 
-### Protected Mounts display
+### Protected Mounts display — ✅ Completed
 
 The large **Protected Mounts** card is the detailed view for both protection
 coverage and recent per-mount activity. Its header shows a single coverage
@@ -57,19 +55,19 @@ Below the table, show pending scopes and dynamic mount coverage gaps with their
 affected paths. A missing, pending, or dynamically breached mount makes the
 coverage badge warning/red even if its recent activity counts are zero.
 
-### Recent File Activity mini-stat mapping
+### Recent File Activity mini-stat mapping — ✅ Completed
 
 
 | Existing mini-stat  | Replacement              | Notes                                                                          |
 | ------------------- | ------------------------ | ------------------------------------------------------------------------------ |
-| Connections Blocked | **File Blocked**         | Denied file open/execute decisions.                                            |
-| Active Connections  | **Folder Blocked**       | Denied folder open                                                             |
+| Connections Blocked | **File Open Blocked**    | Denied file Open decisions only.                                               |
+| Active Connections  | **Folder Open Blocked**  | Denied folder Open decisions only.                                             |
 | Active Apps         | **Recent Applications**  | Distinct applications with file-access activity in the selected recent window. |
 | Data Received       | **Open Allowed**         | Allowed Open decisions.                                                        |
 | Data Sent           | **future write allowed** | Leave blank or show TODO text; no metric until Write is enforceable.           |
 | SPN Identities      | **Executes Allowed**     | Allowed File Execute decisions.                                                |
 
-## Bottom enforcement cards
+## Bottom enforcement cards — ✅ Completed
 
 The old settings diagnostics table is not restored. Append three compact, independently meaningful cards:
 
@@ -89,12 +87,12 @@ Each status uses green for healthy, yellow for a recoverable warning, and red fo
 
 The existing security-lock state remains the primary immediate alert mechanism; these cards explain its health signals without duplicating a diagnostics table.
 
-## Confirmed layout decisions
+## Confirmed layout decisions — ✅ Completed
 
-1. Delete the empty Features card; do not replace it in its existing slot.
-2. Keep News for future Filemaster news.
-3. Use **Protected Mounts** as the only detailed mount-coverage surface.
-4. Implemented after the fanotify backend rewrite; exposes only current Open
+1. ✅ Deleted the empty Features card without replacing it in its existing slot.
+2. ✅ Kept News for future Filemaster news.
+3. ✅ Use **Protected Mounts** as the only detailed mount-coverage surface.
+4. ✅ Implemented after the fanotify backend rewrite; exposes only current Open
    and Execute semantics.
 
 ## Potential backend extensions
