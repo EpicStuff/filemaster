@@ -65,3 +65,37 @@ func TestProtectedMountStatuses(t *testing.T) {
 		})
 	}
 }
+
+func TestProtectedMountStatusResponseIncludesCoverageAndUnresolvedScopes(t *testing.T) {
+	t.Parallel()
+
+	got := protectedMountStatusResponse(FileAccessDiagnostics{Mount: MountDiagnostics{
+		CoverageKnown:  false,
+		ActiveMountIDs: []int{3},
+		PendingScopes:  []string{"/home"},
+		DynamicMountCoverageGaps: []MountCoverageGap{{
+			MountID:        9,
+			MountPath:      "/mnt/data",
+			AffectedScopes: []string{"/home"},
+		}},
+	}})
+	want := ProtectedMountsResponse{
+		Coverage:          "unknown",
+		ActiveMountCount:  1,
+		MissingMountCount: 0,
+		Mounts: []ProtectedMountStatus{{
+			ScopePath: "/home",
+			Status:    mountStatusPending,
+			Reasons:   []string{"scope_activation_pending"},
+		}},
+		PendingScopes: []string{"/home"},
+		DynamicGaps: []ProtectedMountGap{{
+			MountID:        9,
+			MountPath:      "/mnt/data",
+			AffectedScopes: []string{"/home"},
+		}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("protectedMountStatusResponse() = %#v, want %#v", got, want)
+	}
+}

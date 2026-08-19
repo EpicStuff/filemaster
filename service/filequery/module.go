@@ -58,6 +58,7 @@ func NewFileQuery(inst instance) (*FileQuery, error) {
 		Database:  db,
 	}, nil)
 	decisionChartHandler := &DecisionChartHandler{Database: db}
+	mountActivityHandler := &MountActivityHandler{Database: db}
 
 	if err := api.RegisterEndpoint(api.Endpoint{
 		Name:        "File-Access Query",
@@ -90,6 +91,17 @@ func NewFileQuery(inst instance) (*FileQuery, error) {
 		HandlerFunc: decisionChartHandler.ServeHTTP,
 	}); err != nil {
 		return nil, fmt.Errorf("register filequery/charts/decisions endpoint: %w", err)
+	}
+
+	if err := api.RegisterEndpoint(api.Endpoint{
+		Name:        "File-Access Mount Activity",
+		Description: "Returns per-mount Open and Execute decision counts with each mount's latest recorded activity.",
+		Path:        "filequery/mounts/activity",
+		MimeType:    "application/json",
+		Read:        api.PermitSelf,
+		HandlerFunc: mountActivityHandler.ServeHTTP,
+	}); err != nil {
+		return nil, fmt.Errorf("register filequery/mounts/activity endpoint: %w", err)
 	}
 
 	if err := api.RegisterEndpoint(api.Endpoint{
