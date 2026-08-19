@@ -57,6 +57,7 @@ func NewFileQuery(inst instance) (*FileQuery, error) {
 		IsDevMode: isDevMode,
 		Database:  db,
 	}, nil)
+	decisionChartHandler := &DecisionChartHandler{Database: db}
 
 	if err := api.RegisterEndpoint(api.Endpoint{
 		Name:        "File-Access Query",
@@ -78,6 +79,17 @@ func NewFileQuery(inst instance) (*FileQuery, error) {
 		HandlerFunc: batchHandler.ServeHTTP,
 	}); err != nil {
 		return nil, fmt.Errorf("register filequery/query/batch endpoint: %w", err)
+	}
+
+	if err := api.RegisterEndpoint(api.Endpoint{
+		Name:        "File-Access Decision Chart",
+		Description: "Return the last ten minutes of Open and Execute decision counts in ten-second buckets.",
+		Path:        "filequery/charts/decisions",
+		MimeType:    "application/json",
+		Read:        api.PermitSelf,
+		HandlerFunc: decisionChartHandler.ServeHTTP,
+	}); err != nil {
+		return nil, fmt.Errorf("register filequery/charts/decisions endpoint: %w", err)
 	}
 
 	if err := api.RegisterEndpoint(api.Endpoint{

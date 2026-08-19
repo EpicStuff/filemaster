@@ -49,6 +49,7 @@ func (h *recordingHandler) Observe(e *FileEvent, verdict Verdict) {
 		PID:       e.PID,
 		Exe:       e.Exe,
 		Path:      e.Path,
+		IsDir:     e.IsDir,
 		Op:        e.Op.String(),
 		Verdict:   verdictString(verdict),
 		Profile:   profile,

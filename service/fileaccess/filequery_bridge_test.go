@@ -26,7 +26,7 @@ func TestRecordingHandlerRecordsEnrichedProfile(t *testing.T) {
 
 	h := NewRecordingHandler(inner, feed)
 
-	v := h.Decide(context.Background(), &FileEvent{PID: 42, Path: "/tmp/secret.txt", Op: OpOpen})
+	v := h.Decide(context.Background(), &FileEvent{PID: 42, Path: "/tmp/secret.txt", IsDir: true, Op: OpOpen})
 	if v != VerdictDeny {
 		t.Fatalf("verdict = %s, want deny", v)
 	}
@@ -44,6 +44,9 @@ func TestRecordingHandlerRecordsEnrichedProfile(t *testing.T) {
 		}
 		if rec.Op != "open" || rec.Verdict != "deny" {
 			t.Errorf("record op/verdict = %q/%q, want open/deny", rec.Op, rec.Verdict)
+		}
+		if !rec.IsDir {
+			t.Error("record is_dir = false, want true")
 		}
 	default:
 		t.Fatal("no record was fed to filequery")

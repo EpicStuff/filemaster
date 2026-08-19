@@ -10,6 +10,7 @@ type FileAccessRecord struct {
 	PID     int32     `sqlite:"pid"`
 	Exe     string    `sqlite:"exe"`
 	Path    string    `sqlite:"path"`
+	IsDir   bool      `sqlite:"is_dir,integer"`
 	Op      string    `sqlite:"op"`
 	Verdict string    `sqlite:"verdict"`
 	Profile string    `sqlite:"profile"`

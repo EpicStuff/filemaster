@@ -31,6 +31,14 @@ type MountCoverageGap struct {
 	AffectedScopes []string
 }
 
+// RequiredMount identifies a mount that a configured included watch scope
+// currently requires. It deliberately contains only mount topology, not paths
+// from individual file-access events.
+type RequiredMount struct {
+	MountID   int    `json:"mount_id"`
+	MountPath string `json:"mount_path"`
+}
+
 type policyScope struct {
 	Configured string
 	Canonical  string
@@ -130,6 +138,7 @@ type mountedMark struct {
 type MountDiagnostics struct {
 	ConfiguredScopes           []string
 	CanonicalScopes            []string
+	RequiredMounts             []RequiredMount
 	ActiveMountIDs             []int
 	MissingMountIDs            []int
 	DynamicMountCoverageBreach bool
@@ -678,6 +687,15 @@ func (s *fanotifySource) baseMountDiagnostics() MountDiagnostics {
 }
 
 func (s *fanotifySource) addKnownCoverage(diagnostics *MountDiagnostics, required map[int]mountInfo) {
+	for _, mount := range required {
+		diagnostics.RequiredMounts = append(diagnostics.RequiredMounts, RequiredMount{
+			MountID:   mount.ID,
+			MountPath: mount.MountPoint,
+		})
+	}
+	sort.Slice(diagnostics.RequiredMounts, func(i, j int) bool {
+		return diagnostics.RequiredMounts[i].MountID < diagnostics.RequiredMounts[j].MountID
+	})
 	for id, mark := range s.marks {
 		if _, required := required[id]; required && mark.mask == s.markMask {
 			diagnostics.ActiveMountIDs = append(diagnostics.ActiveMountIDs, id)
@@ -753,6 +771,7 @@ func (s *fanotifySource) MountDiagnostics() MountDiagnostics {
 	diagnostics := s.diagnostics
 	diagnostics.ConfiguredScopes = append([]string(nil), diagnostics.ConfiguredScopes...)
 	diagnostics.CanonicalScopes = append([]string(nil), diagnostics.CanonicalScopes...)
+	diagnostics.RequiredMounts = append([]RequiredMount(nil), diagnostics.RequiredMounts...)
 	diagnostics.ActiveMountIDs = append([]int(nil), diagnostics.ActiveMountIDs...)
 	diagnostics.MissingMountIDs = append([]int(nil), diagnostics.MissingMountIDs...)
 	diagnostics.DynamicMountIDs = append([]int(nil), diagnostics.DynamicMountIDs...)
