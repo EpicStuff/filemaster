@@ -58,8 +58,7 @@
 				</tbody>
 			</table>
 		</div>
-		<div class="coverage-details" *ngIf="coverage?.pending_scopes?.length || coverage?.dynamic_gaps?.length">
-			<span *ngFor="let scope of coverage?.pending_scopes">Pending: {{ scope }}</span>
+		<div class="coverage-details" *ngIf="coverage?.dynamic_gaps?.length">
 			<span *ngFor="let gap of coverage?.dynamic_gaps">Coverage gap: {{ gap.mount_path }} — {{ gap.affected_scopes.join(', ') }}</span>
 		</div>
 	</app-dashboard-widget>

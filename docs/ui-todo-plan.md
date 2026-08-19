@@ -51,9 +51,10 @@ missing mount counts. Its table contains:
 | ---------- | --------- | ------------ | ------------ | --------------- | --------------- |
 | `/home`    | Protected | 128          | 3            | 4               | 0               |
 
-Below the table, show pending scopes and dynamic mount coverage gaps with their
-affected paths. A missing, pending, or dynamically breached mount makes the
-coverage badge warning/red even if its recent activity counts are zero.
+Below the table, show dynamic mount coverage gaps with their affected paths.
+Pending mounts are already represented by their own table row. A missing,
+pending, or dynamically breached mount makes the coverage badge warning/red
+even if its recent activity counts are zero.
 
 ### Recent File Activity mini-stat mapping — ✅ Completed
 
