@@ -77,7 +77,7 @@ app-dashboard-widget label { @apply text-xs uppercase text-secondary font-light 
 .operation-summary { @apply grid h-full gap-3; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .operation-summary a { @apply flex flex-col items-center justify-center rounded bg-gray-300 hover:bg-gray-400; }
 .operation-summary span { @apply text-3xl text-blue; }
-.health-content { @apply flex flex-col gap-1 text-sm; }
+.health-content { @apply flex h-full flex-col gap-1 rounded bg-gray-300 p-3 shadow text-sm; }
 .health-content strong { @apply text-base; }
 .health-content.health-good strong { @apply text-green-200; }
 .health-content.health-warning strong { @apply text-yellow-200; }
