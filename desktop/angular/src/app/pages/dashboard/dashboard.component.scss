@@ -1,166 +1,97 @@
 :host {
-  @apply flex flex-row w-full gap-3 p-4 overflow-auto;
+	@apply flex flex-row w-full gap-3 p-4 overflow-auto;
 }
 
 .dashboard-grid {
-  @apply grid gap-4;
-
-  align-items: stretch;
-  justify-items: stretch;
-  grid-template-columns: 1fr 1fr 1fr 1fr;
-  grid-template-areas:
-    "header header header header"
-    "feature feature feature feature"
-    "feature feature feature feature"
-    "stats stats news news"
-    "stats stats news news"
-    "charts charts charts charts"
-    "charts charts charts charts"
-    "blocked blocked countries countries"
-    "map map map map"
-    "bwvis-bar bwvis-bar bwvis-line bwvis-line";
+	@apply grid gap-4;
+	align-items: stretch;
+	justify-items: stretch;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	grid-template-areas:
+		'header header header header'
+		'stats stats news news'
+		'stats stats news news'
+		'charts charts charts charts'
+		'countries countries blocked blocked'
+		'map map map map'
+		'bwvis-bar bwvis-bar bwvis-line bwvis-line'
+		'enforcement pipeline delivery delivery';
 }
 
-:host-context(.min-width-1024px) {
-  .dashboard-grid {
-    grid-template-areas:
-      "header header header header"
-      "feature feature feature news"
-      "feature feature feature news"
-      "stats stats stats news"
-      "stats stats stats news"
-      "charts charts charts charts"
-      "countries countries map map"
-      "blocked blocked map map"
-      "bwvis-bar bwvis-bar bwvis-line bwvis-line";
-  }
-}
+#header { grid-area: header; }
+#stats { grid-area: stats; }
+#charts { grid-area: charts; }
+#countries { grid-area: countries; }
+#blocked { grid-area: blocked; }
+#connmap { grid-area: map; min-height: 400px; }
+#bwvis-bar { grid-area: bwvis-bar; min-height: 280px; }
+#bwvis-line { grid-area: bwvis-line; min-height: 280px; }
+#news { grid-area: news; }
+#enforcement { grid-area: enforcement; }
+#pipeline { grid-area: pipeline; }
+#delivery { grid-area: delivery; }
 
-#header {
-  grid-area: header;
-}
+.mini-stats-list, .chart-list { @apply grid gap-3 w-full; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.chart-list { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.auto-grid-3, .auto-grid-4 { @apply grid gap-3; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 
-#features {
-  grid-area: feature;
-}
+app-dashboard-widget label { @apply text-xs uppercase text-secondary font-light flex flex-row items-center gap-2 pb-2; }
 
-#stats {
-  grid-area: stats;
-}
-
-#charts {
-  grid-area: charts;
-}
-
-#countries {
-  grid-area: countries;
-}
-
-#blocked {
-  grid-area: blocked;
-}
-
-#connmap {
-  grid-area: map;
-}
-
-#bwvis-bar {
-  grid-area: bwvis-bar;
-}
-
-#bwvis-line {
-  grid-area: bwvis-line;
-}
-
-#news {
-  grid-area: news;
-}
-
-.auto-grid-3 {
-  @apply grid gap-4;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-}
-
-.auto-grid-4 {
-  @apply grid gap-4;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-}
-
-app-dashboard-widget {
-  label {
-    @apply text-xs uppercase text-secondary font-light flex flex-row items-center gap-2 pb-2;
-  }
-
-  .feature-card-list {
-    @apply grid gap-3 w-full;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  }
-
-  .mini-stats-list {
-    @apply grid gap-3 w-full;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  }
-
-  &#news {
-
-    h1 {
-      @apply text-base;
-      @apply font-light;
-    }
-
-    ::ng-deep markdown {
-      @apply font-light;
-
-      a {
-        @apply underline text-blue;
-      }
-
-      strong {
-        @apply font-medium;
-      }
-    }
-  }
-
-}
-
-::ng-deep #dashboard-map {
-  #world-group {
-    --map-bg: #111112;
-    --map-country-active: #424141;
-    --map-country-inactive: #2a2a2a;
-    --map-country-border-width: 1px;
-    --map-country-border-color: #1e1e1e;
-    --map-country-border-color-selected: #858585;
-    --map-country-blocked-primary: #858585;
-    --map-country-blocked-secondary: #402323;
-
-    path {
-      fill: var(--map-country-active);
-      stroke: var(--map-bg);
-      stroke-width: var(--map-country-border-width);
-      stroke-linejoin: round;
-    }
-
-    path.active {
-      color: #1d3c24;
-      fill: currentColor;
-    }
-
-    path.hover {
-      color: #4fae4f;
-      fill: currentColor;
-    }
-  }
+.mini-stat, .chart-panel, .mount-item, .application-item, .application-list li {
+	@apply flex bg-gray-300 rounded shadow;
 }
 
 .mini-stat {
-  @apply flex flex-col items-center justify-center py-3 px-2 bg-gray-300 rounded shadow;
+	@apply flex-col items-center justify-center py-3 px-2;
+	label { @apply font-light uppercase text-xxs text-secondary -mb-2; }
+	span { @apply text-xl text-blue; }
+}
 
-  label {
-    @apply font-light uppercase text-xxs text-secondary -mb-2;
-  }
+.todo-value { @apply text-xs text-tertiary; }
+.chart-panel { @apply flex-col p-3 cursor-pointer hover:bg-gray-400; }
+.chart-panel label { @apply cursor-pointer; }
+.mount-item, .application-item { @apply flex-row items-center gap-2 p-2 cursor-pointer hover:bg-gray-400; }
+.mount-item { @apply justify-between; }
+.mount-path { @apply text-xs text-secondary truncate; }
+.mount-placeholder { @apply text-lg text-blue; }
+.mount-status, .coverage-badge { @apply inline-flex self-start mt-1 px-2 py-0.5 rounded text-xxs uppercase; }
+.mount-status.protected, .coverage-protected { @apply bg-green-200 text-gray-100; }
+.mount-status.pending, .coverage-unknown { @apply bg-yellow-300 text-gray-100; }
+.mount-status.degraded, .coverage-partial { @apply bg-red-300 text-white; }
+.empty-state { @apply flex h-full min-h-[4rem] items-center justify-center text-center text-sm text-tertiary; }
 
-  span {
-    @apply text-xl text-blue;
-  }
+.mount-summary { @apply flex flex-row items-center gap-3 pb-3 text-sm text-secondary; }
+.mount-table-wrap { @apply overflow-x-auto; }
+.mount-table { @apply w-full text-left text-sm; border-collapse: collapse; }
+.mount-table th { @apply pb-2 text-xxs uppercase font-light text-secondary; }
+.mount-table td { @apply border-t border-gray-300 py-2 pr-3; }
+.mount-table tbody tr { @apply cursor-pointer hover:bg-gray-300; }
+.coverage-details { @apply flex flex-col gap-1 pt-3 text-xs text-yellow-100; }
+.application-item { @apply justify-between; }
+.application-item span, .application-list span { @apply flex-grow text-xs text-secondary truncate; }
+.application-item strong, .application-list strong { @apply text-blue; }
+.application-list { @apply flex flex-col gap-2 list-none; }
+.application-list li { @apply flex-row items-center gap-3 p-3 cursor-pointer hover:bg-gray-400; }
+.operation-summary { @apply grid h-full gap-3; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.operation-summary a { @apply flex flex-col items-center justify-center rounded bg-gray-300 hover:bg-gray-400; }
+.operation-summary span { @apply text-3xl text-blue; }
+.health-content { @apply flex flex-col gap-1 text-sm; }
+.health-content strong { @apply text-base; }
+.health-content.health-good strong { @apply text-green-200; }
+.health-content.health-warning strong { @apply text-yellow-200; }
+.health-content.health-danger strong { @apply text-red-200; }
+.news-list { @apply flex flex-col gap-3; }
+.news-list a { @apply block rounded p-2 hover:bg-gray-300; }
+.news-list h2 { @apply text-base font-light; }
+
+:host-context(.min-width-1024px) .dashboard-grid {
+	grid-template-areas:
+		'header header header header'
+		'stats stats stats news'
+		'stats stats stats news'
+		'charts charts charts charts'
+		'countries countries map map'
+		'blocked blocked map map'
+		'bwvis-bar bwvis-bar bwvis-line bwvis-line'
+		'enforcement pipeline delivery delivery';
 }

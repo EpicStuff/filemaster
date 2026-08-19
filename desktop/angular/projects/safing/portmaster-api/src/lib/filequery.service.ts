@@ -19,6 +19,75 @@ export interface FileAccessRecord {
   // mount_id with an empty mount_path means the mount was unknown.
   mount_id: number;
   mount_path: string;
+  is_dir: boolean;
+}
+
+export interface FileDecisionChartPoint {
+  timestamp: number;
+  open_allowed: number;
+  open_blocked: number;
+  execute_allowed: number;
+  execute_blocked: number;
+}
+
+export interface ProtectedMount {
+  mount_id: number;
+  mount_path: string;
+  scope_path?: string;
+  status: 'protected' | 'pending' | 'degraded';
+  reasons: string[];
+}
+
+export interface ProtectedMountGap {
+  mount_id: number;
+  mount_path: string;
+  affected_scopes: string[];
+}
+
+export interface ProtectedMountsResponse {
+  coverage: 'protected' | 'partial' | 'unknown';
+  active_mount_count: number;
+  missing_mount_count: number;
+  mounts: ProtectedMount[];
+  pending_scopes: string[];
+  dynamic_gaps: ProtectedMountGap[];
+}
+
+export interface MountActivity {
+  mount_id: number;
+  mount_path: string;
+  last_activity_at: string;
+  open_allowed: number;
+  open_blocked: number;
+  execute_allowed: number;
+  execute_blocked: number;
+}
+
+export interface FileAccessDiagnostics {
+  LifecycleState: string;
+  Warnings: { Code: string; Detail: string }[];
+  Decision: {
+    QueueDepth: number;
+    Workers: number;
+    ActiveWorkers: number;
+    PendingAsk: number;
+    QueueSaturationDenies: number;
+    OutstandingBudgetDenies: number;
+    ProfileAskBudgetDenies: number;
+  };
+  Observation: {
+    QueueDepth: number;
+    QueueCapacity: number;
+    Dropped: number;
+  };
+  Reader: {
+    DescriptorPressure: boolean;
+    LastDecisionLatencyNanos: number;
+    LastResponseLatencyNanos: number;
+    QueueOverflowCount: number;
+    Fatal: boolean;
+  };
+  FailedResponseCount: number;
 }
 
 export interface IFileQueryProfileStats {
@@ -134,5 +203,31 @@ export class Filequery {
     }).pipe(
       map(results => results as unknown as FileAccessRecord[])
     );
+  }
+
+  getDecisionChart(): Observable<FileDecisionChartPoint[]> {
+    return this.http.get<{ results: FileDecisionChartPoint[] }>(`${this.httpAPI}/v1/filequery/charts/decisions`)
+      .pipe(
+        map(response => response.results || []),
+        catchError(() => of([] as FileDecisionChartPoint[])),
+      );
+  }
+
+  getMountActivity(): Observable<MountActivity[]> {
+    return this.http.get<{ results: MountActivity[] }>(`${this.httpAPI}/v1/filequery/mounts/activity`)
+      .pipe(
+        map(response => response.results || []),
+        catchError(() => of([] as MountActivity[])),
+      );
+  }
+
+  getProtectedMounts(): Observable<ProtectedMountsResponse | null> {
+    return this.http.get<ProtectedMountsResponse>(`${this.httpAPI}/v1/fileaccess/mounts`)
+      .pipe(catchError(() => of(null)));
+  }
+
+  getFileAccessDiagnostics(): Observable<FileAccessDiagnostics | null> {
+    return this.http.get<FileAccessDiagnostics>(`${this.httpAPI}/v1/fileaccess/diagnostics`)
+      .pipe(catchError(() => of(null)));
   }
 }

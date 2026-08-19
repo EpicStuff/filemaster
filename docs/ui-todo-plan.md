@@ -6,9 +6,9 @@ Replace every dashboard surface that relies on the removed network backend with 
 
 The current CSS grid reserves a two-row `feature` area. Delete it and make sure to keep the size/shape/relative positions of the existing cards that are being replaced.
 
-This UI plan targets the backend's current fanotify release after rewrite
-phases 1 and 2. It deliberately excludes operations the current backend cannot
-enforce: the dashboard must present only Open and Execute, not Read or Write.
+Implemented: the dashboard now uses the current fanotify backend and presents
+only Open and Execute. It deliberately excludes operations the current backend
+cannot enforce: Read and Write are not dashboard metrics.
 
 ## Current backend contract
 
@@ -94,8 +94,8 @@ The existing security-lock state remains the primary immediate alert mechanism; 
 1. Delete the empty Features card; do not replace it in its existing slot.
 2. Keep News for future Filemaster news.
 3. Use **Protected Mounts** as the only detailed mount-coverage surface.
-4. Implement this UI after the fanotify backend rewrite; expose only current
-   Open and Execute semantics.
+4. Implemented after the fanotify backend rewrite; exposes only current Open
+   and Execute semantics.
 
 ## Potential backend extensions
 

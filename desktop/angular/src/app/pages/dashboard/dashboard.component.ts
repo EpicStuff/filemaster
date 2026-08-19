@@ -1,483 +1,170 @@
-import { KeyValue } from "@angular/common";
-import { AfterContentInit, AfterViewInit, ChangeDetectionStrategy, ChangeDetectorRef, Component, DestroyRef, ElementRef, OnInit, QueryList, TrackByFunction, ViewChild, ViewChildren, forwardRef, inject } from "@angular/core";
-import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
-import { AppProfileService, BandwidthChartResult, ChartResult, Database, FeatureID, Netquery, PortapiService, SPNService, UserProfile, Verdict } from "@safing/portmaster-api";
-import { SfngDialogService, SfngTabGroupComponent } from "@safing/ui";
-import { Observable, catchError, filter, interval, map, repeat, retry, startWith, throwError } from "rxjs";
-import { ActionIndicatorService } from 'src/app/shared/action-indicator';
-import { DefaultBandwidthChartConfig, SfngNetqueryLineChartComponent } from "src/app/shared/netquery/line-chart/line-chart";
-import { SPNAccountDetailsComponent } from "src/app/shared/spn-account-details";
-import { MAP_HANDLER, MapRef } from "../spn/map-renderer";
-import { CircularBarChartConfig, splitQueryResult } from "src/app/shared/netquery/circular-bar-chart/circular-bar-chart.component";
-import { BytesPipe } from "src/app/shared/pipes/bytes.pipe";
-import { HttpErrorResponse } from "@angular/common/http";
+import { ChangeDetectionStrategy, ChangeDetectorRef, Component, DestroyRef, OnInit, TrackByFunction, inject } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { FileAccessDiagnostics, Filequery, MountActivity, PortapiService, ProtectedMount, ProtectedMountsResponse, QueryResult, Select } from '@safing/portmaster-api';
+import { forkJoin, interval, repeat, startWith } from 'rxjs';
+import { ChartConfig } from 'src/app/shared/netquery/line-chart/line-chart';
 
-interface BlockedProfile {
-  profileID: string;
-  count: number;
+interface ApplicationActivity {
+	profileID: string;
+	name: string;
+	count: number;
 }
 
-interface BandwidthBarData {
-  profile: string;
-  profile_name: string;
-  series: 'sent' | 'received';
-  value: number;
-  sent: number;
-  received: number;
+interface MountRow extends ProtectedMount {
+	activity: MountActivity | null;
 }
 
 interface NewsCard {
-  title: string;
-  body: string;
-  url?: string;
-  footer?: string;
-  progress?: {
-    percent: number;
-    style: string;
-  }
+	title: string;
+	body: string;
+	url?: string;
+	footer?: string;
+	progress?: { percent: number; style: string };
 }
 
-interface News {
-  cards: NewsCard[];
+interface News { cards: NewsCard[]; }
+
+interface DecisionChartPoint {
+	timestamp: number;
+	allowed: number;
+	blocked: number;
 }
 
-const newsResourceIdentifier = "intel/news.yaml"
+const newsResourceIdentifier = 'intel/news.yaml';
+const openChartConfig: ChartConfig<DecisionChartPoint> = {
+	series: {
+		allowed: { lineColor: 'text-green-200', areaColor: 'text-green-100 text-opacity-25' },
+		blocked: { lineColor: 'text-red-200', areaColor: 'text-red-100 text-opacity-25' },
+	},
+	time: { from: -10 * 60 },
+	tooltipFormat: point => `Allowed: ${point.allowed}\nBlocked: ${point.blocked}`,
+	showDataPoints: true,
+	fillEmptyTicks: { interval: 60 },
+};
 
 @Component({
-  selector: 'app-dashboard',
-  changeDetection: ChangeDetectionStrategy.OnPush,
-  styleUrls: ['./dashboard.component.scss'],
-  templateUrl: './dashboard.component.html',
-  providers: [
-    { provide: MAP_HANDLER, useExisting: forwardRef(() => DashboardPageComponent), multi: true },
-  ]
+	selector: 'app-dashboard',
+	changeDetection: ChangeDetectionStrategy.OnPush,
+	styleUrls: ['./dashboard.component.scss'],
+	templateUrl: './dashboard.component.html',
 })
-export class DashboardPageComponent implements OnInit, AfterViewInit {
-  @ViewChildren(SfngNetqueryLineChartComponent)
-  lineCharts!: QueryList<SfngNetqueryLineChartComponent>;
-
-  @ViewChild(SfngTabGroupComponent)
-  carouselTabGroup?: SfngTabGroupComponent;
-
-  private readonly destroyRef = inject(DestroyRef);
-  private readonly netquery = inject(Netquery);
-  private readonly spn = inject(SPNService);
-  private readonly actionIndicator = inject(ActionIndicatorService);
-  private readonly cdr = inject(ChangeDetectorRef);
-  private readonly dialog = inject(SfngDialogService);
-  private readonly portapi = inject(PortapiService)
-
-  resizeObserver!: ResizeObserver;
-
-  blockedProfiles: BlockedProfile[] = []
-
-  connectionsPerCountry: {
-    [country: string]: number
-  } = {};
-
-  get countryNames(): { [country: string]: string } {
-    return this.mapRef?.countryNames || {};
-  }
-
-  bandwidthLineChart: BandwidthChartResult<any>[] = [];
-
-  bandwidthBarData: BandwidthBarData[] = [];
-
-  readonly bandwidthBarConfig: CircularBarChartConfig<BandwidthBarData> = {
-    stack: 'profile_name',
-    seriesKey: 'series',
-    seriesLabel: d => {
-      if (d === 'sent') {
-        return 'Bytes Sent'
-      }
-      return 'Bytes Received'
-    },
-    value: 'value',
-    ticks: 3,
-    colorAsClass: true,
-    series: {
-      'sent': {
-        color: 'text-deepPurple-500 text-opacity-50',
-      },
-      'received': {
-        color: 'text-cyan-800 text-opacity-50',
-      }
-    },
-    formatTick: (tick: number) => {
-      return new BytesPipe().transform(tick, '1.0-0')
-    },
-    formatValue: (stack, series, value, data) => {
-      const bytes = new BytesPipe().transform
-      return `${stack}\nSent: ${bytes(data?.sent)}\nReceived: ${bytes(data?.received)}`
-    },
-    formatStack: (sel, data) => {
-      const bytes = new BytesPipe().transform
-
-      return sel
-        .call(sel => {
-          sel.append("text")
-            .attr("dy", "0")
-            .attr("y", "0")
-            .text(d => d)
-        })
-        .call(sel => {
-          sel.append("text")
-            .attr("y", 0)
-            .attr("dy", "0.8rem")
-            .style("font-size", "0.6rem")
-            .text(d => {
-              const first = data.find(result => result.profile_name === d);
-              return `${bytes(first?.sent)} / ${bytes(first?.received)}`
-            })
-        })
-    }
-  }
-
-  bwChartConfig = DefaultBandwidthChartConfig;
-
-  activeConnections: number = 0;
-  blockedConnections: number = 0;
-  activeProfiles: number = 0;
-  activeIdentities = 0;
-  dataIncoming = 0;
-  dataOutgoing = 0;
-  connectionChart: ChartResult[] = [];
-  tunneldConnectionChart: ChartResult[] = [];
-
-  countriesPerProfile: { [profile: string]: string[] } = {}
-
-  profile: UserProfile | null = null;
-
-  featureBw = false;
-  featureSPN = false;
-
-  hoveredCard: NewsCard | null = null;
-
-  features$ = this.spn.watchEnabledFeatures()
-    .pipe(takeUntilDestroyed());
-
-  trackCountry: TrackByFunction<KeyValue<string, any>> = (_, ctr) => ctr.key;
-  trackApp: TrackByFunction<BlockedProfile> = (_, bp) => bp.profileID;
-
-  data: any;
-
-  news?: News | 'pending' = 'pending';
-
-  private mapRef: MapRef | null = null;
-
-  registerMap(ref: MapRef): void {
-    this.mapRef = ref;
-
-    this.mapRef.onMapReady(() => {
-      this.updateMapCountries();
-    })
-  }
-
-  private updateMapCountries() {
-    // this check is basically to make typescript happy ...
-    if (!this.mapRef) {
-      return;
-    }
-
-    this.mapRef.worldGroup
-      .selectAll('path')
-      .classed('active', (d: any) => {
-        return !!this.connectionsPerCountry[d.properties.iso_a2];
-      });
-  }
-
-  unregisterMap(ref: MapRef): void {
-    this.mapRef = null;
-  }
-
-  onCarouselTabHover(card: NewsCard | null) {
-    this.hoveredCard = card;
-  }
-
-  openAccountDetails() {
-    this.dialog.create(SPNAccountDetailsComponent, {
-      autoclose: true,
-      backdrop: 'light'
-    })
-  }
-
-  onCountryHover(code: string | null) {
-    if (!this.mapRef) {
-      return
-    }
-
-    this.mapRef.worldGroup
-      .selectAll('path')
-      .classed('hover', (d: any) => {
-        return (d.properties.iso_a2 === code);
-      });
-  }
-
-  onProfileHover(profile: string | null) {
-    if (!this.mapRef) {
-      return
-    }
-
-    this.mapRef.worldGroup
-      .selectAll('path')
-      .classed('hover', (d: any) => {
-        if (!profile) {
-          return false;
-        }
-
-        return this.countriesPerProfile[profile]?.includes(d.properties.iso_a2);
-      });
-  }
-
-  ngAfterViewInit(): void {
-    interval(15000)
-      .pipe(
-        takeUntilDestroyed(this.destroyRef),
-        startWith(-1),
-        filter(() => this.hoveredCard === null)
-      )
-      .subscribe(() => {
-        if (!this.carouselTabGroup) {
-          return
-        }
-
-        let next = this.carouselTabGroup.activeTabIndex + 1
-        if (next >= this.carouselTabGroup.tabs!.length) {
-          next = 0
-        }
-
-        this.carouselTabGroup.activateTab(next, "left")
-      })
-  }
-
-  async ngOnInit() {
-    this.portapi.getResource<News>(newsResourceIdentifier)
-      .pipe(
-        repeat({ delay: 60000 }),
-        takeUntilDestroyed(this.destroyRef)
-      )
-      .subscribe({
-        next: response => {
-          this.news = response;
-          this.cdr.markForCheck();
-        },
-        error: () => {
-          this.news = undefined;
-          this.cdr.markForCheck();
-        }
-      });
-
-    this.netquery
-      .batch({
-        bwBarChart: {
-          query: {
-            internal: { $eq: false },
-          },
-          select: [
-            'profile',
-            'profile_name',
-            {
-              $sum: {
-                field: 'bytes_sent',
-                as: 'sent'
-              }
-            },
-            {
-              $sum: {
-                field: 'bytes_received',
-                as: 'received'
-              }
-            },
-          ],
-          groupBy: ['profile', 'profile_name'],
-        },
-
-        profileCount: {
-          select: [
-            'profile',
-            {
-              $count: {
-                field: '*',
-                as: 'totalCount'
-              }
-            }
-          ],
-          query: {
-            verdict: { $in: [Verdict.Block, Verdict.Drop] }
-          },
-          groupBy: ['profile'],
-          databases: [Database.Live]
-        },
-
-        countryStats: {
-          select: [
-            'country',
-            { $count: { field: '*', as: 'totalCount' } },
-            { $sum: { field: 'bytes_sent', as: 'bwout' } },
-            { $sum: { field: 'bytes_received', as: 'bwin' } },
-          ],
-          query: {
-            allowed: { $eq: true },
-          },
-          groupBy: ['country'],
-          databases: [Database.Live]
-        },
-
-        perCountryConns: {
-          select: ['profile', 'country', 'active', { $count: { field: '*', as: 'totalCount' } }],
-          query: {
-            allowed: { $eq: true },
-          },
-          groupBy: ['profile', 'country', 'active'],
-          databases: [Database.Live],
-        },
-
-        exitNodes: {
-          query: { tunneled: { $eq: true }, exit_node: { $ne: "" } },
-          groupBy: ['exit_node'],
-          select: [
-            'exit_node',
-            { $count: { field: '*', as: 'totalCount' } }
-          ],
-          databases: [Database.Live],
-        }
-      })
-      .pipe(
-        repeat({ delay: 10000 }),
-        takeUntilDestroyed(this.destroyRef),
-      )
-      .subscribe(response => {
-        // bandwidth bar chart
-        if (response?.bwBarChart){
-          const barChartData = response.bwBarChart
-            .filter(value => (value.sent + value.received) > 0)
-            .sort((a, b) => (b.sent + b.received) - (a.sent + a.received))
-            .slice(0, 10);
-          this.bandwidthBarData = splitQueryResult(barChartData, ['sent', 'received']) as BandwidthBarData[]
-        }
-
-        // profileCount
-        this.blockedConnections = 0;
-        this.blockedProfiles = [];
-
-        response.profileCount?.forEach(row => {
-          this.blockedConnections += row.totalCount;
-          this.blockedProfiles.push({
-            profileID: row.profile!,
-            count: row.totalCount
-          })
-        });
-
-        // countryStats
-        this.connectionsPerCountry = {};
-        this.dataIncoming = 0;
-        this.dataOutgoing = 0;
-
-        response.countryStats?.forEach(row => {
-          this.dataIncoming += row.bwin;
-          this.dataOutgoing += row.bwout;
-
-          if (row.country === '') {
-            return
-          }
-
-          this.connectionsPerCountry[row.country!] = row.totalCount || 0;
-        })
-
-        this.updateMapCountries()
-
-        // perCountryConns
-        let profiles = new Set<string>();
-
-        this.activeConnections = 0;
-        this.countriesPerProfile = {};
-
-        response.perCountryConns?.forEach(row => {
-          profiles.add(row.profile!);
-
-          if (row.active) {
-            this.activeConnections += row.totalCount;
-          }
-
-          const arr = (this.countriesPerProfile[row.profile!] || []);
-          arr.push(row.country!)
-          this.countriesPerProfile[row.profile!] = arr;
-        });
-
-        this.activeProfiles = profiles.size;
-
-        // exitNodes
-        this.activeIdentities = response.exitNodes?.length || 0;
-        this.cdr.markForCheck();
-      })
-
-
-    // Charts
-
-    this.netquery
-      .activeConnectionChart({})
-      .pipe(
-        repeat({ delay: 10000 }),
-        takeUntilDestroyed(this.destroyRef),
-      )
-      .subscribe(result => {
-        this.connectionChart = result;
-        this.cdr.markForCheck();
-      })
-
-    this.netquery
-      .bandwidthChart({}, undefined, 60)
-      .pipe(
-        repeat({ delay: 10000 }),
-        takeUntilDestroyed(this.destroyRef),
-      )
-      .subscribe(bw => {
-        this.bandwidthLineChart = bw;
-        this.cdr.markForCheck();
-      })
-
-    this.netquery
-      .activeConnectionChart({ tunneled: { $eq: true } })
-      .pipe(
-        repeat({ delay: 10000 }),
-        takeUntilDestroyed(this.destroyRef),
-      )
-      .subscribe(result => {
-        this.tunneldConnectionChart = result;
-        this.cdr.markForCheck();
-      })
-
-    // SPN profile and enabled/allowed features
-
-    this.spn
-      .profile$
-      .pipe(
-        takeUntilDestroyed(this.destroyRef)
-      )
-      .subscribe({
-        next: (profile) => {
-          this.profile = profile || null;
-          this.featureBw = profile?.current_plan?.feature_ids?.includes(FeatureID.Bandwidth) || false;
-          this.featureSPN = profile?.current_plan?.feature_ids?.includes(FeatureID.SPN) || false;
-
-          // force a full change-detection cylce now!
-          this.cdr.detectChanges()
-
-          // force re-draw of the charts after change-detection because the
-          // width may change now.
-          this.lineCharts?.forEach(chart => chart.redraw())
-
-          this.cdr.markForCheck();
-        },
-      })
-  }
-
-  /** Logs the user out of the SPN completely by purgin the user profile from the local storage */
-  logoutCompletely(_: Event) {
-    this.spn.logout(true)
-      .subscribe(this.actionIndicator.httpObserver(
-        'Logout',
-        'You have been logged out of the SPN completely.'
-      ))
-  }
+export class DashboardPageComponent implements OnInit {
+	private readonly destroyRef = inject(DestroyRef);
+	private readonly cdr = inject(ChangeDetectorRef);
+	private readonly filequery = inject(Filequery);
+	private readonly portapi = inject(PortapiService);
+
+	readonly openChartConfig = openChartConfig;
+	readonly executeChartConfig = openChartConfig;
+	fileBlocked = 0;
+	folderBlocked = 0;
+	recentApplications = 0;
+	openAllowed = 0;
+	executeAllowed = 0;
+	blockedApplications: ApplicationActivity[] = [];
+	activeApplications: ApplicationActivity[] = [];
+	openDecisionChart: DecisionChartPoint[] = [];
+	executeDecisionChart: DecisionChartPoint[] = [];
+	mounts: MountRow[] = [];
+	coverage: ProtectedMountsResponse | null = null;
+	diagnostics: FileAccessDiagnostics | null = null;
+	news?: News | 'pending' = 'pending';
+
+	trackApplication: TrackByFunction<ApplicationActivity> = (_, application) => application.profileID;
+	trackMount: TrackByFunction<MountRow> = (_, mount) => `${mount.mount_id}:${mount.mount_path}:${mount.scope_path || ''}`;
+
+	ngOnInit(): void {
+		this.portapi.getResource<News>(newsResourceIdentifier)
+			.pipe(repeat({ delay: 60000 }), takeUntilDestroyed(this.destroyRef))
+			.subscribe({
+				next: response => {
+					this.news = response;
+					this.cdr.markForCheck();
+				},
+				error: () => {
+					this.news = undefined;
+					this.cdr.markForCheck();
+				},
+			});
+
+		interval(10000)
+			.pipe(startWith(0), takeUntilDestroyed(this.destroyRef))
+			.subscribe(() => this.loadDashboard());
+	}
+
+	monitorQuery(query: string): { q: string } { return { q: query }; }
+
+	coverageLabel(): string {
+		switch (this.coverage?.coverage) {
+			case 'protected': return 'Protected';
+			case 'partial': return 'Partial';
+			default: return 'Unknown';
+		}
+	}
+
+	coverageClass(): string { return `coverage-${this.coverage?.coverage || 'unknown'}`; }
+
+	mountLabel(mount: MountRow): string { return mount.mount_path || mount.scope_path || 'Unresolved scope'; }
+
+	mountQuery(mount: MountRow): string {
+		return mount.mount_path ? `mount_path:${JSON.stringify(mount.mount_path)}` : '';
+	}
+
+	diagnosticsClass(kind: 'enforcement' | 'pipeline' | 'delivery'): string {
+		if (!this.diagnostics) return 'health-warning';
+		if (kind === 'enforcement') return this.diagnostics.Warnings.length || this.diagnostics.LifecycleState !== 'running' ? 'health-warning' : 'health-good';
+		if (kind === 'pipeline') {
+			const denied = this.diagnostics.Decision.QueueSaturationDenies + this.diagnostics.Decision.OutstandingBudgetDenies + this.diagnostics.Decision.ProfileAskBudgetDenies;
+			return denied > 0 ? 'health-danger' : 'health-good';
+		}
+		return this.diagnostics.Reader.Fatal || this.diagnostics.Observation.Dropped > 0 || this.diagnostics.FailedResponseCount > 0 ? 'health-danger' : 'health-good';
+	}
+
+	latencyMilliseconds(): string { return this.diagnostics ? (this.diagnostics.Reader.LastResponseLatencyNanos / 1_000_000).toFixed(1) : '—'; }
+
+	private loadDashboard(): void {
+		forkJoin({
+			stats: this.filequery.batch({
+				fileBlocked: { query: { verdict: 'deny' }, select: [{ $count: { field: '*', as: 'count' } }] as unknown as Select[] },
+				folderBlocked: { query: { verdict: 'deny', is_dir: 'true' }, select: [{ $count: { field: '*', as: 'count' } }] as unknown as Select[] },
+				openAllowed: { query: { op: 'open', verdict: 'allow' }, select: [{ $count: { field: '*', as: 'count' } }] as unknown as Select[] },
+				executeAllowed: { query: { op: 'exec', verdict: 'allow' }, select: [{ $count: { field: '*', as: 'count' } }] as unknown as Select[] },
+				blockedApplications: { query: { verdict: 'deny' }, select: ['profile', 'app_name', { $count: { field: '*', as: 'count' } }] as unknown as Select[], groupBy: ['profile', 'app_name'], orderBy: [{ field: 'count', desc: true }], pageSize: 12 },
+				activeApplications: { select: ['profile', 'app_name', { $count: { field: '*', as: 'count' } }] as unknown as Select[], groupBy: ['profile', 'app_name'], orderBy: [{ field: 'count', desc: true }], pageSize: 12 },
+			}),
+			chart: this.filequery.getDecisionChart(),
+			mounts: this.filequery.getProtectedMounts(),
+			activity: this.filequery.getMountActivity(),
+			diagnostics: this.filequery.getFileAccessDiagnostics(),
+		}).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(({ stats, chart, mounts, activity, diagnostics }) => {
+			this.fileBlocked = this.count(stats.fileBlocked);
+			this.folderBlocked = this.count(stats.folderBlocked);
+			this.openAllowed = this.count(stats.openAllowed);
+			this.executeAllowed = this.count(stats.executeAllowed);
+			this.blockedApplications = this.applications(stats.blockedApplications);
+			this.activeApplications = this.applications(stats.activeApplications);
+			this.recentApplications = this.activeApplications.length;
+			this.openDecisionChart = chart.map(point => ({ timestamp: point.timestamp, allowed: point.open_allowed, blocked: point.open_blocked }));
+			this.executeDecisionChart = chart.map(point => ({ timestamp: point.timestamp, allowed: point.execute_allowed, blocked: point.execute_blocked }));
+			this.coverage = mounts;
+			this.mounts = this.combineMounts(mounts, activity);
+			this.diagnostics = diagnostics;
+			this.cdr.markForCheck();
+		});
+	}
+
+	private count(rows: QueryResult[] | undefined): number { return Number(rows?.[0]?.['count'] || 0); }
+
+	private applications(rows: QueryResult[] | undefined): ApplicationActivity[] {
+		return (rows || []).filter(row => row['profile']).map(row => ({ profileID: String(row['profile']), name: String(row['app_name'] || row['profile']), count: Number(row['count'] || 0) }));
+	}
+
+	private combineMounts(coverage: ProtectedMountsResponse | null, activity: MountActivity[]): MountRow[] {
+		const byMount = new Map(activity.map(item => [`${item.mount_id}:${item.mount_path}`, item]));
+		return (coverage?.mounts || []).map(mount => ({ ...mount, activity: byMount.get(`${mount.mount_id}:${mount.mount_path}`) || null })).sort((left, right) => {
+			const rank = { pending: 0, degraded: 1, protected: 2 };
+			const difference = rank[left.status] - rank[right.status];
+			return difference || (right.activity?.last_activity_at || '').localeCompare(left.activity?.last_activity_at || '');
+		});
+	}
 }

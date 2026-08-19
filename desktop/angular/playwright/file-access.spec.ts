@@ -110,18 +110,20 @@ test('prompts for watched file open decisions and records them in the app', asyn
 			});
 		}
 
-		await page.goto(`/settings?api-port=${core.apiPort}`);
-		await expect(page.getByText('Keep File Event History', { exact: true })).toBeVisible();
-		const introDialog = page.locator('sfng-dialog-container').filter({ hasText: 'Filemaster Protects Your Privacy' });
-		if (await introDialog.isVisible()) {
-			await introDialog.locator('svg').first().click();
-			await expect(introDialog).toBeHidden();
+		await page.goto(`/?api-port=${core.apiPort}`);
+		await page.waitForTimeout(500);
+		const dashboardIntroDialog = page.locator('sfng-dialog-container').filter({ hasText: 'Filemaster Protects Your Privacy' });
+		if (await dashboardIntroDialog.isVisible()) {
+			await dashboardIntroDialog.locator('svg').first().click();
+			await expect(dashboardIntroDialog).toBeHidden();
 		}
-
+		await expect(page.getByText('Recent File Activity', { exact: true })).toBeVisible();
+		await expect(page.getByText('Open Decisions over Time', { exact: true })).toBeVisible();
+		await expect(page.getByText('Protected Mounts', { exact: true })).toBeVisible();
+		await expect(page.locator('sfng-netquery-line-chart svg')).toHaveCount(2);
 		if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
 			await page.screenshot({
-				path: path.join(repoRoot, 'tmp', 'file-event-history-settings.png'),
-				fullPage: true,
+				path: path.join(repoRoot, 'tmp', 'file-access-dashboard.png'),
 			});
 		}
 
