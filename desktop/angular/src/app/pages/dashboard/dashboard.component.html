@@ -8,10 +8,10 @@
 
 	<app-dashboard-widget id="stats" label="Recent File Activity">
 		<div class="mini-stats-list">
-			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:open verdict:deny is_dir:false')"><label>File Open Blocked</label><span>{{ fileBlocked }}</span></a>
-			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:open verdict:deny is_dir:true')"><label>Folder Open Blocked</label><span>{{ folderBlocked }}</span></a>
+			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:open verdict:deny is_dir:false')"><label>File Opens Blocked</label><span>{{ fileBlocked }}</span></a>
+			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:open verdict:deny is_dir:true')"><label>Folder Opens Blocked</label><span>{{ folderBlocked }}</span></a>
 			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('groupby:app_name')"><label>Recent Applications</label><span>{{ recentApplications }}</span></a>
-			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:open verdict:allow')"><label>Open Allowed</label><span>{{ openAllowed }}</span></a>
+			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:open verdict:allow')"><label>Opens Allowed</label><span>{{ openAllowed }}</span></a>
 			<div class="mini-stat"><label>Write Allowed</label><span class="todo-value">TODO</span></div>
 			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:exec verdict:allow')"><label>Executes Allowed</label><span>{{ executeAllowed }}</span></a>
 		</div>

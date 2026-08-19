@@ -148,7 +148,7 @@ async function captureEmptyDashboard(page: Page): Promise<void> {
 	}
 
 	await expect(page.getByText('Recent File Activity', { exact: true })).toBeVisible();
-	await expect(page.getByText('File Open Blocked', { exact: true })).toBeVisible();
+	await expect(page.getByText('File Opens Blocked', { exact: true })).toBeVisible();
 	await page.locator('app-dashboard').evaluate(element => element.scrollTo(0, 0));
 
 	if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {

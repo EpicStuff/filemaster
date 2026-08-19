@@ -31,7 +31,7 @@ cannot enforce: Read and Write are not dashboard metrics.
 | `features` / Features (currently empty)      | **Deleted**                       | This SPN package-feature container is removed.                                                                                                |
 | `stats` / Recent Activity                    | **Recent File Activity**          | The six mini-stat positions are retained. Each available count links to the matching Monitor filter.                                         |
 | `news` / News                                | **News**                          | Leave unchanged for future Filemaster news.                                                                                                  |
-| `charts` / connection charts                 | **Open and Execute Decisions over Time** | One combined four-series chart: Open allowed/blocked and Execute allowed/blocked.                                                       |
+| `charts` / connection charts                 | **Open and Execute Decisions over Time** | One combined four-series chart: Opens allowed/blocked and Executes allowed/blocked.                                                     |
 | `blocked` / Recently Blocked Applications    | **Recently Blocked Applications** | Denied file-access records grouped by application; each row opens the corresponding Monitor profile filter.                                  |
 | `countries` / Recent Connections per Country | **Recently Protected Mounts**     | Reuses Portmaster's protection shield: green protected, yellow pending, red degraded; then mount path and literal `-1` placeholder. Degraded/pending mounts sort first, then most recently active protected mounts. Each row links to its Monitor mount filter. Empty state is an empty list. |
 | `connmap` / Recent Connection Countries map  | **Protected Mounts**              | The large slot now contains the complete per-mount coverage and recent-activity table below.                                                  |
@@ -60,10 +60,10 @@ coverage badge warning/red even if its recent activity counts are zero.
 
 | Existing mini-stat  | Replacement              | Notes                                                                          |
 | ------------------- | ------------------------ | ------------------------------------------------------------------------------ |
-| Connections Blocked | **File Open Blocked**    | Denied file Open decisions only.                                               |
-| Active Connections  | **Folder Open Blocked**  | Denied folder Open decisions only.                                             |
+| Connections Blocked | **File Opens Blocked**   | Denied file Open decisions only.                                               |
+| Active Connections  | **Folder Opens Blocked** | Denied folder Open decisions only.                                             |
 | Active Apps         | **Recent Applications**  | Distinct applications with file-access activity in the selected recent window. |
-| Data Received       | **Open Allowed**         | Allowed Open decisions.                                                        |
+| Data Received       | **Opens Allowed**        | Allowed Open decisions.                                                        |
 | Data Sent           | **Write Allowed**        | TODO placeholder; no metric until Write is enforceable.                        |
 | SPN Identities      | **Executes Allowed**     | Allowed File Execute decisions.                                                |
 

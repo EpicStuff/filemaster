@@ -41,7 +41,7 @@ const decisionChartConfig: ChartConfig<DecisionChartPoint> = {
 		executeBlocked: { lineColor: 'text-yellow-300', areaColor: 'text-yellow-100 text-opacity-25' },
 	},
 	time: { from: -10 * 60 },
-	tooltipFormat: point => `Open allowed: ${point.openAllowed}\nOpen blocked: ${point.openBlocked}\nExecute allowed: ${point.executeAllowed}\nExecute blocked: ${point.executeBlocked}`,
+	tooltipFormat: point => `Opens allowed: ${point.openAllowed}\nOpens blocked: ${point.openBlocked}\nExecutes allowed: ${point.executeAllowed}\nExecutes blocked: ${point.executeBlocked}`,
 	showDataPoints: true,
 	fillEmptyTicks: { interval: 60 },
 };

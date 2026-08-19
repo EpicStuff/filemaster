@@ -21,12 +21,16 @@ test('renders empty and populated file-access dashboard states', async ({ page }
 	await page.reload();
 	await closeIntro(page);
 	await page.locator('app-dashboard').evaluate(element => element.scrollTo(0, 0));
-	await expect(page.getByText('File Open Blocked', { exact: true })).toBeVisible();
+	await expect(page.getByText('File Opens Blocked', { exact: true })).toBeVisible();
 	await expect(page.getByText('/protected', { exact: true }).first()).toBeVisible();
 	await expect(page.getByText('Sleep', { exact: true })).toBeVisible();
 	await page.screenshot({ path: path.join(repoRoot, 'tmp', 'file-access-dashboard-activity-top.png') });
 	await page.getByText('Protected Mounts', { exact: true }).scrollIntoViewIfNeeded();
 	await page.screenshot({ path: path.join(repoRoot, 'tmp', 'file-access-dashboard-activity-details.png') });
+	await page.getByText('Enforcement State', { exact: true }).scrollIntoViewIfNeeded();
+	await expect(page.getByText('Decision Pipeline', { exact: true })).toBeVisible();
+	await expect(page.getByText('Event Delivery', { exact: true })).toBeVisible();
+	await page.screenshot({ path: path.join(repoRoot, 'tmp', 'file-access-dashboard-activity-enforcement.png') });
 });
 
 async function closeIntro(page: Page): Promise<void> {
