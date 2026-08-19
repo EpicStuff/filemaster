@@ -9,7 +9,8 @@ test('renders empty and populated file-access dashboard states', async ({ page }
 	await page.goto('/dashboard');
 	await closeIntro(page);
 	await page.locator('app-dashboard').evaluate(element => element.scrollTo(0, 0));
-	await expect(page.getByText('Open and Execute Decisions over Time', { exact: true })).toBeVisible();
+	await expect(page.getByText('Open Decisions over Time', { exact: true })).toBeVisible();
+	await expect(page.getByText('Execute Decisions over Time', { exact: true })).toBeVisible();
 	await expect(page.getByText('Recently Blocked Applications', { exact: true })).toBeVisible();
 
 	await page.unroute('**/filequery/query/batch');

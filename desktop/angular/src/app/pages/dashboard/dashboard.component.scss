@@ -47,8 +47,7 @@ app-dashboard-widget label { @apply text-xs uppercase text-secondary font-light 
 }
 
 .todo-value { @apply text-xs text-tertiary; }
-.combined-chart { @apply block w-full cursor-pointer; }
-.combined-chart sfng-netquery-line-chart { @apply h-48; }
+.decision-chart { @apply cursor-pointer hover:bg-gray-400; }
 .mount-item, .application-item { @apply flex-row items-center gap-2 p-2 cursor-pointer hover:bg-gray-400; }
 .mount-item { @apply justify-between; }
 .mount-shield { @apply flex-shrink-0 w-8 h-8; }

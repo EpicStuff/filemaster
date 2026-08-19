@@ -26,22 +26,18 @@ interface News { cards: NewsCard[]; }
 
 interface DecisionChartPoint {
 	timestamp: number;
-	openAllowed: number;
-	openBlocked: number;
-	executeAllowed: number;
-	executeBlocked: number;
+	allowed: number;
+	blocked: number;
 }
 
 const newsResourceIdentifier = 'intel/news.yaml';
 const decisionChartConfig: ChartConfig<DecisionChartPoint> = {
 	series: {
-		openAllowed: { lineColor: 'text-green-300', areaColor: 'text-green-100 text-opacity-25' },
-		openBlocked: { lineColor: 'text-red-300', areaColor: 'text-red-100 text-opacity-25' },
-		executeAllowed: { lineColor: 'text-blue', areaColor: 'text-deepPurple-700 text-opacity-25' },
-		executeBlocked: { lineColor: 'text-yellow-300', areaColor: 'text-yellow-100 text-opacity-25' },
+		allowed: { lineColor: 'text-green-200', areaColor: 'text-green-100 text-opacity-25' },
+		blocked: { lineColor: 'text-red-200', areaColor: 'text-red-100 text-opacity-25' },
 	},
 	time: { from: -10 * 60 },
-	tooltipFormat: point => `Opens allowed: ${point.openAllowed}\nOpens blocked: ${point.openBlocked}\nExecutes allowed: ${point.executeAllowed}\nExecutes blocked: ${point.executeBlocked}`,
+	tooltipFormat: point => `Allowed: ${point.allowed}\nBlocked: ${point.blocked}`,
 	showDataPoints: true,
 	fillEmptyTicks: { interval: 60 },
 };
@@ -66,7 +62,8 @@ export class DashboardPageComponent implements OnInit {
 	executeAllowed = 0;
 	blockedApplications: ApplicationActivity[] = [];
 	activeApplications: ApplicationActivity[] = [];
-	decisionChart: DecisionChartPoint[] = [];
+	openDecisionChart: DecisionChartPoint[] = [];
+	executeDecisionChart: DecisionChartPoint[] = [];
 	mounts: MountRow[] = [];
 	coverage: ProtectedMountsResponse | null = null;
 	diagnostics: FileAccessDiagnostics | null = null;
@@ -154,7 +151,8 @@ export class DashboardPageComponent implements OnInit {
 			this.blockedApplications = this.applications(stats.blockedApplications);
 			this.activeApplications = this.applications(stats.activeApplications);
 			this.recentApplications = this.activeApplications.length;
-			this.decisionChart = chart.map(point => ({ timestamp: point.timestamp, openAllowed: point.open_allowed, openBlocked: point.open_blocked, executeAllowed: point.execute_allowed, executeBlocked: point.execute_blocked }));
+			this.openDecisionChart = chart.map(point => ({ timestamp: point.timestamp, allowed: point.open_allowed, blocked: point.open_blocked }));
+			this.executeDecisionChart = chart.map(point => ({ timestamp: point.timestamp, allowed: point.execute_allowed, blocked: point.execute_blocked }));
 			this.coverage = mounts;
 			this.mounts = this.combineMounts(mounts, activity);
 			this.diagnostics = diagnostics;

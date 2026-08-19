@@ -17,10 +17,17 @@
 		</div>
 	</app-dashboard-widget>
 
-	<app-dashboard-widget id="charts" label="Open and Execute Decisions over Time">
-		<a class="combined-chart" routerLink="/monitor">
-			<sfng-netquery-line-chart class="w-full h-48" [config]="decisionChartConfig" [data]="decisionChart"></sfng-netquery-line-chart>
-		</a>
+	<app-dashboard-widget id="charts">
+		<div class="mini-stats-list">
+			<a class="mini-stat decision-chart" routerLink="/monitor" [queryParams]="monitorQuery('op:open')">
+				<label>Open Decisions over Time</label>
+				<sfng-netquery-line-chart class="w-full !h-36" [config]="decisionChartConfig" [data]="openDecisionChart"></sfng-netquery-line-chart>
+			</a>
+			<a class="mini-stat decision-chart" routerLink="/monitor" [queryParams]="monitorQuery('op:exec')">
+				<label>Execute Decisions over Time</label>
+				<sfng-netquery-line-chart class="w-full !h-36" [config]="decisionChartConfig" [data]="executeDecisionChart"></sfng-netquery-line-chart>
+			</a>
+		</div>
 	</app-dashboard-widget>
 
 	<app-dashboard-widget class="flex-grow" id="countries" label="Recently Protected Mounts">

@@ -131,9 +131,10 @@ test('prompts for watched file open decisions and records them in the app', asyn
 			await expect(dashboardIntroDialog).toBeHidden();
 		}
 		await expect(page.getByText('Recent File Activity', { exact: true })).toBeVisible();
-		await expect(page.getByText('Open and Execute Decisions over Time', { exact: true })).toBeVisible();
+		await expect(page.getByText('Open Decisions over Time', { exact: true })).toBeVisible();
+		await expect(page.getByText('Execute Decisions over Time', { exact: true })).toBeVisible();
 		await expect(page.getByText('Protected Mounts', { exact: true })).toBeVisible();
-		await expect(page.locator('sfng-netquery-line-chart svg')).toHaveCount(1);
+		await expect(page.locator('sfng-netquery-line-chart svg')).toHaveCount(2);
 	} finally {
 		await stopFilemaster(core);
 	}
