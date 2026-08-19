@@ -51,7 +51,8 @@ app-dashboard-widget label { @apply text-xs uppercase text-secondary font-light 
 .combined-chart sfng-netquery-line-chart { @apply h-48; }
 .mount-item, .application-item { @apply flex-row items-center gap-2 p-2 cursor-pointer hover:bg-gray-400; }
 .mount-item { @apply justify-between; }
-.mount-path { @apply text-xs text-secondary truncate; }
+.mount-shield { @apply flex-shrink-0 w-8 h-8; }
+.mount-path { @apply flex-grow text-xs text-secondary truncate; }
 .mount-placeholder { @apply text-lg text-blue; }
 .mount-status, .coverage-badge { @apply inline-flex self-start mt-1 px-2 py-0.5 rounded text-xxs uppercase; }
 .mount-status.protected, .coverage-protected { @apply bg-green-200 text-gray-100; }

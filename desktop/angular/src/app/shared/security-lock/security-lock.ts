@@ -22,21 +22,39 @@ interface SecurityOption {
   ]
 })
 export class SecurityLockComponent implements OnInit {
-  private destroyRef = inject(DestroyRef);
+	private destroyRef = inject(DestroyRef);
+	private forcedSeverity?: 'normal' | 'warning' | 'error';
 
   lockLevel: SecurityOption | null = null;
 
   /** The display mode for the security lock */
-  @Input()
-  mode: 'small' | 'full' = 'full'
+	@Input()
+	mode: 'small' | 'full' = 'full'
+
+	/**
+	 * Overrides the global protection state when the shield represents a
+	 * specific resource, such as a protected mount.
+	 */
+	@Input()
+	set severity(value: 'normal' | 'warning' | 'error' | undefined) {
+		this.forcedSeverity = value;
+		if (value) {
+			this.lockLevel = this.optionForSeverity(value);
+			this.cdr.markForCheck();
+		}
+	}
 
   constructor(
     private statusService: StatusService,
     private cdr: ChangeDetectorRef,
   ) { }
 
-  ngOnInit(): void {
-      this.statusService.status$.subscribe(status => {
+	ngOnInit(): void {
+		if (this.forcedSeverity) {
+			return;
+		}
+
+		this.statusService.status$.subscribe(status => {
         // By default the lock is green and we are "Secure"
         this.lockLevel = {
           level: SecurityLevel.Normal,
@@ -74,6 +92,17 @@ export class SecurityLockComponent implements OnInit {
         }
 
         this.cdr.markForCheck();
-      });
-  }
+		});
+	}
+
+	private optionForSeverity(severity: 'normal' | 'warning' | 'error'): SecurityOption {
+		switch (severity) {
+			case 'warning':
+				return { level: SecurityLevel.High, class: 'text-yellow-300', displayText: 'Warning' };
+			case 'error':
+				return { level: SecurityLevel.Extreme, class: 'text-red-300', displayText: 'Insecure' };
+			default:
+				return { level: SecurityLevel.Normal, class: 'text-green-300', displayText: 'Secure' };
+		}
+	}
 }

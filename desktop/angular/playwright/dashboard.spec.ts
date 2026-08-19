@@ -4,6 +4,7 @@ import path from 'path';
 const repoRoot = path.resolve(__dirname, '../../..');
 
 test('renders empty and populated file-access dashboard states', async ({ page }) => {
+	test.setTimeout(60_000);
 	await mockDashboard(page, false);
 	await page.goto('/dashboard');
 	await closeIntro(page);

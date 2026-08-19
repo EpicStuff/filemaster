@@ -108,6 +108,14 @@ export class DashboardPageComponent implements OnInit {
 
 	mountLabel(mount: MountRow): string { return mount.mount_path || mount.scope_path || 'Unresolved scope'; }
 
+	mountShieldSeverity(mount: MountRow): 'normal' | 'warning' | 'error' {
+		switch (mount.status) {
+			case 'protected': return 'normal';
+			case 'pending': return 'warning';
+			default: return 'error';
+		}
+	}
+
 	mountQuery(mount: MountRow): string {
 		return mount.mount_path ? `mount_path:${JSON.stringify(mount.mount_path)}` : '';
 	}
