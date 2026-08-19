@@ -70,7 +70,8 @@ app-dashboard-widget label { @apply text-xs uppercase text-secondary font-light 
 .coverage-details { @apply flex flex-col gap-1 pt-3 text-xs text-yellow-100; }
 .application-item { @apply justify-between; }
 .application-item span, .application-list span { @apply flex-grow text-xs text-secondary truncate; }
-.application-item strong, .application-list strong { @apply text-blue; }
+.application-item strong { @apply text-blue font-normal; }
+.application-list strong { @apply text-blue; }
 .application-list { @apply flex flex-col gap-2 list-none; }
 .application-list li { @apply flex-row items-center gap-3 p-3 cursor-pointer hover:bg-gray-400; }
 .operation-summary { @apply grid h-full gap-3; grid-template-columns: repeat(2, minmax(0, 1fr)); }
