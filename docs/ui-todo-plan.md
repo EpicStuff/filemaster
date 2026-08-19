@@ -47,7 +47,7 @@ badge: **Protected**, **Partial**, or **Unknown**, followed by active and
 missing mount counts. Its table contains:
 
 
-| Mount path | Coverage  | Open allowed | Open blocked | Execute allowed | Execute blocked |
+| Mount path | Coverage  | Opens allowed | Opens blocked | Executes allowed | Executes blocked |
 | ---------- | --------- | ------------ | ------------ | --------------- | --------------- |
 | `/home`    | Protected | 128          | 3            | 4               | 0               |
 
@@ -64,7 +64,7 @@ coverage badge warning/red even if its recent activity counts are zero.
 | Active Connections  | **Folder Open Blocked**  | Denied folder Open decisions only.                                             |
 | Active Apps         | **Recent Applications**  | Distinct applications with file-access activity in the selected recent window. |
 | Data Received       | **Open Allowed**         | Allowed Open decisions.                                                        |
-| Data Sent           | **future write allowed** | Leave blank or show TODO text; no metric until Write is enforceable.           |
+| Data Sent           | **Write Allowed**        | TODO placeholder; no metric until Write is enforceable.                        |
 | SPN Identities      | **Executes Allowed**     | Allowed File Execute decisions.                                                |
 
 ## Bottom enforcement cards — ✅ Completed

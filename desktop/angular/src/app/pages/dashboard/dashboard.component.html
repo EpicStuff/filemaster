@@ -12,7 +12,7 @@
 			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:open verdict:deny is_dir:true')"><label>Folder Open Blocked</label><span>{{ folderBlocked }}</span></a>
 			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('groupby:app_name')"><label>Recent Applications</label><span>{{ recentApplications }}</span></a>
 			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:open verdict:allow')"><label>Open Allowed</label><span>{{ openAllowed }}</span></a>
-			<div class="mini-stat"><label>Future Write Allowed</label><span class="todo-value">TODO</span></div>
+			<div class="mini-stat"><label>Write Allowed</label><span class="todo-value">TODO</span></div>
 			<a class="mini-stat" routerLink="/monitor" [queryParams]="monitorQuery('op:exec verdict:allow')"><label>Executes Allowed</label><span>{{ executeAllowed }}</span></a>
 		</div>
 	</app-dashboard-widget>
@@ -49,7 +49,7 @@
 		</div>
 		<div class="mount-table-wrap">
 			<table class="mount-table">
-				<thead><tr><th>Mount path</th><th>Coverage</th><th>Open allowed</th><th>Open blocked</th><th>Execute allowed</th><th>Execute blocked</th></tr></thead>
+				<thead><tr><th>Mount path</th><th>Coverage</th><th>Opens allowed</th><th>Opens blocked</th><th>Executes allowed</th><th>Executes blocked</th></tr></thead>
 				<tbody>
 					<tr *ngFor="let mount of mounts; trackBy: trackMount" [routerLink]="['/monitor']" [queryParams]="monitorQuery(mountQuery(mount))">
 						<td>{{ mountLabel(mount) }}</td><td><span class="mount-status" [class]="'mount-status ' + mount.status">{{ mount.status }}</span></td>
