@@ -10,7 +10,6 @@ test('renders empty and populated file-access dashboard states', async ({ page }
 	await page.locator('app-dashboard').evaluate(element => element.scrollTo(0, 0));
 	await expect(page.getByText('Open and Execute Decisions over Time', { exact: true })).toBeVisible();
 	await expect(page.getByText('Recently Blocked Applications', { exact: true })).toBeVisible();
-	await page.screenshot({ path: path.join(repoRoot, 'tmp', 'file-access-dashboard-empty.png') });
 
 	await page.unroute('**/filequery/query/batch');
 	await page.unroute('**/filequery/charts/decisions');

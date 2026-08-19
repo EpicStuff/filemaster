@@ -32,6 +32,19 @@ type AccessAttempt = {
 
 test.describe.configure({ mode: 'serial' });
 
+test('renders an empty dashboard from a cleared Filemaster database', async ({ page }) => {
+	test.setTimeout(120_000);
+
+	const core = await startFilemaster(sourceMode, test.info().workerIndex);
+	try {
+		await page.goto(`/?api-port=${core.apiPort}`);
+		await expect(page.locator('app-root')).toBeAttached();
+		await captureEmptyDashboard(page);
+	} finally {
+		await stopFilemaster(core);
+	}
+});
+
 test('prompts for watched file open decisions and records them in the app', async ({ page }) => {
 	test.setTimeout(180_000);
 
@@ -121,16 +134,29 @@ test('prompts for watched file open decisions and records them in the app', asyn
 		await expect(page.getByText('Open and Execute Decisions over Time', { exact: true })).toBeVisible();
 		await expect(page.getByText('Protected Mounts', { exact: true })).toBeVisible();
 		await expect(page.locator('sfng-netquery-line-chart svg')).toHaveCount(1);
-		if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
-			await page.screenshot({
-				path: path.join(repoRoot, 'tmp', 'file-access-dashboard-empty.png'),
-			});
-		}
-
 	} finally {
 		await stopFilemaster(core);
 	}
 });
+
+async function captureEmptyDashboard(page: Page): Promise<void> {
+	await page.waitForTimeout(500);
+	const intro = page.locator('sfng-dialog-container').filter({ hasText: 'Filemaster Protects Your Privacy' });
+	if (await intro.isVisible()) {
+		await intro.locator('svg').first().click();
+		await expect(intro).toBeHidden();
+	}
+
+	await expect(page.getByText('Recent File Activity', { exact: true })).toBeVisible();
+	await expect(page.getByText('File Open Blocked', { exact: true })).toBeVisible();
+	await page.locator('app-dashboard').evaluate(element => element.scrollTo(0, 0));
+
+	if (process.env.PLAYWRIGHT_FILEACCESS_SCREENSHOT === 'true') {
+		await page.screenshot({ path: path.join(repoRoot, 'tmp', 'file-access-dashboard-empty-top.png') });
+		await page.getByText('Protected Mounts', { exact: true }).scrollIntoViewIfNeeded();
+		await page.screenshot({ path: path.join(repoRoot, 'tmp', 'file-access-dashboard-empty-details.png') });
+	}
+}
 
 async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Promise<TestCore> {
 	const apiPort = await getFreePort();
@@ -140,7 +166,7 @@ async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Prom
 	const watchDir = path.join(root, 'watched');
 	const socketPath = path.join(root, 'fake-fanotify.sock');
 
-	await mkdir(dataDir, { recursive: true });
+	await clearFilemasterDataDirectory(dataDir);
 	await mkdir(binDir, { recursive: true });
 	await mkdir(watchDir, { recursive: true });
 	if (mode === 'real') {
@@ -228,6 +254,11 @@ async function startFilemaster(mode: 'fake' | 'real', workerIndex: number): Prom
 				`portmaster-core output:\n${output.join('').slice(-12_000)}`,
 		);
 	}
+}
+
+async function clearFilemasterDataDirectory(dataDir: string): Promise<void> {
+	await rm(dataDir, { recursive: true, force: true });
+	await mkdir(dataDir, { recursive: true });
 }
 
 async function runCommand(command: string, args: string[]): Promise<void> {
