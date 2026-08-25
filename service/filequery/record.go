@@ -17,7 +17,7 @@ type FileAccessRecord struct {
 	AppName string    `sqlite:"app_name"`
 
 	// MountID / MountPath attribute the record to the protected mount that was
-	// active when the decision occurred (backend-todo-plan Phase 2.5). A zero
+	// active when the decision occurred. A zero
 	// MountID with an empty MountPath means the mount was unknown (attribution
 	// unavailable); it is stored explicitly rather than inferred later.
 	MountID   int    `sqlite:"mount_id"`

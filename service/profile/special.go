@@ -188,7 +188,7 @@ func createSpecialProfile(profileID string, path string) *Profile {
 		})
 
 	case SystemdProfileID:
-		// The internal write list is inactive until LSM support exists.
+		// The internal write list is inactive until a supporting backend exists.
 		return New(&Profile{
 			ID:               SystemdProfileID,
 			Source:           SourceLocal,

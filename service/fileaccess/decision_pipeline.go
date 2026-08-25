@@ -50,8 +50,8 @@ func (c DecisionPipelineConfig) normalized() DecisionPipelineConfig {
 	return c
 }
 
-// DecisionPipelineDiagnostics exposes bounded-pipeline state without adding
-// the broader metrics surface planned for Phase 8.
+// DecisionPipelineDiagnostics exposes bounded-pipeline state. It is
+// deliberately narrower than a general metrics surface.
 type DecisionPipelineDiagnostics struct {
 	QueueDepth              int
 	PeakQueueDepth          int64

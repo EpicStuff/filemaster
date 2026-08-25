@@ -162,20 +162,20 @@ func registerConfiguration() error { //nolint:maintidx
 		order int
 		// hidden marks a list retained internally but not exposed in the normal
 		// UI. Write is hidden in the current release: no runtime event populates
-		// or consults it (writes need LSM), but its storage and plumbing are kept
+		// or consults it (writes need a supporting backend), but its storage and plumbing are kept
 		// so the future Write evaluation engine can be built and unit-tested
-		// against it before enforcement lands (backend-todo-plan sections 2 and 16).
+		// against it before enforcement lands.
 		hidden bool
 		into   *config.StringArrayOption
 	}{
 		// "Access" (not "Read") because the current backend decides at open time
 		// via FAN_OPEN_PERM and cannot tell read from write; the list governs any
-		// open of a file or folder (backend-todo-plan sections 2 and 4).
+		// open of a file or folder.
 		{"Access Rules", CfgOptionFileAccessReadRulesKey, "Rules governing whether this application may open files and folders — for reading, writing, or both." + ruleSyntax, cfgOptionFileAccessReadRulesOrder, false, &cfgOptionFileAccessReadRules},
 		{"Write Rules", CfgOptionFileAccessWriteRulesKey, "Rules governing content changes to files by this application." + ruleSyntax, cfgOptionFileAccessWriteRulesOrder, true, &cfgOptionFileAccessWriteRules},
 		// Files and folders share one Execute list, so folder entries are accepted,
-		// but folder Execute (traversal) is not enforceable without LSM and has no
-		// effect in the current release (backend-todo-plan section 2).
+		// but folder Execute (traversal) is not enforceable by the current backend
+		// and has no effect in the current release.
 		{"Execute Rules", CfgOptionFileAccessExecRulesKey, "Rules governing whether this application may execute files. Folder entries are accepted but have no effect in the current release." + ruleSyntax, cfgOptionFileAccessExecRulesOrder, false, &cfgOptionFileAccessExecRules},
 	}
 	for _, opt := range fileAccessRuleOptions {

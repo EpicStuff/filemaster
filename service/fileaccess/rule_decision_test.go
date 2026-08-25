@@ -1,6 +1,10 @@
 package fileaccess
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/safing/portmaster/service/profile"
+)
 
 // literalRule builds a literal rule without glob metacharacters. The operation is no longer carried by the
 // rule; it is carried by which list the rule is placed in.
@@ -13,16 +17,25 @@ func globRule(v Verdict, pattern string) PathRule {
 	return PathRule{Pattern: pattern, Verdict: v}
 }
 
-// decisionSnapshot assembles a snapshot from the three per-operation rule lists,
-// giving each list the shared default action. Access/Read rules go in read,
-// Write/Create/Delete rules in write, Execute rules in exec -- the same routing
-// DecisionSnapshot.rulesFor performs.
+// decisionSnapshot assembles a snapshot from the three per-operation rule lists.
+// Access/Read rules go in read, Write/Create/Delete rules in write, Execute
+// rules in exec -- the same routing DecisionSnapshot.rulesFor performs. The
+// no-match default is set on the snapshot, which is the only place decisions
+// read it from.
 func decisionSnapshot(def Verdict, read, write, exec []PathRule) *DecisionSnapshot {
 	return &DecisionSnapshot{
-		Read:  PathRules{Rules: read, Default: def},
-		Write: PathRules{Rules: write, Default: def},
-		Exec:  PathRules{Rules: exec, Default: def},
+		DefaultAction: defaultActionFor(def),
+		Read:          PathRules{Rules: read},
+		Write:         PathRules{Rules: write},
+		Exec:          PathRules{Rules: exec},
 	}
+}
+
+func defaultActionFor(v Verdict) uint8 {
+	if v == VerdictAllow {
+		return profile.DefaultActionPermit
+	}
+	return profile.DefaultActionBlock
 }
 
 // TestGlobalRulesStackBeneathProfileRules exercises the ordering scopedRuleLists
@@ -38,8 +51,7 @@ func TestGlobalRulesStackBeneathProfileRules(t *testing.T) {
 	// Same composition scopedRuleLists performs for the read list: profile rules,
 	// then global. Drive it through a snapshot's read list.
 	combined := append(append([]string(nil), profileRead...), globalRead...)
-	snapshot := &DecisionSnapshot{Read: ParseRules(combined)}
-	snapshot.Read.Default = VerdictDeny
+	snapshot := &DecisionSnapshot{Read: ParseRules(combined), DefaultAction: profile.DefaultActionBlock}
 
 	// Profile rule wins over the conflicting global rule (first match): deny is
 	// neither the global verdict (allow) nor the default (deny would be ambiguous,

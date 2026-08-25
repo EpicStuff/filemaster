@@ -836,8 +836,8 @@ func (s *fanotifySource) pathInActiveScope(path string) bool {
 
 // publishMountAttributionLocked refreshes the lock-free mount snapshot used for
 // event attribution. While reconciliation is pending the snapshot is cleared so
-// attribution reports unknown instead of trusting a mount set that is changing
-// (backend-todo-plan Phase 2.5). Callers hold marksMu.
+// attribution reports unknown instead of trusting a mount set that is changing.
+// Callers hold marksMu.
 func (s *fanotifySource) publishMountAttributionLocked() {
 	if s.pending {
 		s.activeMounts.Store(nil)

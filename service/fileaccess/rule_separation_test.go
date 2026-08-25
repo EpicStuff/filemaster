@@ -28,7 +28,7 @@ func (s *recordingStore) AppendRule(op FileOp, entry string) error {
 // This file covers the separated per-operation rule-list model: a DecisionSnapshot
 // holds independent Access(/Read), Write and Execute lists sharing one default,
 // and every decision routes through DecisionSnapshot to the list its operation
-// selects. See docs/backend-todo-plan.md and rule_scope.go.
+// selects. See docs/backend-features.md and rule_scope.go.
 
 // snapshotOf builds a snapshot with the given per-operation stored rule strings
 // and a Permit default (so an unmatched, supported operation resolves to Allow
@@ -154,6 +154,68 @@ func TestDecideOperationUsesSharedDefault(t *testing.T) {
 	ask := newDecisionSnapshot("p", "local", profile.DefaultActionAsk, ruleLists{}, 1)
 	if got := ask.DecideOperation("/x", DecisionWrite, false); got != VerdictDeny {
 		t.Fatalf("ask default: DecideOperation = %v, want deny (fail closed)", got)
+	}
+}
+
+func TestDecideOperationDefaultOnDirectlyConstructedSnapshot(t *testing.T) {
+	// A snapshot built as a struct literal (profile_handler.go does this when no
+	// parsed snapshot is available) has zero-value rule lists. The no-match
+	// verdict must still come from DefaultAction; the zero Verdict is Allow, so
+	// reading a per-list default here would silently fail open.
+	block := &DecisionSnapshot{ProfileID: "p", Source: "local", DefaultAction: profile.DefaultActionBlock}
+	for _, op := range []DecisionOp{DecisionAccess, DecisionRead, DecisionWrite, DecisionCreate, DecisionDelete, DecisionExecute} {
+		if got := block.DecideOperation("/anything", op, false); got != VerdictDeny {
+			t.Fatalf("block default, direct snapshot: DecideOperation(%s) = %v, want deny", op, got)
+		}
+	}
+	ask := &DecisionSnapshot{ProfileID: "p", Source: "local", DefaultAction: profile.DefaultActionAsk}
+	if got := ask.DecideOperation("/anything", DecisionAccess, false); got != VerdictDeny {
+		t.Fatalf("ask default, direct snapshot: DecideOperation = %v, want deny (fail closed)", got)
+	}
+	permit := &DecisionSnapshot{ProfileID: "p", Source: "local", DefaultAction: profile.DefaultActionPermit}
+	if got := permit.DecideOperation("/anything", DecisionAccess, false); got != VerdictAllow {
+		t.Fatalf("permit default, direct snapshot: DecideOperation = %v, want allow", got)
+	}
+}
+
+func TestUnknownDecisionOpFailsClosed(t *testing.T) {
+	// An unrecognized DecisionOp must not inherit Access/Read policy: it has to
+	// deny even where the read list holds a matching allow rule.
+	s := newDecisionSnapshot("p", "local", profile.DefaultActionPermit,
+		ruleLists{read: []string{`+ /secret`}, write: []string{`+ /secret`}, exec: []string{`+ /secret`}}, 1)
+	for _, op := range []DecisionOp{DecisionOp(200), DecisionDelete + 1} {
+		if _, ok := op.scopeOp(); ok {
+			t.Fatalf("scopeOp(%d) reported a list for an unknown operation", op)
+		}
+		if got := s.DecideOperation("/secret", op, false); got != VerdictDeny {
+			t.Fatalf("unknown DecisionOp(%d): DecideOperation = %v, want deny", op, got)
+		}
+	}
+}
+
+func TestEveryDecisionOpRoutesToAList(t *testing.T) {
+	// The counterpart to the check above: every declared operation must map to a
+	// list, so adding one without updating scopeOp fails here rather than
+	// silently inheriting Access/Read policy.
+	want := map[DecisionOp]FileOp{
+		DecisionAccess:  OpRead,
+		DecisionRead:    OpRead,
+		DecisionWrite:   OpWrite,
+		DecisionCreate:  OpWrite,
+		DecisionDelete:  OpWrite,
+		DecisionExecute: OpExec,
+	}
+	for op, expect := range want {
+		got, ok := op.scopeOp()
+		if !ok {
+			t.Fatalf("scopeOp(%s) reported unsupported", op)
+		}
+		if got != expect {
+			t.Fatalf("scopeOp(%s) = %v, want %v", op, got, expect)
+		}
+	}
+	if op := DecisionOp(len(want)); op.String() != "unknown" {
+		t.Fatalf("DecisionOp(%d) is declared but missing from this test", op)
 	}
 }
 

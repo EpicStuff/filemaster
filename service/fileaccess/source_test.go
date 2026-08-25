@@ -6,8 +6,8 @@ import (
 )
 
 // fakeSource is a Source that delivers a fixed list of events to the
-// handler and records the verdicts. Useful for driving phase-2/phase-3
-// logic in environments where fanotify can't run.
+// handler and records the verdicts. Useful for driving decision logic in
+// environments where fanotify can't run.
 type fakeSource struct {
 	events []FileEvent
 

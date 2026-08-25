@@ -22,14 +22,11 @@ type DecisionSnapshot struct {
 }
 
 func newDecisionSnapshot(profileID, source string, defaultAction uint8, lists ruleLists, revision uint64) *DecisionSnapshot {
-	// Each parsed list carries the shared default resolved to a Verdict, so the
-	// non-prompt DecideOperation engine falls back to the profile's own default
-	// (not a hardcoded allow) and the three lists cannot diverge from each other.
-	def := verdictFromDefaultAction(defaultAction)
+	// No per-list default is stamped here: every snapshot decision path resolves
+	// no-match from DefaultAction, so the lists cannot diverge from it.
 	read := ParseRules(lists.read)
 	write := ParseRules(lists.write)
 	exec := ParseRules(lists.exec)
-	read.Default, write.Default, exec.Default = def, def, def
 	return &DecisionSnapshot{
 		ProfileID:     profileID,
 		Source:        source,
@@ -42,10 +39,10 @@ func newDecisionSnapshot(profileID, source string, defaultAction uint8, lists ru
 }
 
 // verdictFromDefaultAction resolves the shared profile default action to the
-// Verdict the non-prompt DecideOperation engine applies on no match. Permit
-// allows; every other action (Block, Ask, NotSet) fails closed to Deny, since a
-// non-prompt operation cannot surface an Ask prompt. The runtime prompt path does
-// not use this -- it applies DefaultAction directly and can prompt on Ask.
+// Verdict DecideOperation applies on no match. Permit allows; every other action
+// (Block, Ask, NotSet) fails closed to Deny, since a non-prompt operation cannot
+// surface an Ask prompt. The runtime prompt path does not use this -- it applies
+// DefaultAction directly and can prompt on Ask.
 func verdictFromDefaultAction(defaultAction uint8) Verdict {
 	if defaultAction == profile.DefaultActionPermit {
 		return VerdictAllow

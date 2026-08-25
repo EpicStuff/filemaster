@@ -1,6 +1,5 @@
-// Package fileaccess intercepts file-access syscalls and (eventually)
-// turns them into per-app prompts. Phase 1 is a hard-coded scaffold
-// proving the kernel plumbing works; rules and prompts come later.
+// Package fileaccess intercepts file-access syscalls and turns them into
+// per-app rule decisions and prompts.
 package fileaccess
 
 import (
@@ -133,7 +132,7 @@ func (fa *FileAccess) hydrateSelfProfile() error {
 }
 
 // Start starts the module: build the platform source and run it under a
-// worker. The phase-1 default handler logs and allows every event.
+// worker. The default handler logs and allows every event.
 func (fa *FileAccess) Start() error {
 	if fa.lifecycle == nil {
 		fa.lifecycle = NewPipelineLifecycle()
@@ -261,8 +260,8 @@ func (fa *FileAccess) Stop() error {
 	return fa.Shutdown(ctx)
 }
 
-// SetHandler swaps the verdict handler. Intended for tests and for the
-// phase-3 wiring where the profile/prompt path takes over from allowAll.
+// SetHandler swaps the verdict handler. Used by tests and by module wiring,
+// where the profile/prompt path takes over from allowAll.
 // Must be called before Start.
 func (fa *FileAccess) SetHandler(h Handler) {
 	fa.handler = h

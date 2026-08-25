@@ -40,7 +40,7 @@ type fanotifySource struct {
 	watchRules    *watchRuleSnapshot
 	// activeMounts is a lock-free snapshot of the currently marked mounts, sorted
 	// longest mount point first, used to attribute events to a mount at event
-	// time (backend-todo-plan Phase 2.5). It is nil while reconciliation is
+	// time. It is nil while reconciliation is
 	// pending so attribution reports unknown rather than trusting a stale mount.
 	activeMounts atomic.Pointer[[]mountInfo]
 	diagnostics  MountDiagnostics
@@ -138,7 +138,7 @@ func currentDescriptorLimit() (int64, error) {
 
 // SetDescriptorBudget limits fanotify event descriptors below the RLIMIT
 // derived capacity. It is called before Run starts and can never enlarge the
-// safety margin reserved by Phase 3.
+// safety margin reserved at startup.
 func (s *fanotifySource) SetDescriptorBudget(limit int64) {
 	if limit > 0 && limit < s.descriptorLimit {
 		s.descriptorLimit = limit
@@ -392,8 +392,8 @@ func (s *fanotifySource) ReaderDiagnostics() ReaderDiagnostics {
 // only opens: OPEN_PERM (File/Folder Access) and OPEN_EXEC_PERM (File Execute).
 // FAN_ACCESS_PERM was removed with the InterceptReads option -- it only fired on
 // reads through an already-open descriptor, could not distinguish Read from
-// Write, and added no enforcement over the open decision (see backend-todo-plan
-// section 4). Read vs Write splitting is a future, LSM-only capability.
+// Write, and added no enforcement over the open decision. Read vs Write
+// splitting requires a future backend that can enforce it.
 func resolveMarkMask() uint64 {
 	return uint64(unix.FAN_OPEN_PERM | unix.FAN_OPEN_EXEC_PERM | unix.FAN_ONDIR)
 }

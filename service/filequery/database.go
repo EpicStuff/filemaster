@@ -139,8 +139,8 @@ func (db *Database) ApplyMigrations() error {
 	}
 
 	// CREATE TABLE IF NOT EXISTS never alters an existing table, so databases
-	// created before a column was introduced (e.g. the Phase 2.5 mount_id /
-	// mount_path columns) must gain it via ALTER TABLE ADD COLUMN.
+	// created before a column was introduced (e.g. the mount_id / mount_path
+	// columns) must gain it via ALTER TABLE ADD COLUMN.
 	if err := db.ensureColumns(); err != nil {
 		return err
 	}

@@ -96,7 +96,7 @@ func (c *PromptCoordinator) RulePersistence() *RulePersistence {
 	return c.persistence
 }
 
-// FlushPermanentRules is the bounded persistence-only hook for Phase 7. It
+// FlushPermanentRules is the bounded persistence-only flush hook. It
 // neither closes prompt admission nor drains fanotify ownership.
 func (c *PromptCoordinator) FlushPermanentRules(ctx context.Context) error {
 	if c.persistence == nil {

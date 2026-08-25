@@ -98,7 +98,7 @@ type FileEvent struct {
 	IsDir bool // FAN_ONDIR for real fanotify sources.
 
 	// MountID / MountPath attribute the event to the protected mount that was
-	// active when the decision occurred (backend-todo-plan Phase 2.5). The
+	// active when the decision occurred. The
 	// fanotify source fills them from its mount-reconciliation state; other
 	// sources leave them zero. A zero MountID with an empty MountPath means the
 	// mount is unknown (e.g. reconciliation was pending or no active mount
@@ -134,6 +134,6 @@ type HandlerFunc func(context.Context, *FileEvent) Verdict
 // Decide implements Handler.
 func (f HandlerFunc) Decide(ctx context.Context, e *FileEvent) Verdict { return f(ctx, e) }
 
-// allowAll is the phase-1 default handler -- log and let everything
-// through. Phase 3 swaps this for the profile/endpoint/prompt path.
+// allowAll is the initial handler -- log and let everything through. Module
+// wiring replaces it with the profile/prompt path via SetHandler.
 var allowAll HandlerFunc = func(context.Context, *FileEvent) Verdict { return VerdictAllow }

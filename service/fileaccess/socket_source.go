@@ -101,7 +101,7 @@ func (s *socketSource) handleConn(ctx context.Context, conn net.Conn, handler Pe
 // fanotify source, which now emits only opens and exec-opens: "exec" maps to
 // OpExec and everything else (including "open") to OpOpen. The former "read"
 // and "write" fake events were dropped with FAN_ACCESS_PERM and the test-only
-// write event (see backend-todo-plan sections 1 and 16).
+// write event.
 func opFromString(s string) FileOp {
 	if s == "exec" {
 		return OpExec

@@ -1,7 +1,7 @@
-// Filemaster-specific: verifies the Phase 2.5 mount_id / mount_path migration
-// (docs/backend-todo-plan.md) — the columns are added to EXISTING databases via
-// ALTER TABLE (not just fresh CREATEs), existing rows backfill to unknown
-// (0 / ""), and new records round-trip their mount attribution.
+// Filemaster-specific: verifies the mount_id / mount_path migration — the
+// columns are added to EXISTING databases via ALTER TABLE (not just fresh
+// CREATEs), existing rows backfill to unknown (0 / ""), and new records
+// round-trip their mount attribution.
 package filequery
 
 import (

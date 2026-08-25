@@ -47,7 +47,7 @@ type FileAccessDiagnostics struct {
 	Warnings            []DegradedWarning
 	// RuleModel reports which user-facing rule categories the current release
 	// enforces, exposes-but-ignores, or retains hidden. It is static for the
-	// current (non-LSM) release; see CurrentRuleModel.
+	// current fanotify release; see CurrentRuleModel.
 	RuleModel []RuleCategoryStatus
 }
 

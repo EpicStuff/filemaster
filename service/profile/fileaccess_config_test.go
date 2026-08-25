@@ -10,7 +10,7 @@ import (
 // the Write list is retained and registered but hidden from the normal UI via
 // developer expertise, while Read and Execute stay user-visible. Hiding, not
 // removal, keeps the Write storage/plumbing available for the future Write
-// engine (backend-todo-plan sections 2 and 16).
+// engine.
 func TestFileAccessWriteRulesHidden(t *testing.T) {
 	if err := registerConfiguration(); err != nil {
 		t.Fatalf("registerConfiguration: %v", err)

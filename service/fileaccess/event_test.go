@@ -62,7 +62,7 @@ func TestHandlerRouting(t *testing.T) {
 	}
 }
 
-// TestAllowAll is a sanity check that the phase-1 default handler does
+// TestAllowAll is a sanity check that the default handler does
 // what it says on the tin.
 func TestAllowAll(t *testing.T) {
 	v := allowAll.Decide(context.Background(), &FileEvent{PID: 1, Path: "/anything"})

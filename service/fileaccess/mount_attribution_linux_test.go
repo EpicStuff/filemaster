@@ -1,7 +1,7 @@
 //go:build linux
 
-// Filemaster-specific: verifies Phase 2.5 mount attribution against the spec in
-// docs/backend-todo-plan.md — every persisted record must carry the protected
+// Filemaster-specific: verifies the event-record mount-attribution requirements
+// in docs/backend-features.md — every persisted record must carry the protected
 // mount active at decision time, attribution must never guess, deepest mount
 // wins, and pending reconciliation forces explicit unknown.
 package fileaccess
