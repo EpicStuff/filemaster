@@ -36,7 +36,7 @@
 
 app-dashboard-widget label { @apply text-xs uppercase text-secondary font-light flex flex-row items-center gap-2 pb-2; }
 
-.mini-stat, .chart-panel, .mount-item, .application-item, .application-list li {
+.mini-stat, .mount-item, .application-item, .application-list li {
 	@apply flex bg-gray-300 rounded shadow;
 }
 
