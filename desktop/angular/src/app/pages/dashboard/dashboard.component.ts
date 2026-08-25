@@ -37,10 +37,6 @@ const decisionChartConfig: ChartConfig<DecisionChartPoint> = {
 		blocked: { lineColor: 'text-red-200', areaColor: 'text-red-100 text-opacity-25' },
 	},
 	time: { from: -10 * 60 },
-	timeFormat: time => {
-		const minutes = Math.max(0, Math.round((Date.now() - time.getTime()) / 60_000));
-		return minutes ? `-${minutes}m` : '';
-	},
 	tooltipFormat: point => `Allowed: ${point.allowed}\nBlocked: ${point.blocked}`,
 	showDataPoints: true,
 	fillEmptyTicks: { interval: 60 },
