@@ -20,7 +20,7 @@
 
 #header { grid-area: header; }
 #stats { grid-area: stats; }
-#charts { grid-area: charts; min-height: 256px; }
+#charts { grid-area: charts; }
 #countries { grid-area: countries; }
 #blocked { grid-area: blocked; }
 #connmap { grid-area: map; min-height: 400px; }
