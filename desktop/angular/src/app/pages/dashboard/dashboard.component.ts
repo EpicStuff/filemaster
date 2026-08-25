@@ -37,9 +37,6 @@ const decisionChartConfig: ChartConfig<DecisionChartPoint> = {
 		blocked: { lineColor: 'text-red-200', areaColor: 'text-red-100 text-opacity-25' },
 	},
 	time: { from: -10 * 60 },
-	tooltipFormat: point => `Allowed: ${point.allowed}\nBlocked: ${point.blocked}`,
-	showDataPoints: true,
-	fillEmptyTicks: { interval: 60 },
 };
 
 @Component({
