@@ -1,0 +1,2 @@
+# Note
+Update options are split into main file and technical file. All nessesary decisions/information should be stored in the technical document. The main doc has been reviewed by a Human (Me). The technical doc is entirely AI generated (and has not and will not be reviewed). If the technical doc contradicts the main doc, let me know (but the main doc is probably more correct)

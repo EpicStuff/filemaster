@@ -1,4 +1,4 @@
-# DKMS backend technical exploration
+# Update option: DKMS only
 
 > Shared and DKMS-specific evaluation checks are in
 > [Backend Test Requirements](backend-test-requirements.md).
@@ -7,13 +7,16 @@
 > [Backend Feature Requirements](backend-features.md). This document evaluates
 > whether a DKMS-based implementation can deliver it safely.
 
-Linux kernel backend for Filemaster using a DKMS-buildable
-out-of-tree module, while users keep their normal distro kernel unchanged.
+This is the standalone DKMS-only option: a Linux kernel backend for Filemaster
+using a DKMS-buildable out-of-tree module while users keep their normal distro
+kernel unchanged. It is separate from the [+ DKMS route](update-option-+dkms.md),
+which starts with a BPF or native LSM backend and later adds targeted kernel
+changes.
 
 ## Delivery approaches to evaluate
 
-The DKMS option includes three possible approaches. None is selected by this
-note.
+The DKMS-only option includes three possible approaches. None is selected by
+this note.
 
 1. **Standalone enforcement module:** mediate the required VFS operations and
    communicate with Filemaster's existing userspace policy and prompt pipeline.
@@ -158,7 +161,10 @@ Development/testing:
 - Test against a stock kernel, since that is the intended user environment.
 - Build adversarial tests for bypasses/races, not just happy paths.
 
-Do not blindly follow my suggested implementation mechanism if kernel inspection reveals a safer/cleaner approach. The hard requirements are the resulting security semantics, stock-kernel/DKMS deployment, no silent coverage degradation, and safe interactive blocking.
+Do not blindly follow my suggested implementation mechanism if kernel inspection
+reveals a safer/cleaner approach. The hard requirements are the resulting
+security semantics, stock-kernel/DKMS deployment, no silent coverage degradation,
+and safe interactive blocking.
 
 Implement this incrementally, starting with a minimal end-to-end backend that
 proves the first product requirements can be delivered safely:

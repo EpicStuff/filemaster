@@ -1,9 +1,9 @@
 # Backend Test Requirements
 
 > **Status: unreviewed acceptance checklist.** These requirements apply when
-> evaluating a FUSE backend, a DKMS backend, or a second fanotify group. They
-> do not select an architecture or claim that any candidate already satisfies
-> them.
+> evaluating BPF LSM, LSM only, DKMS only, LSM + DKMS, FUSE, or a second
+> fanotify group. They do not select an architecture or claim that any
+> candidate already satisfies them.
 
 ## Shared requirements
 
@@ -49,7 +49,32 @@ local databases unless compatibility is later made a product requirement.
 5. Test cache, passthrough, mmap, and already-open-descriptor behaviour against
    the exact enforcement and revocation claims made by the implementation.
 
-## DKMS-specific requirements
+## BPF-LSM-specific requirements
+
+1. Prove the exact LSM hooks used for every claimed structural operation and
+   verify that a BPF deny stops the operation before it takes effect.
+2. Verify that fanotify remains the only Open and Execute decision path. The
+   initial BPF route must not attach an Open hook or create a second decision
+   for either operation.
+3. For every BPF-owned operation, test Allow, Deny, Ask, no matching static
+   policy, unsupported operation, and unrepresentable policy. Only Allow may
+   permit the operation; every other case denies without prompting.
+4. Test program loading, map installation, map replacement, detachment, daemon
+   restart, and loader failure. The service must report precisely which static
+   operations are no longer protected and must not claim coverage it lacks.
+
+## LSM-only-specific requirements
+
+1. Verify that the native LSM is built into and active on the exact custom
+   kernel under test, and that every claimed operation uses an existing upstream
+   LSM hook.
+2. Treat LSM only as static enforcement. It must not claim an interactive
+   userspace prompt at an LSM hook; existing fanotify remains responsible for
+   current interactive Open and Execute decisions.
+3. Test the static Allow/Deny and unsupported-policy behavior for every claimed
+   hook, including kernel restart and policy replacement.
+
+## DKMS-only-specific requirements
 
 1. Test every claimed interception point on the supported stock kernels and
    verify capabilities at module load and daemon startup. A successful DKMS
@@ -61,6 +86,42 @@ local databases unless compatibility is later made a product requirement.
    unload, daemon crash, kernel update, Secure Boot/signing, and conflicts with
    tracing or live-patching facilities.
 4. Run destructive and adversarial tests in a disposable virtual machine, with
+   an automated reset path.
+
+## BPF LSM + DKMS-specific requirements
+
+1. Meet the BPF-LSM-specific requirements for the interim stock-kernel phase,
+   and test the direct-kernel phase independently on the exact custom kernel.
+2. Verify exact stock/direct capability reporting. A kernel without the direct
+   path must report rules requiring it as unsupported or fail closed; it must
+   not silently fall back to a BPF Allow.
+3. Prove that a direct-kernel structural operation has Filemaster as its only
+   decision owner: no BPF structural hook remains attached for that operation,
+   no duplicate prompt or unprotected hand-off occurs, and no stale BPF policy
+   can permit it.
+4. For every interactive custom-kernel path, prove that it holds no VFS, inode,
+   directory, or rename lock while waiting. Revalidate object and operation
+   identity before commit where necessary.
+5. Run the stock/custom differential, lifecycle, destructive, and adversarial
+   test matrix in a disposable virtual machine with an automated reset path.
+
+## LSM + DKMS-specific requirements
+
+1. Meet the LSM-only requirements for the interim native-LSM phase and the
+   applicable DKMS-only requirements for every added kernel component.
+2. Test every claimed interception point on the exact direct-kernel build, and
+   test the interim native LSM independently on the exact LSM-only build. For
+   livepatch delivery, test every supported target kernel with its livepatch
+   capability checks; for direct delivery, test the compiled custom-kernel
+   build.
+3. Verify that a direct-kernel structural operation has Filemaster as its only
+   decision owner: the native LSM makes no policy decision or cache lookup for
+   that operation, and no duplicate decision, unprotected hand-off, or stale
+   native policy can permit it.
+4. For every claimed interactive wait added by a kernel change, prove that it
+   does not hold VFS, inode, directory, or rename locks. Revalidate object and
+   operation identity before committing an approved operation where necessary.
+5. Run destructive and adversarial tests in a disposable virtual machine, with
    an automated reset path.
 
 ## Second-fanotify-group requirements

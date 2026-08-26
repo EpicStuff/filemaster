@@ -6,6 +6,53 @@ live in [Backend Features Technical](backend-features-technical.md).
 Candidate-specific constraints and tests belong in the corresponding backend
 notes and [Backend Test Requirements](backend-test-requirements.md).
 
+These are product requirements, not a claim that every candidate backend can
+implement them. Each option document states the subset it can enforce.
+
+## Terminology
+
+* **Open** is the current permission operation. It is the operation represented
+  by the current fanotify permission event.
+* **Read** and **Write** are future permissions requested at Open time. They do
+  not mean per-read or per-write fanotify events.
+  A per-read permission event
+  was considered and removed: `FAN_ACCESS_PERM` only fired on reads through an
+  already-open descriptor, could not distinguish read from write, and added no
+  enforcement that `FAN_OPEN_PERM` does not already provide.
+* **Execute** is permission to launch a file as a program.
+* **Access** is a legacy UI rule label for Open; it is not a separate
+  operation and notify me on encounter.
+
+## Rule model
+
+* Read, Write, and Execute each use a separate ordered rule list. A list may
+  contain both file and folder rules.
+* The first applicable matching rule decides. A file rule does not inherently
+  outrank a folder rule; configured order decides. The profile default applies
+  only when no applicable rule matches.
+* Modifying an existing file's contents or metadata uses the target file's
+  Write rules. A nonrecursive rule for its parent folder does not apply merely
+  because the file is inside it.
+* Entry-changing operations use the applicable Write rules for their affected
+  objects and parent folders. Delete evaluates the target and its containing
+  folder. Create evaluates the future destination path and its parent folder.
+* Rename, move, and replacement require both a source Delete decision and a
+  destination decision: Create when the destination does not exist, or Write
+  when it does.
+* An unsupported operation fails closed; it must not fall back to Open/Read
+  policy, a prompt that can Allow it, or a learned rule.
+* Hard-link and symlink policy needs an option-specific design. Do not infer it
+  from the generic rule model alone.
+
+## Event records
+
+* Every persisted Open and Execute record retains the protected mount's stable
+  ID and display path when attribution is available.
+* Attribution uses the active protected-mount state at decision time. The
+  deepest applicable mount wins.
+* No applicable mount or pending reconciliation is recorded as explicit
+  unknown. The service must not guess an unrelated mount after a mount change.
+
 ## Rules
 
 These apply to every permission event described below.
@@ -37,6 +84,24 @@ These apply to every permission event described below.
 
 ---
 
+## Super High Priority
+
+### Directory-modifying operations
+
+Each is decided before the operation commits and re-validated before it takes
+effect, per the rules above.
+
+* **Pre-delete** for files and directories.
+* **Pre-link** for hard links and symlink creation, reporting source and
+  destination context.
+* **Pre-create**, reporting the parent directory and the new name before the
+  object exists. The object has no identity yet, so it is identified by parent
+  and name.
+* **Pre-rename/move**, reporting trustworthy source and destination. Where the
+  destination already exists, its identity is reported in the same event, since
+  approving the rename also approves destroying it — the two are one atomic
+  operation and cannot be answered separately.
+
 ## High priority
 
 ### Open
@@ -63,22 +128,6 @@ These apply to every permission event described below.
 * **One decision covers a whole enumeration** by that application, not each read
   of directory entries, so listing a large directory does not produce a stream
   of events.
-
-### Directory-modifying operations
-
-Each is decided before the operation commits and re-validated before it takes
-effect, per the rules above.
-
-* **Pre-delete** for files and directories.
-* **Pre-link** for hard links and symlink creation, reporting source and
-  destination context.
-* **Pre-create**, reporting the parent directory and the new name before the
-  object exists. The object has no identity yet, so it is identified by parent
-  and name.
-* **Pre-rename/move**, reporting trustworthy source and destination. Where the
-  destination already exists, its identity is reported in the same event, since
-  approving the rename also approves destroying it — the two are one atomic
-  operation and cannot be answered separately.
 
 ### Other operations
 
