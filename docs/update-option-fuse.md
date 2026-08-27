@@ -5,7 +5,7 @@
 > Filemaster behaviour, or establish verified Linux-kernel facts.
 >
 > Shared and FUSE-specific evaluation checks are in
-> [Backend Test Requirements](backend-test-requirements.md).
+> [Backend Test Requirements](backend-test-requirements-technical.md).
 >
 FUSE-based Linux file-access backend for Filemaster as an alternative
 to fanotify.

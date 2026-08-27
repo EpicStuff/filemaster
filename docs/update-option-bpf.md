@@ -2,7 +2,7 @@
 
 ## Status
 
-This is a useful first backend that may remain the final choice. It is separate from update options. 
+This is a useful first backend that might REMAIN the FINAL choice. (I might choose to not upgrade to + dkms ever.) It is separate from update options. 
 
 ## Intended role
 

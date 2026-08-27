@@ -1,5 +1,7 @@
 # Second fanotify group
 
+Dropped since provides less capability than bpf without less work or risk.
+
 ## Goals
 
 - Prevent a process from accessing a protected file by moving it first to unprotected folder.

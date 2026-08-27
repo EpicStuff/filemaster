@@ -4,7 +4,7 @@ These are the product features a future Filemaster backend should aim to provide
 Kernel mechanisms, hook placement, event reporting formats, and constant names
 live in [Backend Features Technical](backend-features-technical.md).
 Candidate-specific constraints and tests belong in the corresponding backend
-notes and [Backend Test Requirements](backend-test-requirements.md).
+notes and [Backend Test Requirements](backend-test-requirements-technical.md).
 
 These are product requirements, not a claim that every candidate backend can
 implement them. Each option document states the subset it can enforce.
@@ -22,6 +22,7 @@ implement them. Each option document states the subset it can enforce.
 * **Execute** is permission to launch a file as a program.
 * **Access** is a legacy UI rule label for Open; it is not a separate
   operation and notify me on encounter.
+* for it to count as a **Prompt**, the operation must be suspended before it commits, have no timeout/can wait indefinitely while remain killable, and does not block unrelated processes. (like fanotify's open)
 
 ## Rule model
 
@@ -86,10 +87,9 @@ These apply to every permission event described below.
 
 ## Super High Priority
 
-### Directory-modifying operations
+### Blocking directory-modifying operations
 
-Each is decided before the operation commits and re-validated before it takes
-effect, per the rules above.
+Each operation below is decided and enforced **before it commits**. Blocking is the requirement here, prompting the user is a lower priority.
 
 * **Pre-delete** for files and directories.
 * **Pre-link** for hard links and symlink creation, reporting source and
@@ -102,7 +102,18 @@ effect, per the rules above.
   approving the rename also approves destroying it — the two are one atomic
   operation and cannot be answered separately.
 
+Two consequences follow, and they hold for every backend:
+
+* An **Ask outcome that cannot be prompted defaults to deny**. 
+* and the user receives a notification of what was blocked so the decision can be changed and future tries can be allowed.
+
 ## High priority
+
+### Interactive decisions for directory-modifying operations
+
+All the stuff in ### Blocking directory-modifying operations in ## Super High Priority but with user prompt instead of default deny.
+
+* This must not block any other processes while waiting for prompt.
 
 ### Open
 

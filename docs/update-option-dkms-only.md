@@ -1,17 +1,20 @@
 # Update option: DKMS only
 
 > Shared and DKMS-specific evaluation checks are in
-> [Backend Test Requirements](backend-test-requirements.md).
+> [Backend Test Requirements](backend-test-requirements-technical.md).
 >
 > Product behaviour is defined in
 > [Backend Feature Requirements](backend-features.md). This document evaluates
 > whether a DKMS-based implementation can deliver it safely.
 
 This is the standalone DKMS-only option: a Linux kernel backend for Filemaster
-using a DKMS-buildable out-of-tree module while users keep their normal distro
-kernel unchanged. It is separate from the [+ DKMS route](update-option-+dkms.md),
-which starts with a BPF or native LSM backend and later adds targeted kernel
-changes.
+delivered as a DKMS-built module, with no BPF or native LSM phase before it. It
+is separate from the [+ DKMS route](update-option-+dkms.md), which starts with a
+BPF or native LSM backend and later adds targeted kernel changes.
+
+Running on an unmodified distro kernel is the *goal* of this option, not a
+constraint on it, and the evaluation below does not currently support it as
+achievable.
 
 ## Delivery approaches to evaluate
 
@@ -130,7 +133,10 @@ The copied-VFS figure is the firmest number here: the mediated functions in
 
 ## Technical goals
 
-- Keep stock distro kernels; no custom/rebuilt kernel requirement.
+- Prefer unmodified distro kernels, and settle early whether that is achievable
+  at all. This is a preference to be tested, not a requirement: if no delivery
+  approach holds it, a custom/rebuilt kernel is in scope and this option becomes
+  + DKMS without a static first phase.
 - DKMS module should compile against the installed kernel headers.
 - Reuse Filemaster's existing userspace policy and prompt machinery rather than
   duplicating policy inside the module.
@@ -158,13 +164,16 @@ Development/testing:
 - Make development self-contained in the existing container as much as practical.
 - Add an automated QEMU test guest inside the container (KVM via /dev/kvm when available, TCG fallback) so kernel-module testing cannot crash the host.
 - The normal workflow should be one command that builds the module, boots/resets the disposable guest, loads it, runs security/coverage tests, and reports results.
-- Test against a stock kernel, since that is the intended user environment.
+- Test against a stock kernel while an unmodified-kernel approach is still
+  viable, since that is the intended user environment. Once an approach requires
+  a modified kernel, test against that kernel instead.
 - Build adversarial tests for bypasses/races, not just happy paths.
 
 Do not blindly follow my suggested implementation mechanism if kernel inspection
 reveals a safer/cleaner approach. The hard requirements are the resulting
-security semantics, stock-kernel/DKMS deployment, no silent coverage degradation,
-and safe interactive blocking.
+security semantics, DKMS-based deployment, no silent coverage degradation, and
+safe interactive blocking. Unmodified-kernel deployment is a goal here, not a
+hard requirement.
 
 Implement this incrementally, starting with a minimal end-to-end backend that
 proves the first product requirements can be delivered safely:

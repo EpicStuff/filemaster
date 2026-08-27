@@ -11,12 +11,10 @@ deleted; see `FORK_NOTES.md` for the full deletion log.
 
 Use these terms consistently in code, tests, plans, and user-facing text:
 
-- **Open** is the current `FAN_OPEN_PERM` decision. It is the current file
-  permission operation.
-- **Read** and **Write** are future permissions requested at open time. A
-  read/write (`O_RDWR`) open requests both permissions.
-- Read and Write do **not** mean fanotify read/write events. Do not add, use,
-  test, or propose fanotify read/write interception or classification.
+- **Open** is the current `FAN_OPEN_PERM` decision. It is the current file permission operation.
+- **Read** and **Write** are future permissions requested at open time. A read/write (`O_RDWR`) open requests both permissions.
+- Read and Write do **not** mean fanotify read/write events. Do not add, use, test, or propose fanotify read/write interception or classification.
+- **Prompt** is a untimed decision request that suspends the operation before it commits and blocks no unrelated process while it waits.
 
 Use “file access” only as the general product category, not as the operation
 name in rules, prompts, events, or tests.

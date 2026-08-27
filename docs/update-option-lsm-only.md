@@ -3,7 +3,7 @@
 ## Status
 
 LSM only is a native, Filemaster-specific LSM built into a custom kernel. It
-uses existing upstream LSM hooks only. It is distinct from othe update options.
+uses existing upstream LSM hooks only. It is distinct from other update options.
 
 ## Intended role
 

@@ -1,8 +1,8 @@
 # Backend Test Requirements
 
 > **Status: unreviewed acceptance checklist.** These requirements apply when
-> evaluating BPF LSM, LSM only, DKMS only, LSM + DKMS, FUSE, or a second
-> fanotify group. They do not select an architecture or claim that any
+> evaluating BPF LSM, LSM only, DKMS only, LSM + DKMS, "BPF then DKMS", FUSE,
+> or a second fanotify group. They do not select an architecture or claim that any
 > candidate already satisfies them.
 
 ## Shared requirements
@@ -73,6 +73,21 @@ local databases unless compatibility is later made a product requirement.
    current interactive Open and Execute decisions.
 3. Test the static Allow/Deny and unsupported-policy behavior for every claimed
    hook, including kernel restart and policy replacement.
+4. Prove the kernel evaluates nothing: every outcome it produces must be one the
+   daemon published, and no kernel path may derive an outcome for an object the
+   daemon did not decide.
+5. Test the marked-directory walk: nearest-ancestor selection, nested marks, an
+   unmarked tree, a mark removed mid-walk, a concurrent ancestor rename, a
+   disconnected dentry, and both views of a bind mount. Record the bind-mount
+   collision as a limitation rather than treating it as a defect.
+6. Prove both endpoints of every rename are checked, and that a
+   `RENAME_EXCHANGE` swapping a protected object with an unprotected one is
+   denied while the flags remain invisible at the hook.
+7. Prove the uninitialised, active, and failed table states are distinguishable
+   at runtime, that an uninitialised table never enforces, and that a failed
+   publication is reported rather than silently reached.
+8. Prove kernel threads produce no decision and that a single delete on an
+   overlayfs mount yields exactly one Filemaster decision.
 
 ## DKMS-only-specific requirements
 
@@ -88,21 +103,30 @@ local databases unless compatibility is later made a product requirement.
 4. Run destructive and adversarial tests in a disposable virtual machine, with
    an automated reset path.
 
-## BPF LSM + DKMS-specific requirements
+## BPF then DKMS-specific requirements
 
-1. Meet the BPF-LSM-specific requirements for the interim stock-kernel phase,
-   and test the direct-kernel phase independently on the exact custom kernel.
-2. Verify exact stock/direct capability reporting. A kernel without the direct
-   path must report rules requiring it as unsupported or fail closed; it must
-   not silently fall back to a BPF Allow.
-3. Prove that a direct-kernel structural operation has Filemaster as its only
-   decision owner: no BPF structural hook remains attached for that operation,
-   no duplicate prompt or unprotected hand-off occurs, and no stale BPF policy
-   can permit it.
-4. For every interactive custom-kernel path, prove that it holds no VFS, inode,
-   directory, or rename lock while waiting. Revalidate object and operation
-   identity before commit where necessary.
-5. Run the stock/custom differential, lifecycle, destructive, and adversarial
+Formerly "BPF LSM + DKMS". Stage two replaces the BPF backend rather than
+extending it, and stage two is the LSM + DKMS backend; see
+[BPF then DKMS](update-option-bpf-dkms-technical.md).
+
+1. Meet the BPF-LSM-specific requirements for the stock-kernel stage, and meet
+   the LSM + DKMS-specific requirements in full for the kernel-change stage.
+   Coming from BPF reduces none of them.
+2. Verify exact stock/interactive capability reporting. A kernel without the
+   interactive path must report rules requiring it as unsupported or fail
+   closed; it must not silently fall back to a BPF Allow.
+3. Prove that a structural operation owned by the kernel path has Filemaster as
+   its only decision owner: no BPF structural hook remains attached for that
+   operation, no duplicate prompt or unprotected hand-off occurs, and no stale
+   BPF policy can permit it. Prove the same in reverse after a deliberate
+   return to the stock BPF stage.
+4. Prove no BPF program mediates any part of an interactive decision. There
+   must be no BPF map consulted for a verdict, no BPF-side verdict storage, and
+   no kfunc or task-local-storage bridge added to keep BPF in the path.
+5. Test the two backends separately, against one frozen policy corpus, not
+   concurrently on the same operation. A live zero-gap hand-off, if attempted,
+   needs its own proof of equivalent policy generations.
+6. Run the stock/custom differential, lifecycle, destructive, and adversarial
    test matrix in a disposable virtual machine with an automated reset path.
 
 ## LSM + DKMS-specific requirements
@@ -114,15 +138,37 @@ local databases unless compatibility is later made a product requirement.
    livepatch delivery, test every supported target kernel with its livepatch
    capability checks; for direct delivery, test the compiled custom-kernel
    build.
-3. Verify that a direct-kernel structural operation has Filemaster as its only
-   decision owner: the native LSM makes no policy decision or cache lookup for
-   that operation, and no duplicate decision, unprotected hand-off, or stale
-   native policy can permit it.
-4. For every claimed interactive wait added by a kernel change, prove that it
-   does not hold VFS, inode, directory, or rename locks. Revalidate object and
-   operation identity before committing an approved operation where necessary.
-5. Run destructive and adversarial tests in a disposable virtual machine, with
-   an automated reset path.
+3. Verify the selected ownership model: the existing `path_*` hook returns an
+   internal sentinel, VFS unwinds through its existing error paths and calls
+   the new generic security hook with nothing held, and the Filemaster LSM owns
+   the request, wait, verdict cache, and enforcement. Rules are evaluated only
+   in the daemon; prove the LSM implements no second matcher, and that VFS
+   implements no Filemaster policy or permission transport.
+4. Prove the internal sentinel can never be returned to userspace, on every
+   path through both patched functions.
+5. Prove exactly one Filemaster decision per syscall and that at most one
+   ask-retry occurs, with no livelock when the second pass still has no
+   matching cached verdict. The same hook adapter serves both passes; other
+   LSMs' ordinary later checks must still execute on the second pass.
+6. Test LSM stacking against a real SELinux or AppArmor configuration, with
+   Filemaster ordered last. Record the audit/AVC duplication caused by the
+   two-pass sequence and confirm no check is skipped on the committing pass.
+7. For every claimed Ask wait, prove with instrumentation and concurrent
+   unrelated work that no lock, mount-write reference, or path/dentry/inode
+   reference from the first pass spans the wait. Include `fsfreeze` and
+   cross-directory renames on the same superblock during a live prompt. A fatal
+   signal must cancel the request safely; daemon absence, receiver loss, queue
+   exhaustion, malformed replies, and answer-generation mismatch must fail
+   closed.
+8. After every Ask Allow, prove the second pass re-resolves and re-locks
+   normally and that the cached verdict is enforced only when operation,
+   parent, name, target identity, mount, and generation all still match.
+   Include stale, replacement, and two-side rename races, and daemon restart
+   mid-wait.
+9. Measure the cost of the doubled resolution under `rm -rf` and a large
+   `git checkout`, with and without kernel-side scope marks.
+10. Run destructive and adversarial tests in a disposable virtual machine, with
+    an automated reset path.
 
 ## Second-fanotify-group requirements
 
