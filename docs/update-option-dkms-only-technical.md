@@ -25,7 +25,10 @@ this note.
    communicate with Filemaster's existing userspace policy and prompt pipeline.
 2. **Runtime fanotify extension:** augment the stock kernel's existing
    fanotify/fsnotify machinery so additional operations become fanotify-style
-   permission events.
+   permission events. Note this is scoped to an *unmodified* kernel, which is
+   what makes it hard. The same idea delivered as a source patch to a custom
+   kernel is a materially different and possibly much cheaper proposition; see
+   [Fanotify extension in a custom kernel](update-option-fanotify-extension-technical.md).
 3. **Generated livepatch:** write the change as an ordinary kernel source patch
    and let the in-tree `klp-build` tool generate a loadable livepatch module
    from it. The module is still shipped and rebuilt like any other out-of-tree

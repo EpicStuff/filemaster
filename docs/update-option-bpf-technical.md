@@ -256,13 +256,21 @@ this backend produces.
 ## Upgrade path
 
 Closing that tier means adding an untimed interactive prompt before a
-structural operation commits. **BPF cannot host that wait.** No BPF primitive
-suspends a task until userspace answers; BPF can emit over a ring buffer but
-cannot block for a reply, and the verifier rejects an unbounded wait loop. A
-BPF program *can* return the internal sentinel the retry design uses —
+structural operation commits. **BPF bytecode cannot host that wait.** No BPF
+primitive suspends a task until userspace answers; BPF can emit over a ring
+buffer but cannot block for a reply, and the verifier rejects an unbounded wait
+loop. A BPF program *can* return the internal sentinel the retry design uses —
 `bpf_lsm_get_retval_range()` permits `[-MAX_ERRNO, 0]`, so a value above 511 is
 legal — but the queue, correlation, wait, verdict cache, and reply transport
 are native C in every route.
+
+A custom kernel could expose that native wait to BPF through a `KF_SLEEPABLE`
+kfunc rather than a native LSM, and the relevant `path_*` hooks are in
+`sleepable_lsm_hooks`. That does not make this an option on a **stock** kernel:
+the kfunc and the new post-unwind hook both have to be compiled in, and a wait
+at the stock hooks is unsafe regardless of who sleeps, because the parent
+`i_rwsem` and the mount-write reference are held there. See
+[BPF cannot own the wait, and a kfunc does not change that](update-option-bpf-dkms-technical.md#where-bpf-can-and-cannot-sit).
 
 The upgrade is therefore a **replacement, not an extension**: the interactive
 stage is the

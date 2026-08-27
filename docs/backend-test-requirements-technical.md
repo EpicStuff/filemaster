@@ -120,9 +120,31 @@ extending it, and stage two is the LSM + DKMS backend; see
    operation, no duplicate prompt or unprotected hand-off occurs, and no stale
    BPF policy can permit it. Prove the same in reverse after a deliberate
    return to the stock BPF stage.
-4. Prove no BPF program mediates any part of an interactive decision. There
-   must be no BPF map consulted for a verdict, no BPF-side verdict storage, and
-   no kfunc or task-local-storage bridge added to keep BPF in the path.
+4. Prove no **stage-one** BPF program mediates any part of an interactive
+   decision. There must be no BPF map consulted for a verdict, no BPF-side
+   verdict storage, and no task-local-storage bridge retro-fitted to keep the
+   stock-kernel programs in the path. This is a single-decision-owner
+   requirement, not a claim that BPF is physically incapable. A BPF frontend
+   over a `KF_SLEEPABLE` kfunc is a retained stage-two candidate; if it is
+   chosen, the wait must still be native C, the hook must still be the
+   post-unwind one, and there must be exactly one owner. That candidate carries
+   three additional obligations:
+   a. **Answered by P1, partly.** The wait *is* inside tasks-trace RCU
+      (`__bpf_prog_enter_sleepable()` takes `rcu_read_lock_trace()`), but detach
+      does not block, because `bpf_link_free()` defers sleepable links through
+      `call_rcu_tasks_trace()`. What remains to prove is the consequence:
+      measure deferred-reclamation backlog and `rcu_tasks_trace` stall warnings
+      over a prompt parked for minutes, and establish whether any *synchronous*
+      `synchronize_rcu_tasks_trace()` caller sits on a path that matters.
+   b. **Discharged for the tested case by P1**: with pass 1 attached and the
+      post-unwind program absent, `rmdir` failed closed with `EIO` and raised no
+      second prompt. Still to prove for detach *mid-flight* across all four
+      operations, including no unbounded retry loop and no sentinel reaching
+      userspace.
+   c. Prove commit-time revalidation cannot be weakened by replacing a loaded
+      program.
+   d. Any BPF variant must normalize kfunc results to a valid errno: P1's
+      verifier rejected returning an unconstrained `int` from an LSM program.
 5. Test the two backends separately, against one frozen policy corpus, not
    concurrently on the same operation. A live zero-gap hand-off, if attempted,
    needs its own proof of equivalent policy generations.

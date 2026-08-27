@@ -14,7 +14,11 @@ VFS -> LSM -> filemaster -> decision
 
 ## Both routes end at the same backend
 
-BPF cannot pause a program and wait for an answer. It can report, it cannot ask. That means there is no BPF version of the `+ DKMS` backend. Whichever first stage is chosen, the second stage is the same LSM + DKMS.
+BPF on a stock kernel cannot ask. A custom kernel *could* hand BPF a native wait to call. But that is a custom kernel, which is the `+ DKMS` stage, and the wait still has to happen at a new, later point in the operation, because at the normal checkpoint the kernel is holding the directory and the answer could take minutes. So there is no stock-kernel BPF version of the `+ DKMS` backend, and the parts that make it work are the same parts either way.
+
+Whichever first stage is chosen, the second stage needs the same kernel changes.
+
+Whether the Filemaster side of those changes is written as a native kernel module or kept in BPF is still open, and is being decided by testing rather than argument. It does not change the cost either way.
 
 ## What each first stage costs
 

@@ -21,9 +21,14 @@ recorded in [Rejected mechanisms](#rejected-mechanisms).
 
 This backend is also the second stage of the
 ["BPF then DKMS"](update-option-bpf-dkms-technical.md) upgrade path — an
-option to consider later, not a committed plan. BPF cannot host an untimed
-wait, so there is no BPF-flavoured variant of this design: a BPF first stage is
-replaced by this backend, not extended into it. Reaching it from BPF rather
+option to consider later, not a committed plan. BPF bytecode cannot host an
+untimed wait, so the wait is native C in every variant. There *is* a distinct
+BPF-flavoured candidate in which that native wait lives in a `KF_SLEEPABLE`
+kfunc called from BPF rather than in a registered LSM — see
+[BPF LSM + native wait](update-option-bpf-dkms-technical.md#bpf-lsm--native-wait)
+— but sizing puts it **larger** than pure native
+(2,985–4,835 vs 2,655–4,275 production lines), so it is not a cheaper route to
+this endpoint. Reaching it from BPF rather
 than from [LSM only](update-option-lsm-only.md) means the native-LSM
 groundwork in [Reuse from LSM only](#reuse-from-lsm-only) has to be built here
 instead of already existing.
@@ -193,6 +198,25 @@ pattern, with a second reason to take the branch.
 
 That makes `rmdir` the cheapest and least speculative first proof, and P1
 should lead with it rather than with `unlink`.
+
+**P1 ran this and it worked.** On Linux `v7.1` in the dev VM: Allow completed
+the `rmdir`, Deny returned `EACCES`, a parked prompt did not block a
+same-superblock cross-directory `rename` or an `fsfreeze`, and an Allow on a
+nonempty directory returned `ENOTEMPTY` — second-pass semantics are ordinary
+VFS, as designed. The measured change is **16 insertions and one deletion** in
+`fs/namei.c` plus 38 lines of one-time generic hook plumbing. One correction:
+the line references below had drifted, and `break_deleg_wait()` is conditional
+on a delegated inode, so the new wait is placed after that branch rather than
+reusing it. Full report: [P1 `rmdir` unwind-and-retry proof](p1-rmdir-technical.md).
+
+Re-verified 2026-08-27 against a mainline `fs/namei.c` snapshot new enough to
+have `start_dirop()`/`end_dirop()`. In `filename_rmdir()`, `security_path_rmdir()`
+is called with the parent's `i_rwsem` held for write — `__start_dirop()` does
+`inode_lock_nested(dir, I_MUTEX_PARENT)` — and with the `mnt_want_write()`
+reference held; the `break_deleg_wait()`/`goto retry` block sits below `exit4:`,
+`exit3:` and `exit2:`, after all three are released. Both halves of the design's
+premise hold on that snapshot. P1 must confirm it on the exact kernel it builds,
+since `start_dirop()` is recent and this area moves.
 
 Per-operation differences to expect:
 
