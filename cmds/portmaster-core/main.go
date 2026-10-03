@@ -13,10 +13,14 @@ import (
 	"github.com/safing/portmaster/cmds/cmdbase"
 	"github.com/safing/portmaster/service"
 	"github.com/safing/portmaster/service/configure"
+	bpflsm "github.com/safing/portmaster/service/fileaccess/bpflsm"
 	"github.com/safing/portmaster/service/updates"
 )
 
 var (
+	// Keep the BPF LSM ELF in filemaster-core; M0 does not load or attach it.
+	embeddedBPFObject = bpflsm.Object()
+
 	rootCmd = &cobra.Command{
 		Use:              "portmaster-core",
 		PersistentPreRun: initializeGlobals,

@@ -74,6 +74,8 @@ windows_kext/test/_delme/
 .claude/
 .serena/
 .token-savior-cache.json
+bpf/target/
+service/fileaccess/bpflsm/obj/
 fake-fanotify
 portmaster-core
 fanotify-root-bench

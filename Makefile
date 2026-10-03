@@ -10,6 +10,9 @@ ARCHIVER := bsdtar
 NODE_BIN ?=
 NODE_PATH := $(if $(NODE_BIN),$(NODE_BIN):)
 CORE := $(DIST)/$(PLATFORM)/filemaster-core
+BPF_DIR := bpf
+BPF_CRATE := $(BPF_DIR)/filemaster-lsm
+BPF_OBJECT := service/fileaccess/bpflsm/obj/filemaster-lsm.bpf.o
 APP := $(DIST)/$(PLATFORM)/filemaster
 UI_ZIP := $(DIST)/all/filemaster.zip
 ASSETS_ZIP := $(DIST)/all/assets.zip
@@ -22,10 +25,11 @@ SERVICE_DIR ?= /etc/systemd/system
 SERVICE_FILE := $(SERVICE_DIR)/filemaster.service
 
 .DEFAULT_GOAL := build
-.PHONY: assets build clean core help install intel package stage tauri tauri-ui test test-desktop-smoke test-fake test-release-gate test-ui-archive ui ui-deps verify-ui-archive
+.PHONY: assets bpf build clean core help install intel package stage tauri tauri-ui test test-desktop-smoke test-fake test-release-gate test-ui-archive ui ui-deps verify-ui-archive
 
 help:
 	@printf '%s\n' 'Filemaster native build targets:' \
+		'  make bpf      Build the embedded BPF LSM object.' \
 		'  make build    Build the core, UI bundle, assets, and desktop app.' \
 		'  make install  Build and install the core, UI, payloads, and systemd unit.' \
 		'  make package  Build Linux .deb/.rpm packages through Tauri.' \
@@ -55,7 +59,14 @@ install: build
 	else \
 		echo 'Installed filemaster.service; systemd is not running, so reload it on the target host.'; \
 	fi
-core:
+bpf:
+	bpf-linker --version
+	cd "$(BPF_CRATE)" && cargo +nightly-2026-06-23 build --release -Z build-std=core --target bpfel-unknown-none
+	@mkdir -p "$(dir $(BPF_OBJECT))"
+	cp "$(BPF_DIR)/target/bpfel-unknown-none/release/filemaster-lsm" "$(BPF_OBJECT)"
+	sha256sum "$(BPF_OBJECT)"
+
+core: bpf
 	@mkdir -p "$(dir $(CORE))"
 	go build -o "$(CORE)" ./cmds/portmaster-core
 
@@ -110,7 +121,7 @@ test:
 	$(MAKE) test-ui-archive
 
 test-fake:
-	go test -tags filemaster_test ./service/fileaccess
+	go test -tags filemaster_test ./service/fileaccess/...
 
 test-ui-archive:
 	packaging/linux/test_ui_archive.sh "$(MAKE)" "$(ARCHIVER)"

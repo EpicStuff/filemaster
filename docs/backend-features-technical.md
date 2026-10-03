@@ -40,7 +40,13 @@ independent read and write grants, and covering operations that have none today.
 
 1. Marks, event queues, blocking and waiting, Allow/Deny responses, ignore
    masks, overflow handling, and group lifecycle are reused rather than
-   duplicated.
+   duplicated. **Qualified 2026-08-30 — marks are not reusable as written.**
+   *Verified from source (`v7.1`):* directory-entry events are refused on a
+   `FAN_MARK_MOUNT` mark (`fanotify_user.c:2013-2016`), with the in-tree comment
+   that they "do not carry enough information (i.e. path) to be filtered by
+   mount point" — and a mount mark is the only mark type filemaster currently
+   uses (`service/fileaccess/mount_linux.go:532`). Structural events would need
+   a `struct path` plumbed through every hook site before mount marks apply.
 2. New context is delivered as new variable-length info records. The
    fixed-layout event metadata struct is not extended.
 3. Existing event types, response semantics, and the existing execute permission
@@ -102,7 +108,34 @@ hook-placement rules above.
 1. Fail-open versus fail-closed is selectable at group creation, defaulting to
    fail-open to match existing behaviour. It governs what happens when the
    listener dies or closes its descriptor with events outstanding, and when the
-   event queue is full.
+   event queue is full. **Verified from source (Linux `v7.1`, 2026-08-27):** the
+   existing behaviour really is fail-open, by two separate paths.
+   `fanotify_release()` drains both pending permission lists with
+   `finish_permission_event(..., FAN_ALLOW, NULL)` before destroying the group
+   (`fs/notify/fanotify/fanotify_user.c:1098-1151`), and
+   `fanotify_handle_event()` returns success when
+   `fsnotify_prepare_user_wait()` loses a race with mark deletion, with a source
+   comment saying to let the operation pass
+   (`fs/notify/fanotify/fanotify.c:969-1010`). A fail-closed mode is therefore
+   new kernel work in any fanotify-based design, not a configuration flag. See
+   [Fanotify extension in a custom kernel](update-option-fanotify-extension-technical.md#gate-11--wait-and-receiver-lifecycle).
+
+   **A third fail-open path (2026-08-30) — queue overflow.** *Verified from
+   source at `6ccca12ea` (v6.16-rc5 base), **not yet confirmed for `v7.1`.***
+   When the notification queue is full, `fsnotify_insert_event()` returns 2
+   (`fs/notify/notification.c:100-108`) and `fanotify_handle_event()` warns,
+   destroys the event and returns 0 (`fs/notify/fanotify/fanotify.c:1031-1037`)
+   — a **silently allowed permission event**. Bounded by
+   `fanotify_max_queued_events`, or `UINT_MAX` with `FAN_UNLIMITED_QUEUE`
+   (CAP_SYS_ADMIN). This is the path this item calls out as "when the event queue
+   is full"; it is now sourced. Confirm the `v7.1` line numbers before relying on
+   them.
+
+   **Already fail-closed (verified at the same tip):** `-ENOMEM` on event
+   allocation propagates as an error, not an allow
+   (`fanotify.c:1017-1026`); a perm event that cannot be copied to userspace or
+   given an fd is denied outright (`fanotify_user.c:947-951`); and
+   signal-interrupted waits return `-ERESTARTSYS` (`fanotify.c:236-258`).
 2. Behaviour is defined for interrupted waits, cancellation, and malformed
    responses.
 3. Capability discovery lets userspace determine which features the running
@@ -113,9 +146,13 @@ hook-placement rules above.
 
 1. **No file descriptor is delivered.** The existing file-identity reporting
    mode (`FAN_REPORT_FID` and friends) is the obvious basis, but it is not free
-   reuse: fid reporting has historically been restricted to `FAN_CLASS_NOTIF`,
-   so combining it with a permission class needs verifying against the target
-   kernel before this is assumed to work. The requirement either way is that the
+   reuse. **Verified from source (`v7.1`, 2026-08-30) — settled, and the answer
+   is no:** fid reporting is still refused outside `FAN_CLASS_NOTIF`
+   (`fs/notify/fanotify/fanotify_user.c:1659-1660`) while permission masks are
+   refused inside it (`:1985-1990`). A blocking fid-carrying group does not
+   exist in `v7.1` and is new kernel work. An unmerged 2025 prototype implements
+   it — see
+   [fanotify extension](update-option-fanotify-extension-technical.md#response-correlation-one-decision-rename-and-fail-closed--read-from-source-2026-08-30). The requirement either way is that the
    event never depends on descriptor delivery. Opening a file merely to describe
    it is expensive
    relative to the operation being decided and has side effects — opening a FIFO

@@ -1,5 +1,7 @@
 # FUSE backend exploration
 
+Dropped since 1. not a fan of the idea of mounting a bunch of stuff, 2. cost, even with outdated numbers seem to be more, if not at least significantly less than custom kernel options, 3. doesn't do anything custom kernel doesn't.
+
 > **Status: unreviewed research note.** This document collects investigation
 > ideas for a possible backend. It does not select FUSE, describe supported
 > Filemaster behaviour, or establish verified Linux-kernel facts.

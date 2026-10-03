@@ -14,8 +14,17 @@ File access enforcement depends on fanotify, so Linux is the supported target.
 ## Prerequisites
 
 Install Go 1.24 or newer, Node.js/npm, Rust/Cargo, the Tauri CLI, `bsdtar`, and
-the Linux development libraries required by Tauri/WebKitGTK. Install the Tauri
-CLI with:
+the Linux development libraries required by Tauri/WebKitGTK. The BPF LSM object
+also requires `bpf-linker` 0.11.0 from Arch's `extra` repository and Rust
+`nightly-2026-06-23` with `rust-src`:
+
+```bash
+sudo pacman -S bpf-linker
+rustup toolchain install nightly-2026-06-23 --component rust-src
+```
+
+Do not use `cargo install bpf-linker`: it fails here because LLVM is unavailable
+to Cargo's build. Install the Tauri CLI with:
 
 ```bash
 cargo install tauri-cli --version 2.2.7 --locked
@@ -25,6 +34,7 @@ cargo install tauri-cli --version 2.2.7 --locked
 
 ```bash
 make build    # core daemon, Angular payload, assets, and Tauri desktop binary
+make bpf      # BPF LSM object embedded by the core build
 make package  # stage those artifacts and produce Linux .deb/.rpm packages
 make test     # production Go tests plus the fake-source test variant
 ```

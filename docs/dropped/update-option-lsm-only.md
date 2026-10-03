@@ -1,5 +1,7 @@
 # Update option: LSM only
 
+Dropped since bpf does everything this does without custom kernel, and + dkms in lsm + dkms does not cost less than + dkms in bpf + dkms or directly to lsm + dkms.
+
 ## Status
 
 LSM only is a native, Filemaster-specific LSM built into a custom kernel. It

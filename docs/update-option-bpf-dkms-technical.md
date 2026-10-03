@@ -430,6 +430,10 @@ A first stage that scores 100% reuse would be one that shipped nothing.
 
 ### Staged versus direct
 
+> **Superseded figures below.** The 10–20% premium and the 510M–1.1B direct-route
+> figure are stale. The current staging premium is in
+> [cost technical — staging premium](update-options-cost-technical.md#staging-premium).
+
 | Route | Stage one | Stage two |
 |---|---|---|
 | **Staged** | BPF backend on a stock kernel | Replace it with the LSM + DKMS backend |

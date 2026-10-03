@@ -12,85 +12,19 @@ delivered as a DKMS-built module, with no BPF or native LSM phase before it. It
 is separate from the [+ DKMS route](update-option-+dkms.md), which starts with a
 BPF or native LSM backend and later adds targeted kernel changes.
 
-Running on an unmodified distro kernel is the *goal* of this option, not a
-constraint on it, and the evaluation below does not currently support it as
-achievable.
+**Running on an unmodified distro kernel is the defining constraint of this
+option**, not a preference. No custom kernel, no rebuilt kernel, no kernel
+source change: the whole point is deployment on the kernel the user's
+distribution already ships. An approach that requires a modified kernel has
+left this option and belongs to + DKMS.
 
-## Delivery approaches to evaluate
+## Delivery approach
 
-The DKMS-only option includes three possible approaches. None is selected by
-this note.
+**Standalone enforcement module:** mediate the required VFS operations and
+communicate with Filemaster's existing userspace policy and prompt pipeline.
 
-1. **Standalone enforcement module:** mediate the required VFS operations and
-   communicate with Filemaster's existing userspace policy and prompt pipeline.
-2. **Runtime fanotify extension:** augment the stock kernel's existing
-   fanotify/fsnotify machinery so additional operations become fanotify-style
-   permission events. Note this is scoped to an *unmodified* kernel, which is
-   what makes it hard. The same idea delivered as a source patch to a custom
-   kernel is a materially different and possibly much cheaper proposition; see
-   [Fanotify extension in a custom kernel](update-option-fanotify-extension-technical.md).
-3. **Generated livepatch:** write the change as an ordinary kernel source patch
-   and let the in-tree `klp-build` tool generate a loadable livepatch module
-   from it. The module is still shipped and rebuilt like any other out-of-tree
-   module, but the maintained artefact is the source patch, not hand-written
-   hook code.
-
-Approaches 1 and 2 are hand-written modules that hook the kernel at runtime;
-approach 3 generates the module from a patch. They differ mainly in what has to
-be re-verified when a supported kernel changes.
-
-The runtime-extension approach must prove all of the following before it is
-preferred over a standalone module:
-
-1. Existing fanotify marks, event queues, response handling, overflow handling,
-   cancellation, and lifecycle can be reused without changing their current
-   behaviour.
-2. Notification-only create, delete, rename, and link information can be made
-   available before an operation commits, with enough object and path context
-   to revalidate an approval safely.
-3. If the extension supports separate Filemaster Read and Write permissions, it
-   obtains the requested access mode at the Open hook. It must not add or depend
-   on fanotify read/write events.
-4. The required kernel functions are traceable and safely patchable on each
-   supported distro kernel, without unacceptable ftrace, livepatch, symbol,
-   module-signing, or Secure Boot conflicts.
-5. No wait for userspace occurs while VFS, inode, directory, or rename locks
-   are held; a later commit-time validation closes the resulting race safely.
-6. Kernel inlines, macros, data-layout assumptions, kernel upgrades, and DKMS
-   compilation cannot leave the system appearing protected when an interception
-   point has disappeared.
-
-The generated-livepatch approach must prove all of the following before it is
-preferred:
-
-1. Target kernels are built with `CONFIG_LIVEPATCH=y` and `CONFIG_KLP_BUILD`,
-   on an architecture with `HAVE_KLP_BUILD` (x86-64 today), and without
-   `RANDSTRUCT` or `LATENT_ENTROPY`. Absent any of these the approach is
-   unavailable, not merely harder.
-2. The full kernel source and the exact config for each supported kernel are
-   obtainable at build time. `klp-build` needs both; kernel headers alone are
-   not sufficient.
-3. The change carries no data-structure layout modification. Livepatch cannot
-   resize or reorder a struct that running code already holds, so anything
-   requiring a wider `i_fsnotify_mask` in `struct inode`, or new fields in
-   existing fsnotify structures, must instead be carried on a parallel
-   allocation. Shadow variables exist for this but are hashtable-backed and are
-   not acceptable on a hot VFS path.
-4. The patch touches no `__init` code and removes no functions, and any change
-   to an exported prototype is checked against out-of-tree modules on the
-   target systems.
-5. The livepatch transition converges under realistic load. Consistency-model
-   stalls on hot VFS paths must be measured, not assumed.
-6. IPMODIFY conflicts with a distro livepatch service already running on the
-   target are detected and reported rather than silently losing coverage.
-
-The evaluation must compare all three routes on correctness, fail-safe
-behaviour, maintenance burden, and the minimum runtime patch surface. Do not
-prefer the runtime extension solely because it reuses fanotify, and do not
-prefer the livepatch solely because `klp-build` writes the module.
-
-Two constraints apply to any hand-written hooking approach and should be
-settled early, since they bound approaches 1 and 2 but not 3:
+Two constraints bind this hand-written hooking approach and should be settled
+early:
 
 - `kallsyms_lookup_name` is not exported. Resolving unexported symbols needs a
   documented workaround, and that workaround is itself a per-kernel
@@ -106,40 +40,11 @@ backend, PendingEvent/decision pipeline, rule engine, and future-operation
 model. Reuse the existing userspace policy/prompt machinery rather than
 duplicating policy in the module.
 
-## Tooling
-
-`kpatch-build` is deprecated as of 6.19. Its replacement, `klp-build`, is in
-the kernel tree at `scripts/livepatch/klp-build` and takes one or more patch
-files. It builds the tree twice, diffs at object level, extracts the changed
-functions with their reachable dependencies, and emits a loadable module that
-registers the replacements through ftrace. Livepatching *is* ftrace underneath:
-`klp_ftrace_handler` redirects execution by rewriting the instruction pointer.
-A livepatch is an ordinary kernel module, so DKMS can build and install one.
-
-That is what distinguishes approach 3: for approaches 1 and 2 the per-kernel
-work is re-auditing hand-written hook code against a changed tree; for approach
-3 it is re-applying a patch and rerunning the generator. Both are per-kernel
-work — neither escapes it — but they are not the same size.
-
-Rough size estimates, non-test lines, against 7.1.8. Treat as estimates; the
-per-function measurements underneath them are real, the projections are not.
-
-| | Approach 1/2 (hand-written) | Approach 3 (generated) |
-|---|---|---|
-| Implementation | ~3,400–5,300 | ~2,200–3,100 |
-| Of which copied VFS code | ~1,000–1,600 | none |
-| Per-kernel re-verification | full re-audit | re-apply patch |
-
-The copied-VFS figure is the firmest number here: the mediated functions in
-7.1.8 sum to 973 lines before their static helpers, led by `vfs_rename` (167),
-`notify_change` (140), `do_dentry_open` (127) and `vfs_fallocate` (103).
-
 ## Technical goals
 
-- Prefer unmodified distro kernels, and settle early whether that is achievable
-  at all. This is a preference to be tested, not a requirement: if no delivery
-  approach holds it, a custom/rebuilt kernel is in scope and this option becomes
-  + DKMS without a static first phase.
+- Unmodified distro kernels only. This is the option's defining constraint, not
+  a preference to be traded away: an approach that needs a custom or rebuilt
+  kernel is out of scope here and belongs to + DKMS.
 - DKMS module should compile against the installed kernel headers.
 - Reuse Filemaster's existing userspace policy and prompt machinery rather than
   duplicating policy inside the module.
@@ -167,16 +72,16 @@ Development/testing:
 - Make development self-contained in the existing container as much as practical.
 - Add an automated QEMU test guest inside the container (KVM via /dev/kvm when available, TCG fallback) so kernel-module testing cannot crash the host.
 - The normal workflow should be one command that builds the module, boots/resets the disposable guest, loads it, runs security/coverage tests, and reports results.
-- Test against a stock kernel while an unmodified-kernel approach is still
-  viable, since that is the intended user environment. Once an approach requires
-  a modified kernel, test against that kernel instead.
+- Test against stock distro kernels throughout, since that is both the intended
+  user environment and the option's constraint. A result that only holds on a
+  modified kernel does not count here.
 - Build adversarial tests for bypasses/races, not just happy paths.
 
 Do not blindly follow my suggested implementation mechanism if kernel inspection
 reveals a safer/cleaner approach. The hard requirements are the resulting
 security semantics, DKMS-based deployment, no silent coverage degradation, and
-safe interactive blocking. Unmodified-kernel deployment is a goal here, not a
-hard requirement.
+safe interactive blocking. Unmodified-kernel deployment is a hard requirement
+here, not a preference — an approach that gives it up has left this option.
 
 Implement this incrementally, starting with a minimal end-to-end backend that
 proves the first product requirements can be delivered safely:

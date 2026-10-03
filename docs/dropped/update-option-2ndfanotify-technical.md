@@ -1,7 +1,7 @@
 # Second fanotify group — technical design
 
 > Technical companion to [Second fanotify group](update-option-2ndfanotify.md).
-> Shared acceptance checks are in [Backend Test Requirements](backend-test-requirements.md).
+> Shared acceptance checks are in [Backend Test Requirements](../backend-test-requirements-technical.md).
 
 ## Scope and terms
 

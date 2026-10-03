@@ -79,6 +79,53 @@ second Open or File Execute decision path.
    or persist a known fail-closed policy/link until the service repairs it. A
    successful object load is not enough to claim protection.
 
+Cordon (2026-10-03) has working, VM-tested designs for items 4 and 6, and for
+destination-overwrite rename: banked maps plus one selector flip, and bpffs-pinned
+links. See [prior art](prior-art-technical.md#cordon--verified-2026-10-03-an-independent-bpf-lsm-implementation-of-our-row).
+They are reference designs, not yet proven on Filemaster.
+
+A 2026-10-03 spike loaded Cordon's Rust/Aya object from Go with cilium/ebpf and
+enforced `unlink`/`rmdir`, so the BPF side does not need C. Verifier fixes,
+toolchain pinning and `sb->s_dev` keying are open.
+
+**Pre-commit gate, 2026-10-03: GO with caveats.**
+
+- **Fixes:** a two-line patch to Cordon, `#[inline(always)]` on `caller_exe`
+  plus the `clamped()` R0 fix. The combined BPF stack drops from 528 to about
+  480 bytes.
+- **Results:** with the patch, all five mutation hooks load from Go
+  (cilium/ebpf v0.20.0) and enforce. That was 21/21 cases on each of 7.1.0 and
+  6.18.46, on both tmpfs and btrfs, covering:
+  - escape by link or rename;
+  - rename-over and atomic save, with and without rules;
+  - internal rename;
+  - unlink, rmdir and mkdir;
+  - a banked policy flip.
+- **Keying:** objects are keyed by `sb->s_dev` from `/proc/self/mountinfo`. On
+  btrfs `stat` differs by one minor.
+- **6.12:** verifier-accepted only; not attached.
+- **Untested:** overlayfs and bind mounts.
+
+**Identity is partly expressible.** Exe-path profiles compile to exe
+`(dev, ino)` keys, which must be re-published when a binary is replaced.
+Profiles that resolve through MatchingPath (interpreter scripts, AppImage,
+flatpak) and cmdline/env/tag fingerprints cannot be distinguished in-kernel
+(`service/profile/fingerprint.go:261-351`). They degrade to default-deny or to
+an exe-wide match. **Decided:** close this with the combined labelling design:
+
+- an in-kernel label map keyed by `(tgid, start_time)`, copied on fork and
+  recomputed on exec;
+- the shebang script inode, recorded at exec;
+- the daemon labelling on the fanotify open of the script;
+- argv captured in BPF.
+
+Unlabelled processes are denied. See
+[cost technical](update-options-cost-technical.md#bpf-lsm-re-costed-as-a-cordon-port-2026-10-03).
+Single-segment globs (`rule.go:124`) need expansion when the
+policy is built, which misses files created afterwards. Details of the earlier
+spike:
+[cost technical](update-options-cost-technical.md#bpf-lsm--cordon-as-an-external-measurement-2026-10-03).
+
 ## Decided behaviour: deny with feedback
 
 A BPF LSM program cannot prompt or wait for a userspace decision. The accepted
