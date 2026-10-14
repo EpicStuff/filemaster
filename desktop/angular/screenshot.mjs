@@ -3,10 +3,10 @@
 //   url defaults to http://localhost:4200/dashboard
 //   output defaults to ./tmp/screenshot.png  (relative to repo root / cwd)
 //
-// Requires: ng serve running on :4200, daemon on :818, playwright installed at
-//   /root/vaultwarden-clients/node_modules/playwright
+// Requires: ng serve running on :4200, daemon on :818, and `npm install` in
+//   desktop/angular for this package's playwright.
 
-import { chromium } from '/root/vaultwarden-clients/node_modules/playwright/index.mjs';
+import { chromium } from 'playwright';
 
 const url = process.argv[2] || 'http://localhost:4200/dashboard';
 const out = process.argv[3] || './tmp/screenshot.png';
