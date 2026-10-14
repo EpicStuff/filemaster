@@ -109,7 +109,7 @@ Report on these before proceeding. Any one of them may settle feasibility on its
 ## Gate 1 item 3 — the feature sweep (2026-08-30)
 
 **Verified against Linux `v7.1`** in the P1 source tree at
-`/root/vm/share/lsm-p1/source/linux-v7.1` (git head `8cd9520d3`, tagged
+`/root/filemaster/archive/lsm-p1/source/linux-v7.1` (git head `8cd9520d3`, tagged
 `Linux 7.1`; `Makefile` VERSION 7 PATCHLEVEL 1 SUBLEVEL 0). Every `file:line`
 below was read in that tree. Claims are labelled **verified from source**,
 **verified by running it** (P1's booted custom kernel), or **judged**.
@@ -334,7 +334,7 @@ wait without locks, retry, and reject a raced replacement. `rename` is the
 harder and more informative of the two because of `s_vfs_rename_mutex` and
 two-sided identity.
 
-Reuse the P1 bundle at `/root/vm/share/lsm-p1/` rather than starting over.
+Reuse the P1 bundle at `/root/filemaster/archive/lsm-p1/` rather than starting over.
 
 ## Sequencing and size
 

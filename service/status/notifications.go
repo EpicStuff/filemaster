@@ -21,7 +21,10 @@ func (s *Status) deriveNotificationsFromStateUpdate(update mgr.StateUpdate) {
 		seenStateIDs[state.ID] = struct{}{}
 
 		// Check if we already have a notification registered.
-		if _, ok := notifs[state.ID]; ok {
+		if n, ok := notifs[state.ID]; ok {
+			// Filemaster: a state re-added with a new type or message updates
+			// its notification instead of keeping the first one.
+			updateStateNotification(n, state)
 			continue
 		}
 

@@ -373,16 +373,19 @@ matched within one tick.
 ## 3. Milestones
 
 Each milestone is one coherent commit with a VM-observed exit test (CLAUDE.md
-"test before commit"), on both `7.1.0-filemaster-p1` and `6.18.46-lts`, using
-both tmpfs and btrfs.
+"test before commit"), on both of the VM's kernels, stock Arch `7.1.9-arch1-2`
+and Debian 13's `6.12.107+deb13-amd64` (the dev host's kernel), using both
+tmpfs and btrfs. The stock Arch 7.1 kernel ships BPF LSM
+active, BTF and fanotify permission events, so the patched
+`7.1.0-filemaster-p1` kernel (built only for the kernel-hook prompt
+experiment) is not needed for this plan.
 
-**The VM's `7.1.0-filemaster-p1` kernel has no fanotify** (`fanotify_init`
-returns ENOSYS), so the daemon cannot start on it. Package-level BPF tests run
-on both kernels; tests that need the running daemon run on `6.18.46-lts` only,
-until that kernel is rebuilt with `CONFIG_FANOTIFY`. M1 exit evidence: the
-`bpflsm` load and lifecycle tests passed on both kernels, on tmpfs and
-btrfs (lifecycle 20/20 runs after the detach fix), and the daemon checks
-(enable, SIGKILL, restart, off at startup and live) passed on 6.18.
+M1 exit evidence: the `bpflsm` load and lifecycle tests passed on 6.18 and
+on 7.1, both `7.1.0-filemaster-p1` and stock Arch, on tmpfs and btrfs
+(lifecycle 20/20 runs after the detach fix), and the daemon checks (enable,
+SIGKILL, restart, off at startup and live) passed on 6.18 and stock Arch 7.1.
+The load, lifecycle and startup daemon checks also passed on Debian 6.12
+(6.18-lts has since been replaced by it in the VM).
 
 | # | Slice | Exit test (observed in VM) | Sessions |
 |---|---|---|---:|
@@ -396,8 +399,8 @@ btrfs (lifecycle 20/20 runs after the detach fix), and the daemon checks
 
 ## 4. Test plan
 
-**VM matrix.** Kernels 7.1 and 6.18; 6.12 needs a guest kernel that the VM
-does not have yet, and is verifier-only today. Filesystems:
+**VM matrix.** Kernels: Arch 7.1 and Debian 6.12 (`vmctl kernel linux` /
+`vmctl kernel linux-debian`). Filesystems:
 
 - tmpfs, btrfs (root), and ext4 (a loop device);
 - overlayfs, both lower and upper; untested so far, and Cordon measured only

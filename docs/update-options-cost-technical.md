@@ -488,7 +488,7 @@ Do not quote a number until P1 measures one.
 
 The `rmdir` P1 ran on Linux `v7.1` in the dev VM and the design held. Full
 report and evidence bundle: [P1 `rmdir` unwind-and-retry proof](p1-rmdir-technical.md)
-and `/root/vm/share/lsm-p1/`.
+and `/root/filemaster/archive/lsm-p1/`.
 
 **Measured**, by applying the patch series against the tag with
 `git apply --cached --check`:

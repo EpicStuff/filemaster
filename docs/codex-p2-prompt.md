@@ -60,7 +60,7 @@ Both carry the same standing rules, reproduced in each prompt:
 ## Job B — P2: port the fanotify prior art to `v7.1` and recount (needs a VM)
 
 > You are working in the Filemaster repository. The dev VM is at `/root/vm`,
-> driven by `vmctl`. Reuse the P1 bundle at `/root/vm/share/lsm-p1/` rather than
+> driven by `vmctl`. Reuse the P1 bundle at `/root/filemaster/archive/lsm-p1/` rather than
 > starting over; `docs/p1-rmdir-technical.md` records what it already does.
 >
 > **Background.** Filemaster is evaluating whether to build interactive

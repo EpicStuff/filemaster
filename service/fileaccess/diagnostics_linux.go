@@ -170,7 +170,7 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 			ID:       id,
 			Severity: severity,
 			Message:  message,
-			Details:  strings.Join(details, " "),
+			Details:  strings.Join(details, "; "),
 		})
 	}
 	if diagnostics.Mount.PartialCoverage {
@@ -227,8 +227,14 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 				"Structural enforcement is off, so delete, folder create, hard link and rename operations are unprotected.")
 		}
 	case bpflsm.StateUnavailable:
-		appendWarning("bpf-lsm-unavailable", "error",
-			"Delete, folder create, hard link and rename operations are unprotected because this kernel cannot run the BPF LSM.",
+		// Only the user can fix this, by rebooting with bpf in lsm=, so it is
+		// an error only when they explicitly asked for enforcement.
+		severity := "warning"
+		if structural.Mode == bpflsm.ModeEnforce {
+			severity = "error"
+		}
+		appendWarning("bpf-lsm-unavailable", severity,
+			"Delete, folder create, hard link and rename operations are unprotected because this kernel cannot run the BPF LSM. To enable it, add bpf to the lsm= kernel boot parameter and reboot.",
 			structural.Problems...)
 	case bpflsm.StateFailed:
 		appendWarning("bpf-lsm-failed", "error",

@@ -11,8 +11,15 @@ claim a proof for `unlink`, `rename`, `link`, daemon integration, or P1 gates
 4–9.  The native LSM uses a securityfs Allow/Deny stub only.
 
 **Verified by running it.** The reproducibility bundle is
-`/root/vm/share/lsm-p1/` on the host and `/mnt/share/lsm-p1/` in the guest.
-Its entry point is [REPRODUCE.md](/root/vm/share/lsm-p1/REPRODUCE.md).
+archived, untracked, at `archive/lsm-p1/` in this repo (the patched kernel
+tree under `source/` was deleted; `scripts/fetch-kernel.sh` and
+`scripts/apply-patches.sh` rebuild it); its scripts expect it in the VM at
+`/mnt/share/lsm-p1/`. Its entry point is
+[REPRODUCE.md](/root/filemaster/archive/lsm-p1/REPRODUCE.md). On 2026-10-14 a
+re-run overwrote `config/linux-v7.1-filemaster-p1.config` (now an Arch-based
+config, not the one P1 was built with) and
+`results/build-v7.1-filemaster-p1.log`, and the installed P1 kernel was
+removed from the VM; the patches and every other result are original.
 
 ## Verdict
 
@@ -268,8 +275,9 @@ The trimmed configuration avoided a full distribution-kernel build.
 
 ## Configuration and reproduction
 
-**Verified by running it.** The exact final `.config` is
-`config/linux-v7.1-filemaster-p1.config`.  It began from upstream
+**Verified by running it.** The exact final `.config` was
+`config/linux-v7.1-filemaster-p1.config` (since overwritten; `scripts/configure.sh`
+regenerates it).  It began from upstream
 `x86_64_defconfig`, enabled Filemaster/securityfs/path LSM, lockdep, tracing,
 virtio, ext4, Btrfs, loopback, BPF LSM and BTF, and disabled major unused
 hardware/network classes.  The recorded final count is 1,404 enabled symbols

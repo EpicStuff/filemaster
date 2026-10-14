@@ -79,3 +79,6 @@ service/fileaccess/bpflsm/obj/
 fake-fanotify
 portmaster-core
 fanotify-root-bench
+
+# Local archive of past experiments (not tracked)
+/archive/

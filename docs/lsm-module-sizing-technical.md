@@ -24,7 +24,7 @@ Excluded: a stock BPF backend unless a table explicitly says “dual tier”; di
 
 ## Measured P1 base
 
-The native rmdir proof was run on Linux v7.1, commit 8cd9520d35a6c38db6567e97dd93b1f11f185dc6 (**measured**); the full result is in [P1 rmdir unwind-and-retry proof](p1-rmdir-technical.md). Its patch series is saved under /root/vm/share/lsm-p1/.
+The native rmdir proof was run on Linux v7.1, commit 8cd9520d35a6c38db6567e97dd93b1f11f185dc6 (**measured**); the full result is in [P1 rmdir unwind-and-retry proof](p1-rmdir-technical.md). Its patch series is saved under /root/filemaster/archive/lsm-p1/.
 
 | Area | Figure | Basis | Consequence for this sizing |
 | --- | ---: | --- | --- |

@@ -121,7 +121,7 @@ notification class and cannot be combined with the FID report bits
 notification group (fanotify_user.c:1985–1990). The current UAPI therefore
 does not permit a group that is both blocking and DFID_NAME/TARGET/MNT-rich.
 (Line references corrected 2026-08-30 against `v7.1` at
-`/root/vm/share/lsm-p1/source/linux-v7.1`; the earlier citations were 1–2 lines
+`/root/filemaster/archive/lsm-p1/source/linux-v7.1`; the earlier citations were 1–2 lines
 adrift. Every underlying claim was confirmed.)
 
 **Verified from source.** The current permission-mask family covers
