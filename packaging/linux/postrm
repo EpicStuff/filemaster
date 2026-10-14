@@ -21,6 +21,10 @@ echo "[ ] Stopping and disabling service"
 systemctl stop filemaster.service
 systemctl disable filemaster.service
 
+echo "[ ] Detaching BPF LSM programs"
+# Removing the pins releases the links; the package's binary is already gone.
+rm -fr /sys/fs/bpf/filemaster
+
 echo "[ ] Removing files"
 # Remove binaries folder
 rm -fr /opt/filemaster

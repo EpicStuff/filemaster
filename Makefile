@@ -115,7 +115,7 @@ package: stage
 	@mkdir -p "$(DIST)/$(PLATFORM)/packages"
 	find "$(TAURI_DIR)/target/release/bundle" -type f \( -name '*.deb' -o -name '*.rpm' \) -exec cp {} "$(DIST)/$(PLATFORM)/packages" \;
 
-test:
+test: bpf
 	go test ./...
 	$(MAKE) test-fake
 	$(MAKE) test-ui-archive

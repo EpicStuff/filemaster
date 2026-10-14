@@ -29,6 +29,7 @@ type FileAccess struct {
 	pipelineConfig          DecisionPipelineConfig
 	effectivePipelineConfig DecisionPipelineConfig
 	profileHandler          *ProfileHandler
+	structural              *structuralBackend
 	lifecycle               *PipelineLifecycle
 	states                  *mgr.StateMgr
 	warningMu               sync.Mutex
@@ -149,6 +150,9 @@ func (fa *FileAccess) Start() error {
 	if err := fa.hydrateSelfProfile(); err != nil {
 		return err
 	}
+	// Before the fanotify source: the structural self-test makes its own
+	// mount, and startup must not depend on fanotify answering for it.
+	fa.startStructuralEnforcement()
 
 	src, err := newPlatformSource(fa.mgr)
 	if err != nil {
@@ -249,6 +253,7 @@ type configAccessor interface {
 // unwinds via either ctx.Done (from the worker manager) or EBADF
 // (from the closed fd), whichever lands first.
 func (fa *FileAccess) Stop() error {
+	fa.closeStructuralEnforcement()
 	if fa.lifecycle == nil {
 		if fa.source == nil {
 			return nil

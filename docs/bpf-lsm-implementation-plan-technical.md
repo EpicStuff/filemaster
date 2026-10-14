@@ -98,7 +98,8 @@ The 2-line gate patch (`clamped()` R0 fix, plus `#[inline(always)]` on
 - **Embedding:** the Go package embeds the object, so `.deb`/`.rpm` packaging
   and `make package` are unchanged; the object ships inside `filemaster-core`.
 - **Without the object:** a plain `go build` fails at the embed. That is
-  acceptable, because `make core` is the supported entry point.
+  acceptable, because `make core` and `make test` are the supported entry
+  points; both depend on `bpf` (M1).
 - **`make test-fake`** (`Makefile:112`) gains a `filemaster_test` stub that
   embeds nothing, so unit tests run without the Rust toolchain.
 - **Reproducibility:** the verifier outcome depends on the LLVM in
@@ -106,7 +107,7 @@ The 2-line gate patch (`clamped()` R0 fix, plus `#[inline(always)]` on
   SHA-256 in the build log. A self-test at load (§2.5) fails loudly rather than
   shipping an object that does not verify.
 
-### 2.3 Go loader (`bpflsm/loader.go`, `probe.go`)
+### 2.3 Go loader (`bpflsm/loader.go`, `abi.go`)
 
 Pattern from `scratchpad/spike2/main.go` (cilium/ebpf v0.20.0, already a
 direct dependency in `go.mod:15`).
@@ -229,15 +230,21 @@ JSON manifest of `size_of` and `offset_of` for every map key/value. A Go test
 asserts its mirrored structs against that manifest; it fails the build on any
 drift.
 
-### 2.5 Lifecycle and crash behaviour (`bpflsm/lifecycle.go`)
+### 2.5 Lifecycle and crash behaviour (`bpflsm/enforcer.go`, `selftest.go`)
 
 - **Pinning.** Links are pinned to `/sys/fs/bpf/filemaster/<gen>/`, so
   enforcement with the last published policy survives a daemon SIGKILL.
 - **Config.** New option `fileaccess/structuralEnforcement`:
   `off | audit | enforce`, **default `audit`** (§5, risk 2).
   - `audit` uses the same table but turns every deny into allow-and-record.
-  - `off` unpins and detaches. Detach is asynchronous (Cordon), so the daemon
-    polls until it completes before reporting "unprotected".
+  - `off` unpins and detaches. Detach is asynchronous (Cordon). M1 found the
+    trap: when unlinking the pin drops a link's last reference, the detach runs
+    later on a kernel workqueue while the link ID already reads as gone, so
+    polling IDs passes too early and the old programs keep enforcing briefly.
+    The loader therefore opens each pinned link, unlinks the pin, then closes
+    its own descriptor last; that close detaches synchronously
+    (`removeGeneration`). The programs themselves are freed a little later
+    still (RCU), which is harmless.
 - **Self-bypass.** The daemon's own operations bypass enforcement through
   `SELF`, keyed by `(tgid, start_time)` plus an exe check. The pid-only
   weakness Cordon documents (`main.rs:199`) is closed by the start-time key.
@@ -248,7 +255,29 @@ drift.
   - each hook denies under a deny table and allows under an allow table;
   - this exercises every argument index, catching the silent fail-open Cordon
     warns of (`main.rs:139-145`).
-- **Uninstall.** A packaging `postrm` runs `filemaster-core --bpf-teardown`.
+- **Uninstall.** `filemaster-core bpf-teardown` (a subcommand, like `version`
+  and `update`) unpins every generation. The packaging `postrm` runs after the
+  package's files are gone, so it removes `/sys/fs/bpf/filemaster` directly;
+  removing the pins releases the links.
+
+**As built in M1:**
+
+- Generations are named by start time in nanoseconds. Each pins its links
+  (`link-<id>`) and the four policy maps (`SETTINGS`, `PROTECTED`, `RULES`,
+  `RULE_COUNT`).
+- The self-test runs on bank 1 with no daemon bypass, in a tmpfs mounted at
+  `/run/filemaster/bpf-selftest`. Deny table: unlink, rmdir and mkdir inside
+  the protected folder, and link and rename both out of it (source argument)
+  and into it (destination argument). Allow table: the same operations minus
+  the escapes, which Cordon's model always denies. A failure detaches the new
+  programs and leaves older generations in place.
+- The daemon bypass is still Cordon's pid + exe record; `(tgid, start_time)`
+  arrives with labelling (M3).
+- Audit and enforce attach identically. With an empty policy they cannot
+  differ; the kernel-side audit switch lands with the decision table (M2).
+- Structural enforcement starts before the fanotify source, and only in the
+  daemon (an instance with configuration). A failed fanotify start leaves the
+  new generation pinned with an empty policy, which allows everything.
 
 ### 2.6 Process labelling (`label.rs`, `bpflsm/labeller.go`)
 
@@ -347,10 +376,18 @@ Each milestone is one coherent commit with a VM-observed exit test (CLAUDE.md
 "test before commit"), on both `7.1.0-filemaster-p1` and `6.18.46-lts`, using
 both tmpfs and btrfs.
 
+**The VM's `7.1.0-filemaster-p1` kernel has no fanotify** (`fanotify_init`
+returns ENOSYS), so the daemon cannot start on it. Package-level BPF tests run
+on both kernels; tests that need the running daemon run on `6.18.46-lts` only,
+until that kernel is rebuilt with `CONFIG_FANOTIFY`. M1 exit evidence: the
+`bpflsm` load and lifecycle tests passed on both kernels, on tmpfs and
+btrfs (lifecycle 20/20 runs after the detach fix), and the daemon checks
+(enable, SIGKILL, restart, off at startup and live) passed on 6.18.
+
 | # | Slice | Exit test (observed in VM) | Sessions |
 |---|---|---|---:|
 | M0 | Vendor the crates with port headers and the licence; apply the gate patch; strip blessing/open/exec; Makefile `bpf` target, `go:embed`, `test-fake` stub | `make core` embeds the object; a Go test loads every program through the verifier on both kernels | 0.5 |
-| M1 | Loader, probe, `.rodata` offsets, attach, pin generations, handover, self-test, teardown, mode option, degraded warnings | Enable → 5 hooks attached and shown in diagnostics; SIGKILL → enforcement persists; restart → generation swap with no gap; `off` → detached and reported unprotected | 1.5 |
+| M1 ✅ | Loader, probe, `.rodata` offsets, attach, pin generations, handover, self-test, teardown, mode option, degraded warnings | Enable → 5 hooks attached and shown in diagnostics; SIGKILL → enforcement persists; restart → generation swap with no gap; `off` → detached and reported unprotected | 1.5 |
 | M2 | Decision table (`decide.rs`) + Go compiler + banked publish + ABI manifest test; single label `UNIDENTIFIED` | Differential test: for generated rule sets, the BPF verdict equals `DecideOperation`/`DecideRename`/`DecideHardLink` across the operation matrix, including rename-over, atomic save, cross-directory moves and `*at()` callers | 2–2.5 |
 | M3 | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny | `python a.py` vs `python b.py` get distinct verdicts; `./x.py` with env shebang; bash/node/perl; `-m` resolves; `-c` falls to the interpreter profile; argv rewrite after start does not change the label; a child `rm` gets `rm`'s label | 2–2.5 |
 | M4 | Events → filequery, deny notification with Allow-and-retry, Write list active in rule model and UI | Monitor shows delete/rename/link records; the notification appears; Allow → retry succeeds; screenshots of dashboard/monitor/settings checked per CLAUDE.md | 1.5–2 |

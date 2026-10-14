@@ -12,6 +12,10 @@ import (
 // initializes; it just has no marks to issue).
 const CfgOptionWatchPathsKey = "fileaccess/watchPaths"
 
+// CfgOptionStructuralEnforcementKey selects whether the BPF LSM backend gates
+// delete, folder create, hard link and rename operations.
+const CfgOptionStructuralEnforcementKey = "fileaccess/structuralEnforcement"
+
 // Pipeline limits intentionally require restart. The queue and worker count
 // own goroutines and buffered ownership; replacing either live would make the
 // configured value disagree with the active enforcement limits.
@@ -28,6 +32,7 @@ const (
 	cfgOptionDecisionQueueOrder   = 30
 	cfgOptionOutstandingOrder     = 40
 	cfgOptionProfileAskOrder      = 50
+	cfgOptionStructuralOrder      = 60
 )
 
 var (
@@ -36,6 +41,7 @@ var (
 	cfgOptionDecisionQueue   config.IntOption
 	cfgOptionOutstanding     config.IntOption
 	cfgOptionProfileAsk      config.IntOption
+	cfgOptionStructural      config.StringOption
 )
 
 const (
@@ -108,6 +114,28 @@ func registerConfig() error {
 		return err
 	}
 	cfgOptionWatchPaths = config.Concurrent.GetAsStringArray(CfgOptionWatchPathsKey, []string{"+ /home"})
+
+	err = config.Register(&config.Option{
+		Name:         "Structural Enforcement",
+		Key:          CfgOptionStructuralEnforcementKey,
+		Description:  "Whether delete, folder create, hard link and rename operations are checked against file rules before they happen, using the kernel's BPF LSM. Audit records operations that would be blocked without blocking them; Enforce blocks them; Off leaves them unprotected.",
+		OptType:      config.OptTypeString,
+		DefaultValue: "audit",
+		PossibleValues: []config.PossibleValue{
+			{Name: "Off", Value: "off"},
+			{Name: "Audit", Value: "audit"},
+			{Name: "Enforce", Value: "enforce"},
+		},
+		Annotations: config.Annotations{
+			config.DisplayOrderAnnotation: cfgOptionStructuralOrder,
+			config.CategoryAnnotation:     "File Access",
+			config.DisplayHintAnnotation:  config.DisplayHintOneOf,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	cfgOptionStructural = config.Concurrent.GetAsString(CfgOptionStructuralEnforcementKey, "audit")
 
 	defaults := DefaultDecisionPipelineConfig()
 	for _, option := range []struct {

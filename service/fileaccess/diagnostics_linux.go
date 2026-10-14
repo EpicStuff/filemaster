@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/safing/portmaster/service/fileaccess/bpflsm"
 	"github.com/safing/portmaster/service/mgr"
 )
 
@@ -44,7 +45,10 @@ type FileAccessDiagnostics struct {
 	PermanentRules      map[string]RulePersistenceDiagnostics
 	Shutdown            ShutdownDiagnostics
 	LifecycleState      string
-	Warnings            []DegradedWarning
+	// Structural reports the BPF LSM backend for delete, folder create, hard
+	// link and rename. It is empty when the module runs without configuration.
+	Structural bpflsm.Status
+	Warnings   []DegradedWarning
 	// RuleModel reports which user-facing rule categories the current release
 	// enforces, exposes-but-ignores, or retains hidden. It is static for the
 	// current fanotify release; see CurrentRuleModel.
@@ -107,6 +111,9 @@ func (fa *FileAccess) Diagnostics() FileAccessDiagnostics {
 	}
 	if diagnostics.PermanentRules == nil {
 		diagnostics.PermanentRules = make(map[string]RulePersistenceDiagnostics)
+	}
+	if fa.structural != nil {
+		diagnostics.Structural = fa.structural.Status()
 	}
 	diagnostics.LifecycleState = diagnostics.Shutdown.State.String()
 	diagnostics.Warnings = diagnosticsWarnings(diagnostics)
@@ -211,6 +218,39 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 	// current unsuccessful final removal state and clears after verified recovery.
 	if len(diagnostics.Shutdown.Marks.Failures) > 0 || (diagnostics.Shutdown.State != LifecycleRunning && !diagnostics.Shutdown.Marks.Complete) {
 		appendWarning("shutdown-mark-removal-failed", "error", "Controlled shutdown could not remove every fanotify mark; enforcement coverage was not cleanly released.")
+	}
+	structural := diagnostics.Structural
+	switch structural.State {
+	case bpflsm.StateOff:
+		if structural.Mode == bpflsm.ModeOff {
+			appendWarning("structural-enforcement-off", "warning",
+				"Structural enforcement is off, so delete, folder create, hard link and rename operations are unprotected.")
+		}
+	case bpflsm.StateUnavailable:
+		appendWarning("bpf-lsm-unavailable", "error",
+			"Delete, folder create, hard link and rename operations are unprotected because this kernel cannot run the BPF LSM.",
+			structural.Problems...)
+	case bpflsm.StateFailed:
+		appendWarning("bpf-lsm-failed", "error",
+			"Delete, folder create, hard link and rename operations are unprotected because the BPF LSM failed to start.",
+			structural.Error)
+	case bpflsm.StateActive:
+		var unattached []string
+		for _, hook := range structural.Hooks {
+			if !hook.Attached {
+				unattached = append(unattached, hook.Operation+": "+hook.Error)
+			}
+		}
+		if len(unattached) > 0 {
+			appendWarning("bpf-lsm-hook-attach-failed", "error",
+				"Some structural operations are unprotected because their BPF LSM hook did not attach.",
+				strings.Join(unattached, "; "))
+		}
+	}
+	if len(structural.OrphanedGenerations) > 0 {
+		appendWarning("bpf-lsm-orphaned-generation", "warning",
+			"An older BPF LSM generation could not be removed and may still be enforcing its last policy.",
+			"generations="+strings.Join(structural.OrphanedGenerations, ","), structural.Error)
 	}
 	sort.Slice(warnings, func(i, j int) bool { return warnings[i].ID < warnings[j].ID })
 	return warnings
