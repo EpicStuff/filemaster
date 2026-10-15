@@ -24,11 +24,17 @@
 #[macro_use]
 mod layout;
 
+pub mod decision_maps;
 pub mod ids;
 pub mod maps;
 pub mod offsets;
 pub mod policy_maps;
 
+pub use decision_maps::{
+    AUDIT_COUNTERS, DecisionOp, Label, MAP_AUDIT, MAP_NOMATCH, MAP_OBJECTS, MAP_VERDICT,
+    MAX_NOMATCH, MAX_OBJECTS, MAX_VERDICTS, NUM_BANKS, NoMatchKey, ObjectId, ObjectKey, Relation,
+    TargetKind, Verdict, VerdictKey,
+};
 pub use ids::{
     Bank, CgroupId, Decision, Dev, Ino, Nanos, Opens, Pid, Suppressed, SuppressedTotal, Uid,
 };
@@ -37,8 +43,4 @@ pub use maps::{
     PathComp, Settings, SuppressKey, SuppressVal,
 };
 pub use offsets::Offsets;
-pub use policy_maps::{
-    Action, BankedFile, BankedObj, ClassId, CompiledRule, MAP_BLESSED, MAP_PROTECTED,
-    MAP_RULE_COUNT, MAP_RULES, MAX_BLESSED, MAX_OBJECTS, MAX_RULES_PER_OBJ, NUM_BANKS, ObjId,
-    Policy, SubjectFlags, SubjectMatch, rule_slot,
-};
+pub use policy_maps::{Action, ClassId, ObjId, Policy, SubjectFlags, SubjectMatch};

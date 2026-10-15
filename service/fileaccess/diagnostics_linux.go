@@ -252,6 +252,24 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 				"Some structural operations are unprotected because their BPF LSM hook did not attach.",
 				strings.Join(unattached, "; "))
 		}
+		if structural.Error != "" {
+			appendWarning("bpf-lsm-publish-failed", "error",
+				"The structural BPF LSM kept its previous decision-table bank because a newer table could not be published.",
+				structural.Error)
+		}
+	}
+	for _, warning := range structural.CompileWarnings {
+		message := "A structural rule shape is represented conservatively by the current BPF decision table."
+		switch warning.ID {
+		case "glob-future-match":
+			message = "A glob can match a name created after the current BPF decision table was published."
+		case "rule-no-existing-inode":
+			message = "A rule has no current inode to key in the structural BPF decision table; creation uses its parent's verdict."
+		case "glob-matches-sentinel":
+			message = "A rule matches the structural compiler's sentinel probe name and is excluded from exact differential coverage."
+		}
+		appendWarning("bpf-lsm-"+warning.ID, "warning", message,
+			"patterns="+strings.Join(warning.Patterns, ","))
 	}
 	if len(structural.OrphanedGenerations) > 0 {
 		appendWarning("bpf-lsm-orphaned-generation", "warning",

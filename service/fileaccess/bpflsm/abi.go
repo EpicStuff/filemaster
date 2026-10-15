@@ -12,35 +12,34 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Byte layouts of the Rust records in bpf/filemaster-lsm-common. M2 replaces
-// these with the manifest-tested decision-table schema; until then checkMapLayout
-// refuses an object whose sizes disagree.
+// Byte layouts of bpf/filemaster-lsm-common's M2 decision-table ABI. The
+// committed Rust manifest test guards these constants against layout drift.
 const (
-	numBanks       = 2
-	maxObjects     = 1024
-	maxRulesPerObj = 32
+	numBanks    = 2
+	maxObjects  = 1024
+	maxVerdicts = numBanks * maxObjects * 5 * 3 * 2
+	maxNoMatch  = numBanks * 5 * 2
 
-	settingsSize     = 24
-	bankedFileSize   = 24
-	bankedObjSize    = 8
-	compiledRuleSize = 48
+	settingsSize   = 32
+	objectKeySize  = 24
+	verdictKeySize = 24
+	noMatchKeySize = 16
+	verdictSize    = 4
+	auditKeySize   = 4
+	auditValueSize = 8
 
-	actionWrite  = 1 << 1
-	actionCreate = 1 << 2
-
-	policyAllow = 0
-
-	subjectAnyAll = 0xf
+	labelUnidentified = 1
 )
 
-var policyMaps = []string{"SETTINGS", "PROTECTED", "RULES", "RULE_COUNT"}
+var policyMaps = []string{"SETTINGS", "OBJECTS", "VERDICT", "NOMATCH", "AUDIT"}
 
 func checkMapLayout(spec *ebpf.CollectionSpec) error {
 	for name, want := range map[string][2]uint32{
-		"SETTINGS":   {4, settingsSize},
-		"PROTECTED":  {bankedFileSize, 4},
-		"RULES":      {4, compiledRuleSize},
-		"RULE_COUNT": {bankedObjSize, 4},
+		"SETTINGS": {4, settingsSize},
+		"OBJECTS":  {objectKeySize, 4},
+		"VERDICT":  {verdictKeySize, verdictSize},
+		"NOMATCH":  {noMatchKeySize, verdictSize},
+		"AUDIT":    {auditKeySize, auditValueSize},
 	} {
 		m, ok := spec.Maps[name]
 		if !ok {
@@ -91,39 +90,47 @@ func daemonFileID() (fileID, error) {
 	return pathFileID(exe)
 }
 
-func encodeSettings(daemonPid uint32, bank uint32, exe fileID) []byte {
+// Settings: pid@0, active bank@4, daemon dev@8, daemon ino@16, audit@24,
+// explicit Rust trailing padding@28.
+func encodeSettings(daemonPID, bank uint32, exe fileID, audit bool) []byte {
 	b := make([]byte, settingsSize)
-	binary.LittleEndian.PutUint32(b[0:], daemonPid)
+	binary.LittleEndian.PutUint32(b[0:], daemonPID)
 	binary.LittleEndian.PutUint32(b[4:], bank)
 	binary.LittleEndian.PutUint64(b[8:], exe.dev)
 	binary.LittleEndian.PutUint64(b[16:], exe.ino)
+	if audit {
+		binary.LittleEndian.PutUint32(b[24:], 1)
+	}
 	return b
 }
 
-func encodeBankedFile(bank uint32, id fileID) []byte {
-	b := make([]byte, bankedFileSize)
+// ObjectKey: dev@0, ino@8, bank@16, explicit trailing padding@20.
+func encodeObjectKey(bank uint32, id fileID) []byte {
+	b := make([]byte, objectKeySize)
 	binary.LittleEndian.PutUint64(b[0:], id.dev)
 	binary.LittleEndian.PutUint64(b[8:], id.ino)
 	binary.LittleEndian.PutUint32(b[16:], bank)
 	return b
 }
 
-func encodeBankedObj(bank uint32, obj uint32) []byte {
-	b := make([]byte, bankedObjSize)
-	binary.LittleEndian.PutUint32(b[0:], obj)
-	binary.LittleEndian.PutUint32(b[4:], bank)
+// VerdictKey: bank, object, label, operation, relation, kind (all u32).
+func encodeVerdictKey(bank, object uint32, operation Operation, relation Relation, kind TargetKind) []byte {
+	b := make([]byte, verdictKeySize)
+	binary.LittleEndian.PutUint32(b[0:], bank)
+	binary.LittleEndian.PutUint32(b[4:], object)
+	binary.LittleEndian.PutUint32(b[8:], labelUnidentified)
+	binary.LittleEndian.PutUint32(b[12:], uint32(operation))
+	binary.LittleEndian.PutUint32(b[16:], uint32(relation))
+	binary.LittleEndian.PutUint32(b[20:], uint32(kind))
 	return b
 }
 
-// encodeAnySubjectRule is a rule whose subject matches every caller.
-func encodeAnySubjectRule(actions uint32, policy uint8) []byte {
-	b := make([]byte, compiledRuleSize)
-	binary.LittleEndian.PutUint32(b[32:], subjectAnyAll)
-	binary.LittleEndian.PutUint32(b[40:], actions)
-	b[44] = policy
+// NoMatchKey: bank, label, operation, target kind (all u32).
+func encodeNoMatchKey(bank uint32, operation Operation, kind TargetKind) []byte {
+	b := make([]byte, noMatchKeySize)
+	binary.LittleEndian.PutUint32(b[0:], bank)
+	binary.LittleEndian.PutUint32(b[4:], labelUnidentified)
+	binary.LittleEndian.PutUint32(b[8:], uint32(operation))
+	binary.LittleEndian.PutUint32(b[12:], uint32(kind))
 	return b
-}
-
-func ruleSlot(bank, obj, index uint32) uint32 {
-	return (bank*maxObjects+obj)*maxRulesPerObj + index
 }

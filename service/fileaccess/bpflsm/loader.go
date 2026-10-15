@@ -88,6 +88,7 @@ func loadSpec(object []byte, kernel *btf.Spec) (*ebpf.CollectionSpec, error) {
 		{"dentry", []string{"d_parent"}},
 		{"dentry", []string{"d_name", "name"}},
 		{"inode", []string{"i_ino"}},
+		{"inode", []string{"i_mode"}},
 		{"inode", []string{"i_sb"}},
 		{"super_block", []string{"s_dev"}},
 		{"task_struct", []string{"mm"}},

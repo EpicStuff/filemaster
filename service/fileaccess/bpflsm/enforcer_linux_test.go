@@ -108,20 +108,30 @@ func TestEnforcerLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	protected, err := ebpf.LoadPinnedMap(filepath.Join(firstDir, "PROTECTED"), nil)
+	objects, err := ebpf.LoadPinnedMap(filepath.Join(firstDir, "OBJECTS"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer protected.Close()
+	defer objects.Close()
+	verdicts, err := ebpf.LoadPinnedMap(filepath.Join(firstDir, "VERDICT"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verdicts.Close()
+	noMatch, err := ebpf.LoadPinnedMap(filepath.Join(firstDir, "NOMATCH"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer noMatch.Close()
 	settings, err := ebpf.LoadPinnedMap(filepath.Join(firstDir, "SETTINGS"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer settings.Close()
-	if err := protected.Put(encodeBankedFile(1, id), uint32(0)); err != nil {
+	if err := seedSelfTestTable(objects, verdicts, noMatch, id, VerdictDeny, VerdictAllow); err != nil {
 		t.Fatal(err)
 	}
-	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{})); err != nil {
+	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{}, false)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(victim); !errors.Is(err, unix.EPERM) {
@@ -182,5 +192,79 @@ func TestEnforcerLifecycle(t *testing.T) {
 		if _, err := link.NewFromID(id); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("link %d still attached after off: %v", id, err)
 		}
+	}
+}
+
+// TestEnforcerInitialTableHandover proves the M2 startup order: an old pinned
+// deny table remains effective until the replacement's initial table has been
+// published, pinned, and is ready to sweep it. This would catch a brief empty-
+// bank allow window during daemon restart.
+func TestEnforcerInitialTableHandover(t *testing.T) {
+	requireBPFLSM(t)
+	root := "/sys/fs/bpf/filemaster-table-handover-" + strconv.Itoa(os.Getpid())
+	t.Cleanup(func() { _, _ = teardown(root) })
+
+	protectedDir := t.TempDir()
+	victim := filepath.Join(protectedDir, "victim")
+	if err := os.WriteFile(victim, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	table, err := Compile(
+		[]ObjectInput{{Path: protectedDir}},
+		func(string, Operation, bool) Verdict { return VerdictDeny },
+		VerdictAllow,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := uint32(0)
+	first := NewEnforcerWithOptions(Options{
+		PinRoot:     root,
+		SelfTestDir: filepath.Join(t.TempDir(), "first-selftest"),
+		DaemonPID:   &zero,
+	})
+	if err := first.SetModeWithTable(ModeEnforce, table); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	if err := os.Remove(victim); !errors.Is(err, unix.EPERM) {
+		t.Fatalf("old generation policy before Close: got %v, want EPERM", err)
+	}
+	first.Close()
+
+	var gap atomic.Bool
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := os.Remove(victim); err == nil {
+				gap.Store(true)
+				return
+			}
+		}
+	}()
+
+	second := NewEnforcerWithOptions(Options{
+		PinRoot:     root,
+		SelfTestDir: filepath.Join(t.TempDir(), "second-selftest"),
+		DaemonPID:   &zero,
+	})
+	err = second.SetModeWithTable(ModeEnforce, table)
+	close(stop)
+	<-done
+	if err != nil {
+		t.Fatalf("handover: %v", err)
+	}
+	defer second.SetMode(ModeOff)
+	if gap.Load() {
+		t.Fatal("observed an allow window while replacing a pinned deny table")
+	}
+	if err := os.Remove(victim); !errors.Is(err, unix.EPERM) {
+		t.Fatalf("replacement generation policy: got %v, want EPERM", err)
 	}
 }

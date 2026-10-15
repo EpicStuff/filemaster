@@ -50,6 +50,8 @@ pub struct Offsets {
     pub dentry_d_name_name: u32,
     /// `inode -> i_ino`.
     pub inode_i_ino: u32,
+    /// `inode -> i_mode` (used to distinguish Filemaster file and folder rules).
+    pub inode_i_mode: u32,
     /// `inode -> i_sb` (super_block, for the device number).
     pub inode_i_sb: u32,
     /// `super_block -> s_dev`.
@@ -80,6 +82,7 @@ impl Offsets {
         dentry_d_parent: u32::MAX,
         dentry_d_name_name: u32::MAX,
         inode_i_ino: u32::MAX,
+        inode_i_mode: u32::MAX,
         inode_i_sb: u32::MAX,
         sb_s_dev: u32::MAX,
         task_mm: u32::MAX,

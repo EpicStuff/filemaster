@@ -148,9 +148,10 @@ The port keeps Cordon's **mechanism** and replaces its **decision**:
 - **Replaced:** what the walk looks up. It now reads a precomputed verdict table:
 
 ```
-VERDICT[(bank, object_id, label, decision_op, relation)] -> allow | deny | audit
+VERDICT[(bank, object_id, label, decision_op, relation, target_kind)] -> allow | deny
 relation = SELF (target is the object) | CHILD (object is the target's parent)
          | DESCENDANT (deeper, no closer object)
+target_kind = file | folder
 ```
 
 **Compiler.** For each object `O` and each label `L`:
@@ -178,7 +179,7 @@ even when the destination has no object.
 Such a destination matches no rule, so it gets the label's no-match verdict:
 the profile default through `verdictFromDefaultAction`
 (`decision_snapshot.go:46`). The compiler stores this per label as
-`NOMATCH[(bank, label, decision_op)]`. The result matches `DecideHardLink`
+`NOMATCH[(bank, label, decision_op, target_kind)]`. The result matches `DecideHardLink`
 (`rule_decision.go:228`) and `DecideRename` (`:201`) exactly:
 
 - a hard link or move out of a watched folder to a place with no rules is
@@ -204,8 +205,8 @@ Objects are keyed by `(sb->s_dev, ino)`. `s_dev` comes from
 **Globs.** A glob is expanded when the policy is built. A file created later
 that matches a glob falls back to its folder's or the scope's verdict. This
 degradation is shown as a `DegradedWarning` that lists the affected rule
-patterns (not user paths). The degraded objects are re-expanded on the existing
-mount/reconcile triggers and on each re-publish.
+patterns (not user paths). M2 re-expands on each re-publish; mount/reconcile
+triggers are deliberately deferred to M5.
 
 **Labels.** A label is an equivalence class of *(ordered Read/Write/Exec lists,
 default action)* over all profiles, after global rules are merged. Profiles
@@ -221,9 +222,10 @@ that share both get one label. Reserved labels:
 
 1. Fill the inactive bank.
 2. Flip `SETTINGS.active_bank` in one write (Cordon `seed.rs`).
-3. Re-publish on any of: a profile or rule change (the existing snapshot
-   observer, `profile_binding.go:168`), a watch-path change (`module.go:220`),
-   a mount change, an exe inode change (§2.6), or glob re-expansion.
+3. M2 owns its configuration and profile callbacks rather than changing the
+   existing snapshot observer. It re-publishes on profile/rule and watch-path
+   changes, plus each glob re-expansion. Mount-change triggers wait for M5;
+   exe inode changes wait for M3.
 
 **ABI agreement.** `filemaster-lsm-common` has a `cargo test` that emits a
 JSON manifest of `size_of` and `offset_of` for every map key/value. A Go test
@@ -278,6 +280,31 @@ drift.
 - Structural enforcement starts before the fanotify source, and only in the
   daemon (an instance with configuration). A failed fanotify start leaves the
   new generation pinned with an empty policy, which allows everything.
+
+**As built in M2:**
+
+- The M1 `PROTECTED`, `RULES`, and `RULE_COUNT` maps are gone. The policy maps
+  are `OBJECTS` (hash, 1,024 entries), `VERDICT` (hash, 61,440 entries),
+  `NOMATCH` (hash, 20 entries), and `AUDIT` (per-CPU array, five counters).
+  `SETTINGS` carries the active bank and audit/enforce mode. The ABI manifest
+  locks their key/value sizes and field offsets to Go's encoders.
+- `VERDICT` is keyed by bank, object ID, label, operation, relation, and target
+  kind; `NOMATCH` omits only the object and relation. M2 uses the one
+  `UNIDENTIFIED` label, while the daemon keeps the M1 pid+executable bypass.
+  Process labels and a label map remain M3 work.
+- The compiler calls `DecisionSnapshot.DecideOperation` and the existing
+  no-match default helper; it does not reimplement Filemaster matching. It
+  materializes scope roots, rule bases, and current single-segment glob matches.
+  Future glob matches, missing rule inodes, and sentinel-matching rules are
+  pattern-only degraded warnings. Mount/reconcile re-publication is M5 work.
+- A new generation receives its initial complete table before it is pinned and
+  before older generations are swept. A failed publication leaves the active
+  bank unchanged. Audit converts deny to allow and increments a per-operation
+  counter; enforce returns `-EPERM`.
+- `RENAME_EXCHANGE` evaluates both directions and requires both to allow. The
+  v6.12 and v7.1 `fs/namei.c` sources invoke `security_inode_rename` once with
+  exchange flags, so the second direction is evaluated in BPF rather than
+  assumed to arrive as another hook invocation.
 
 ### 2.6 Process labelling (`label.rs`, `bpflsm/labeller.go`)
 
@@ -391,7 +418,7 @@ The load, lifecycle and startup daemon checks also passed on Debian 6.12
 |---|---|---|---:|
 | M0 | Vendor the crates with port headers and the licence; apply the gate patch; strip blessing/open/exec; Makefile `bpf` target, `go:embed`, `test-fake` stub | `make core` embeds the object; a Go test loads every program through the verifier on both kernels | 0.5 |
 | M1 ✅ | Loader, probe, `.rodata` offsets, attach, pin generations, handover, self-test, teardown, mode option, degraded warnings | Enable → 5 hooks attached and shown in diagnostics; SIGKILL → enforcement persists; restart → generation swap with no gap; `off` → detached and reported unprotected | 1.5 |
-| M2 | Decision table (`decide.rs`) + Go compiler + banked publish + ABI manifest test; single label `UNIDENTIFIED` | Differential test: for generated rule sets, the BPF verdict equals `DecideOperation`/`DecideRename`/`DecideHardLink` across the operation matrix, including rename-over, atomic save, cross-directory moves and `*at()` callers | 2–2.5 |
+| M2 ✅ | Decision table (`decide.rs`) + Go compiler + banked publish + ABI manifest test; single label `UNIDENTIFIED` | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: generated-rule differential test agrees with `DecideOperation`/`DecideRename`/`DecideHardLink` across the operation matrix, including rename-over, atomic save, cross-directory moves and `*at()` callers | 2–2.5 |
 | M3 | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny | `python a.py` vs `python b.py` get distinct verdicts; `./x.py` with env shebang; bash/node/perl; `-m` resolves; `-c` falls to the interpreter profile; argv rewrite after start does not change the label; a child `rm` gets `rm`'s label | 2–2.5 |
 | M4 | Events → filequery, deny notification with Allow-and-retry, Write list active in rule model and UI | Monitor shows delete/rename/link records; the notification appears; Allow → retry succeeds; screenshots of dashboard/monitor/settings checked per CLAUDE.md | 1.5–2 |
 | M5 | Hardening matrix (§4) and fixes | §4 matrix green; coverage warnings correct for every injected failure | 1–1.5 |
@@ -462,8 +489,9 @@ the actual coverage:
 
 1. **The decision table diverges from the Go engine on some rule shape.**
    - *Detect:* M2's differential test.
-   - *If it fails:* restrict BPF to the shapes the table expresses exactly
-     (`/**`, exact path) and report other rules as degraded. Never guess.
+   - *If it fails:* restrict BPF to the shapes the table expresses exactly and
+     report the excluded patterns as degraded. Never guess. M2 already reports
+     future glob matches, missing rule inodes, and sentinel-matching rules.
 2. **Default Ask → Deny breaks the desktop on day one.** No profile has Write
    rules yet, because the list is hidden. So every delete, rename or mkdir
    inside a watched scope would deny.

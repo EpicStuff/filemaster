@@ -80,15 +80,19 @@ padded_pod! {
         pub daemon_pid: Pid,
         pub active_bank: Bank,
         pub daemon_exe: FileId,
+        /// Nonzero changes a would-be denial into an allow and increments the
+        /// corresponding per-CPU `AUDIT` counter.
+        pub audit: u32,
     }
 }
 
 impl Settings {
-    pub const fn new(daemon_pid: Pid, active_bank: Bank, daemon_exe: FileId) -> Self {
+    pub const fn new(daemon_pid: Pid, active_bank: Bank, daemon_exe: FileId, audit: u32) -> Self {
         Settings {
             daemon_pid,
             active_bank,
             daemon_exe,
+            audit,
             _pad: [0; Self::PAD],
         }
     }

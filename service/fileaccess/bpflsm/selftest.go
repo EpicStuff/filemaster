@@ -12,11 +12,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// selfTest proves each attached hook reads its arguments correctly: under a
-// table with no rules every hook must deny, and under an allow table the same
-// operations must succeed. A wrong argument index fails open silently in the
-// kernel, so it would otherwise go unnoticed. It runs in a private tmpfs on
-// bank 1 with no daemon bypass, and leaves bank 0 live and bank 1 empty.
+// selfTest proves each attached hook reads its arguments correctly. It runs a
+// complete deny table, a deny table in audit mode, and a complete allow table
+// on bank 1. Bank 0 remains empty and live when the test exits.
 func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string) (err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -46,15 +44,17 @@ func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string)
 	}
 
 	settings := collection.Maps["SETTINGS"]
-	protected := collection.Maps["PROTECTED"]
-	rules := collection.Maps["RULES"]
-	ruleCount := collection.Maps["RULE_COUNT"]
+	objects := collection.Maps["OBJECTS"]
+	verdicts := collection.Maps["VERDICT"]
+	noMatch := collection.Maps["NOMATCH"]
+	audit := collection.Maps["AUDIT"]
 	defer func() {
 		err = errors.Join(err,
-			settings.Put(uint32(0), encodeSettings(0, 0, fileID{})),
-			protected.Delete(encodeBankedFile(1, id)),
-			rules.Put(ruleSlot(1, 0, 0), make([]byte, compiledRuleSize)),
-			ignoreMissing(ruleCount.Delete(encodeBankedObj(1, 0))),
+			settings.Put(uint32(0), encodeSettings(0, 0, fileID{}, false)),
+			clearObjectBank(objects, 1),
+			clearVerdictBank(verdicts, 1),
+			clearNoMatchBank(noMatch, 1),
+			resetAudit(audit),
 		)
 	}()
 
@@ -78,11 +78,13 @@ func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string)
 		return errors.Join(failures...)
 	}
 
-	// Deny table: the vault is a protected object with no rules.
-	if err := protected.Put(encodeBankedFile(1, id), uint32(0)); err != nil {
+	// Deny every covered target while allowing NOMATCH. This makes the in and
+	// out link/rename cases reach both dentry arguments instead of short-
+	// circuiting at an uncovered source.
+	if err := seedSelfTestTable(objects, verdicts, noMatch, id, VerdictDeny, VerdictAllow); err != nil {
 		return err
 	}
-	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{})); err != nil {
+	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{}, false)); err != nil {
 		return err
 	}
 	if err := run("deny", unix.EPERM, []testCase{
@@ -97,25 +99,103 @@ func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string)
 		return err
 	}
 
-	// Allow table: one rule allowing write and create for every caller.
-	if err := rules.Put(ruleSlot(1, 0, 0), encodeAnySubjectRule(actionWrite|actionCreate, policyAllow)); err != nil {
+	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{}, true)); err != nil {
 		return err
 	}
-	if err := ruleCount.Put(encodeBankedObj(1, 0), uint32(1)); err != nil {
+	before, err := auditTotal(audit, OperationDelete)
+	if err != nil {
+		return err
+	}
+	if attached["inode_unlink"] {
+		if err := os.Remove(path(vault, "f")); err != nil {
+			return fmt.Errorf("audit unlink: %w", err)
+		}
+		after, err := auditTotal(audit, OperationDelete)
+		if err != nil {
+			return err
+		}
+		if after <= before {
+			return fmt.Errorf("audit unlink did not increment delete would-deny counter: before=%d after=%d", before, after)
+		}
+		if err := os.WriteFile(path(vault, "f"), nil, 0o600); err != nil {
+			return err
+		}
+	}
+
+	// With both tables allow, including NOMATCH, all ordinary and formerly
+	// Cordon-denied escapes must succeed.
+	if err := seedSelfTestTable(objects, verdicts, noMatch, id, VerdictAllow, VerdictAllow); err != nil {
+		return err
+	}
+	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{}, false)); err != nil {
 		return err
 	}
 	return run("allow", nil, []testCase{
 		{"inode_unlink", "unlink", func() error { return os.Remove(path(vault, "f")) }},
 		{"inode_rmdir", "rmdir", func() error { return os.Remove(path(vault, "sub")) }},
 		{"inode_mkdir", "mkdir", func() error { return os.Mkdir(path(vault, "new"), 0o700) }},
+		{"inode_link", "link out", func() error { return os.Link(path(vault, "g"), path(open, "g-link")) }},
 		{"inode_link", "link in", func() error { return os.Link(path(open, "y"), path(vault, "y-link")) }},
+		{"inode_rename", "rename out", func() error { return os.Rename(path(vault, "g"), path(open, "g-moved")) }},
 		{"inode_rename", "rename in", func() error { return os.Rename(path(open, "x"), path(vault, "x-moved")) }},
 	})
 }
 
-func ignoreMissing(err error) error {
-	if errors.Is(err, ebpf.ErrKeyNotExist) {
+func seedSelfTestTable(objects, verdicts, noMatch *ebpf.Map, id fileID, target, fallback Verdict) error {
+	if err := clearObjectBank(objects, 1); err != nil {
+		return err
+	}
+	if err := clearVerdictBank(verdicts, 1); err != nil {
+		return err
+	}
+	if err := clearNoMatchBank(noMatch, 1); err != nil {
+		return err
+	}
+	if err := objects.Put(encodeObjectKey(1, id), uint32(0)); err != nil {
+		return err
+	}
+	for _, operation := range allOperations {
+		for _, kind := range allKinds {
+			if err := noMatch.Put(encodeNoMatchKey(1, operation, kind), uint32(fallback)); err != nil {
+				return err
+			}
+			for _, relation := range [...]Relation{RelationSelf, RelationChild, RelationDescendant} {
+				if err := verdicts.Put(encodeVerdictKey(1, 0, operation, relation, kind), uint32(target)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func auditTotal(audit *ebpf.Map, operation Operation) (uint64, error) {
+	values, err := perCPUValues()
+	if err != nil {
+		return 0, err
+	}
+	if err := audit.Lookup(uint32(operation), &values); err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, value := range values {
+		total += value
+	}
+	return total, nil
+}
+
+func resetAudit(audit *ebpf.Map) error {
+	if audit == nil {
 		return nil
 	}
-	return err
+	for _, operation := range allOperations {
+		values, err := perCPUValues()
+		if err != nil {
+			return err
+		}
+		if err := audit.Put(uint32(operation), values); err != nil {
+			return err
+		}
+	}
+	return nil
 }

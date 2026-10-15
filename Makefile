@@ -25,7 +25,7 @@ SERVICE_DIR ?= /etc/systemd/system
 SERVICE_FILE := $(SERVICE_DIR)/filemaster.service
 
 .DEFAULT_GOAL := build
-.PHONY: assets bpf build clean core help install intel package stage tauri tauri-ui test test-desktop-smoke test-fake test-release-gate test-ui-archive ui ui-deps verify-ui-archive
+.PHONY: assets bpf bpf-abi build clean core help install intel package stage tauri tauri-ui test test-desktop-smoke test-fake test-release-gate test-ui-archive ui ui-deps verify-ui-archive
 
 help:
 	@printf '%s\n' 'Filemaster native build targets:' \
@@ -65,6 +65,9 @@ bpf:
 	@mkdir -p "$(dir $(BPF_OBJECT))"
 	cp "$(BPF_DIR)/target/bpfel-unknown-none/release/filemaster-lsm" "$(BPF_OBJECT)"
 	sha256sum "$(BPF_OBJECT)"
+
+bpf-abi:
+	cd "$(BPF_DIR)" && cargo test -p filemaster-lsm-common
 
 core: bpf
 	@mkdir -p "$(dir $(CORE))"
@@ -115,7 +118,7 @@ package: stage
 	@mkdir -p "$(DIST)/$(PLATFORM)/packages"
 	find "$(TAURI_DIR)/target/release/bundle" -type f \( -name '*.deb' -o -name '*.rpm' \) -exec cp {} "$(DIST)/$(PLATFORM)/packages" \;
 
-test: bpf
+test: bpf bpf-abi
 	go test ./...
 	$(MAKE) test-fake
 	$(MAKE) test-ui-archive

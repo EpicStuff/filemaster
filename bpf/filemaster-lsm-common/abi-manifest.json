@@ -1,0 +1,9 @@
+{
+  "FileId": {"size": 16, "offsets": {"dev": 0, "ino": 8}},
+  "Settings": {"size": 32, "offsets": {"daemon_pid": 0, "active_bank": 4, "daemon_exe": 8, "audit": 24, "pad": 28}},
+  "ObjectKey": {"size": 24, "offsets": {"file": 0, "bank": 16, "pad": 20}},
+  "VerdictKey": {"size": 24, "offsets": {"bank": 0, "object": 4, "label": 8, "operation": 12, "relation": 16, "target_kind": 20}},
+  "NoMatchKey": {"size": 16, "offsets": {"bank": 0, "label": 4, "operation": 8, "target_kind": 12}},
+  "Verdict": {"size": 4},
+  "AUDIT": {"key_size": 4, "value_size": 8}
+}
