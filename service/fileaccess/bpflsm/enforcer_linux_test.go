@@ -117,7 +117,7 @@ func TestEnforcerLifecycle(t *testing.T) {
 	if err := writeBank(pinned, 1, denyDeletesTable(t, protectedDir)); err != nil {
 		t.Fatal(err)
 	}
-	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{}, false)); err != nil {
+	if err := settings.Put(uint32(0), encodeSettings(publishedSettings{bank: 1})); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(victim); !errors.Is(err, unix.EPERM) {
@@ -253,9 +253,8 @@ func TestEnforcerInitialTableHandover(t *testing.T) {
 func denyDeletesTable(t *testing.T, dir string) Table {
 	t.Helper()
 	table, _, err := Compile(Policy{
-		Scopes:       []ScopeInput{{Path: dir}},
-		Rules:        []RuleInput{{List: ListWrite, Pattern: dir + "/**"}},
-		DefaultAllow: true,
+		Scopes: []ScopeInput{{Path: dir}},
+		Labels: []LabelPolicy{{Label: LabelUnidentified, Rules: []RuleInput{{List: ListWrite, Pattern: dir + "/**"}}, DefaultAllow: true}},
 	})
 	if err != nil {
 		t.Fatal(err)

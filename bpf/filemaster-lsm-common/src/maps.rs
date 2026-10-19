@@ -1,4 +1,5 @@
-// Ported from cordon crates/bpf-common/src/maps.rs @ b40a8c7 (Apache-2.0) — unchanged apart from the crate rename.
+// Ported from cordon crates/bpf-common/src/maps.rs @ b40a8c7 (Apache-2.0) — the crate rename; M3 moved
+// `Settings` to `label_maps` (its daemon identity became tgid + start time).
 //! The map names and POD records shared between the eBPF program and the loader
 //! that are **not** part of the per-object rule table (that lives in
 //! [`crate::policy_maps`]): the `(dev,inode)` [`FileId`] used everywhere as inode
@@ -10,7 +11,7 @@
 //! paths to `(dev,inode)` via `stat(2)` + the mount table at seed time, and both the
 //! protected object and the caller's executable are matched by [`FileId`].
 
-use crate::ids::{Bank, Decision, Dev, Ino, Nanos, Pid, Suppressed, Uid};
+use crate::ids::{Decision, Dev, Ino, Nanos, Pid, Suppressed, Uid};
 use crate::policy_maps::{Action, ClassId, ObjId};
 
 // ---- map names ------------------------------------------------------------
@@ -56,45 +57,6 @@ impl FileId {
 impl core::fmt::Display for FileId {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "dev={} ino={}", self.dev.0, self.ino.0)
-    }
-}
-
-padded_pod! {
-    /// The one-element control record in `SETTINGS`: which process is the daemon (always
-    /// allowed, so we never deadlock on our own opens) and the live double-buffer [`Bank`].
-    /// The kernel reads all of it from one `Array::get(0)` snapshot; an `apply` fills the
-    /// inactive bank and then writes this record with `active_bank` flipped to publish.
-    /// Only `active_bank` moves after startup, so the flip's only moving part is 4 bytes,
-    /// which can't tear.
-    ///
-    /// **The daemon is `daemon_pid` AND `daemon_exe`, never the pid alone.** A pid is a
-    /// recyclable name, and once the LSM links are bpffs-pinned this record outlives the
-    /// process that wrote it — so a pid-only test hands a total, unlogged bypass of every
-    /// protected object to whatever lands on that pid next. Pairing it with the exe's
-    /// [`FileId`] costs one comparison the kernel already has the machinery for (it reads
-    /// `mm->exe_file` for every subject match anyway) and narrows the window to "and it is
-    /// also running cordond".
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug)]
-    pub struct Settings {
-        pub daemon_pid: Pid,
-        pub active_bank: Bank,
-        pub daemon_exe: FileId,
-        /// Nonzero changes a would-be denial into an allow and increments the
-        /// corresponding per-CPU `AUDIT` counter.
-        pub audit: u32,
-    }
-}
-
-impl Settings {
-    pub const fn new(daemon_pid: Pid, active_bank: Bank, daemon_exe: FileId, audit: u32) -> Self {
-        Settings {
-            daemon_pid,
-            active_bank,
-            daemon_exe,
-            audit,
-            _pad: [0; Self::PAD],
-        }
     }
 }
 
@@ -304,6 +266,5 @@ mod user {
     // pattern is a valid value and the types are `Copy` with a fixed `repr(C)` layout
     // — exactly aya's contract for `Pod`.
     unsafe impl aya::Pod for FileId {}
-    unsafe impl aya::Pod for Settings {}
     unsafe impl aya::Pod for DecisionEvent {}
 }

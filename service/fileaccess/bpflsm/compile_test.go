@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 )
@@ -88,46 +89,77 @@ func TestCompileBuildsContextsForScopeAndRules(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	policy := Policy{
-		Scopes: []ScopeInput{{Path: scope}, {Path: filepath.Join(scope, "skip"), Exclude: true}},
-		Rules: []RuleInput{
-			{List: ListWrite, Pattern: filepath.Join(scope, "missing", "*.txt"), Kind: KindFile},
-			{List: ListRead, Pattern: filepath.Join(other, "**"), Allow: true},
-			{List: ListWrite, Pattern: "/a/[", Allow: true},
-		},
-		DefaultAllow: true,
+	rules := []RuleInput{
+		{List: ListWrite, Pattern: filepath.Join(scope, "missing", "*.txt"), Kind: KindFile},
+		{List: ListRead, Pattern: filepath.Join(other, "**"), Allow: true},
+		{List: ListWrite, Pattern: "/a/[", Allow: true},
 	}
-	table, warnings, err := Compile(policy)
+	table, warnings, err := Compile(Policy{
+		Scopes: []ScopeInput{{Path: scope}, {Path: filepath.Join(scope, "skip"), Exclude: true}},
+		Labels: []LabelPolicy{{Label: LabelUnidentified, Rules: rules, DefaultAllow: true}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(warnings) != 1 || warnings[0].ID != "pattern-never-matches" || warnings[0].Patterns[0] != "/a/[" {
 		t.Fatalf("warnings = %#v", warnings)
 	}
-	contexts := make(map[string]CompiledContext)
-	for _, context := range table.Contexts {
-		contexts[context.Path] = context
+	policy := table.Labels[LabelUnidentified]
+	if policy == policyPending || !table.Policies[policy].DefaultAllow {
+		t.Fatalf("label 0 maps to policy %d %+v", policy, table.Policies)
 	}
-	scopeContext, ok := contexts[scope]
-	if !ok {
-		t.Fatalf("no context for scope root %q in %d contexts", scope, len(table.Contexts))
+	scopeRules := policyRules(t, table, policy, scope)
+	if len(scopeRules) != 1 || table.Patterns[scopeRules[0].Pattern].Text != rules[0].Pattern {
+		t.Fatalf("scope rules = %+v", scopeRules)
 	}
-	if len(scopeContext.Rules) != 1 || table.Patterns[scopeContext.Rules[0].Pattern].Text != policy.Rules[0].Pattern {
-		t.Fatalf("scope rules = %+v", scopeContext.Rules)
+	if context := findContext(t, table, scope); len(context.Scopes) != 1 || context.Scopes[0].Path != scope {
+		t.Fatalf("scope entries = %+v, want only the containing scope", context.Scopes)
 	}
-	if len(scopeContext.Scopes) != 1 || scopeContext.Scopes[0].Path != scope {
-		t.Fatalf("scope entries = %+v, want only the containing scope", scopeContext.Scopes)
+	if otherRules := policyRules(t, table, policy, other); len(otherRules) != 1 || !table.Patterns[otherRules[0].Pattern].Recursive {
+		t.Fatalf("other rules = %+v", otherRules)
 	}
-	otherContext, ok := contexts[other]
-	if !ok || len(otherContext.Rules) != 1 || !table.Patterns[otherContext.Rules[0].Pattern].Recursive {
-		t.Fatalf("other context = %+v", otherContext)
+	if rootRules := policyRules(t, table, policy, "/"); len(rootRules) != 2 {
+		t.Fatalf("root rules = %+v, want both representable rules", rootRules)
 	}
-	rootContext, ok := contexts["/"]
-	if !ok || len(rootContext.Rules) != 2 {
-		t.Fatalf("root context = %+v, want both representable rules", rootContext)
+	for _, rule := range policyRules(t, table, policyPending, "/") {
+		if rule.Allow {
+			t.Fatalf("pending policy allows: %+v", rule)
+		}
 	}
-	if !table.DefaultAllow {
-		t.Fatal("default lost")
+	if table.Policies[policyPending].DefaultAllow {
+		t.Fatal("pending policy default allows")
+	}
+}
+
+func TestCompileSharesPoliciesBetweenEqualLabels(t *testing.T) {
+	root := t.TempDir()
+	allow := []RuleInput{{List: ListWrite, Pattern: filepath.Join(root, "**"), Allow: true}}
+	deny := []RuleInput{{List: ListWrite, Pattern: filepath.Join(root, "**")}}
+	table, _, err := Compile(Policy{
+		Scopes: []ScopeInput{{Path: root}},
+		Labels: []LabelPolicy{
+			{Label: 0, Rules: allow},
+			{Label: 7, Rules: deny},
+			{Label: 9, Rules: allow},
+			{Label: 11, Rules: allow, DefaultAllow: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if table.Labels[0] != table.Labels[9] || table.Labels[0] == table.Labels[7] || table.Labels[0] == table.Labels[11] {
+		t.Fatalf("label policies = %v", table.Labels)
+	}
+	for label, policy := range table.Labels {
+		if policy == policyPending {
+			t.Fatalf("label %d shares the pending policy", label)
+		}
+	}
+	if len(table.Policies) != 4 {
+		t.Fatalf("%d policies, want pending + 3", len(table.Policies))
+	}
+	if allowRules, denyRules := policyRules(t, table, table.Labels[0], root), policyRules(t, table, table.Labels[7], root); len(allowRules) != 1 || !allowRules[0].Allow || len(denyRules) != 1 || denyRules[0].Allow {
+		t.Fatalf("allow %+v deny %+v", allowRules, denyRules)
 	}
 }
 
@@ -137,20 +169,39 @@ func TestCompileOverflowDeniesContextAndWarns(t *testing.T) {
 	for i := range contextRules + 1 {
 		rules = append(rules, RuleInput{List: ListWrite, Pattern: filepath.Join(root, "r"+strconv.Itoa(i))})
 	}
-	table, warnings, err := Compile(Policy{Scopes: []ScopeInput{{Path: root}}, Rules: rules})
+	table, warnings, err := Compile(Policy{Scopes: []ScopeInput{{Path: root}}, Labels: []LabelPolicy{{Rules: rules}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
-	for _, context := range table.Contexts {
-		if context.Path == root {
-			found = context.Overflow
-		}
-	}
-	if !found {
-		t.Fatal("over-full context did not overflow")
+	context := uint32(slices.IndexFunc(table.Contexts, func(c CompiledContext) bool { return c.Path == root }))
+	list, ok := table.Policies[table.Labels[0]].Lists[context]
+	if !ok || !table.RuleLists[list].Overflow {
+		t.Fatal("over-full rule list did not overflow")
 	}
 	if len(warnings) != 1 || warnings[0].ID != "context-rule-overflow" || len(warnings[0].Patterns) != contextRules+1 {
 		t.Fatalf("warnings = %#v", warnings)
 	}
+}
+
+func findContext(t *testing.T, table Table, path string) CompiledContext {
+	t.Helper()
+	for _, context := range table.Contexts {
+		if context.Path == path {
+			return context
+		}
+	}
+	t.Fatalf("no context for %q in %d contexts", path, len(table.Contexts))
+	return CompiledContext{}
+}
+
+// policyRules returns policy's rule list for the context at path.
+func policyRules(t *testing.T, table Table, policy uint32, path string) []CompiledRule {
+	t.Helper()
+	findContext(t, table, path)
+	context := uint32(slices.IndexFunc(table.Contexts, func(c CompiledContext) bool { return c.Path == path }))
+	list, ok := table.Policies[policy].Lists[context]
+	if !ok {
+		return nil
+	}
+	return table.RuleLists[list].Rules
 }

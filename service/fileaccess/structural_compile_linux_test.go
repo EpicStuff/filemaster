@@ -17,12 +17,12 @@ func TestStructuralPolicyKeepsWatchRuleOrderAndExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy := structuralPolicy(watch, LookupResult{})
+	scopes := scopesFromWatchRules(watch)
 	want := []bpflsm.ScopeInput{{Path: filepath.Join(root, "excluded"), Exclude: true}, {Path: root}}
-	if !reflect.DeepEqual(policy.Scopes, want) {
-		t.Fatalf("scopes = %#v, want %#v", policy.Scopes, want)
+	if !reflect.DeepEqual(scopes, want) {
+		t.Fatalf("scopes = %#v, want %#v", scopes, want)
 	}
-	if len(policy.Rules) != 0 || policy.DefaultAllow {
+	if policy := unidentifiedLabelPolicy(LookupResult{}); len(policy.Rules) != 0 || policy.DefaultAllow {
 		t.Fatalf("nil snapshot policy = %#v, want no rules and the Ask default deny", policy)
 	}
 }
@@ -37,7 +37,7 @@ func TestStructuralPolicyFlattensListsInEngineOrder(t *testing.T) {
 		}},
 		Exec: PathRules{Rules: []PathRule{{Pattern: "/x", Verdict: VerdictDeny}}},
 	}
-	policy := structuralPolicy(&watchRuleSnapshot{}, LookupResult{Snapshot: snapshot, DefaultAction: snapshot.DefaultAction})
+	policy := unidentifiedLabelPolicy(LookupResult{Snapshot: snapshot, DefaultAction: snapshot.DefaultAction})
 	want := []bpflsm.RuleInput{
 		{List: bpflsm.ListRead, Pattern: "/r/**", Allow: true, Kind: bpflsm.KindAny},
 		{List: bpflsm.ListWrite, Pattern: "/w/a", Allow: false, Kind: bpflsm.KindFolder},

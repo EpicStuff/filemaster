@@ -282,10 +282,17 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 		bpflsm.ReasonUnregisteredRoot: "The structural BPF LSM treated some operations as not covered because they were on a mount it had not registered yet.",
 		bpflsm.ReasonContextOverflow:  "The structural BPF LSM denied operations in folders whose rules do not fit its table.",
 		bpflsm.ReasonBudget:           "The structural BPF LSM denied operations whose rule evaluation exceeded its step budget.",
+		bpflsm.ReasonPending:          "The structural BPF LSM denied operations by processes whose profile it had not resolved yet.",
+		bpflsm.ReasonUnlabelled:       "The structural BPF LSM denied operations by processes it could not label (the label map may be full).",
 	} {
 		if counts := undecided[reason]; len(counts) > 0 {
 			appendWarning("bpf-lsm-undecided-"+reason, "warning", message, counts...)
 		}
+	}
+	if structural.Labelling.MapFull > 0 {
+		appendWarning("bpf-lsm-label-map-full", "warning",
+			"The structural BPF LSM process-label map is full; new processes are denied until space frees.",
+			"denied="+strconv.FormatUint(structural.Labelling.MapFull, 10))
 	}
 	if len(structural.OrphanedGenerations) > 0 {
 		appendWarning("bpf-lsm-orphaned-generation", "warning",

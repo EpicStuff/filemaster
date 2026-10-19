@@ -1,5 +1,6 @@
 // Ported from cordon crates/bpf-common/src/offsets.rs @ b40a8c7 (Apache-2.0) — renamed the crate;
-// added `dentry_d_name_len` for the path rebuild.
+// added `dentry_d_name_len` for the path rebuild; M3 appends the labelling
+// offsets after `binprm_file`.
 //! Running-kernel struct field offsets — the portability shim that replaces a
 //! build-time-pinned `vmlinux.rs`.
 //!
@@ -69,6 +70,26 @@ pub struct Offsets {
     /// `dentry_d_*` it must stay **real** under poisoning (the verifier range-checks
     /// trusted-pointer math against `.rodata` at *load*).
     pub binprm_file: u32,
+    /// `task_struct -> tgid`.
+    pub task_tgid: u32,
+    /// `task_struct -> group_leader`.
+    pub task_group_leader: u32,
+    /// `task_struct -> start_boottime` (what `/proc/<pid>/stat` reports in ticks).
+    pub task_start_boottime: u32,
+    /// `task_struct -> signal`.
+    pub task_signal: u32,
+    /// `signal_struct -> live` (an `atomic_t`; 0 once the thread group is dead).
+    pub signal_live: u32,
+    /// `mm_struct -> arg_start`, `arg_end`, `env_start`, `env_end`.
+    pub mm_arg_start: u32,
+    pub mm_arg_end: u32,
+    pub mm_env_start: u32,
+    pub mm_env_end: u32,
+    /// `inode -> i_generation`.
+    pub inode_i_generation: u32,
+    /// `linux_binprm -> filename` and `interp`: equal pointers on the first binfmt pass.
+    pub binprm_filename: u32,
+    pub binprm_interp: u32,
 }
 
 impl Offsets {
@@ -93,6 +114,18 @@ impl Offsets {
         task_mm: u32::MAX,
         mm_exe_file: u32::MAX,
         binprm_file: u32::MAX,
+        task_tgid: u32::MAX,
+        task_group_leader: u32::MAX,
+        task_start_boottime: u32::MAX,
+        task_signal: u32::MAX,
+        signal_live: u32::MAX,
+        mm_arg_start: u32::MAX,
+        mm_arg_end: u32::MAX,
+        mm_env_start: u32::MAX,
+        mm_env_end: u32::MAX,
+        inode_i_generation: u32::MAX,
+        binprm_filename: u32::MAX,
+        binprm_interp: u32::MAX,
     };
 }
 

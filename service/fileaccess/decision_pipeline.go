@@ -94,11 +94,12 @@ type decisionWork struct {
 // reader transfers ownership into the queue and never waits for profile lookup,
 // prompting, persistence, or observation work.
 type DecisionPipeline struct {
-	config    DecisionPipelineConfig
-	handler   Handler
-	observe   func(*FileEvent, Verdict)
-	queue     chan *decisionWork
-	lifecycle *PipelineLifecycle
+	config     DecisionPipelineConfig
+	handler    Handler
+	observe    func(*FileEvent, Verdict)
+	beforeOpen func(context.Context, *FileEvent)
+	queue      chan *decisionWork
+	lifecycle  *PipelineLifecycle
 
 	started         atomic.Bool
 	activeWorkers   atomic.Int64
@@ -150,6 +151,11 @@ func newDecisionPipeline(handler Handler, config DecisionPipelineConfig, lifecyc
 		handler.setPromptCoordinator(coordinator)
 	}
 	return pipeline
+}
+
+// SetBeforeOpen installs a hook run on every OpOpen event before it is decided.
+func (p *DecisionPipeline) SetBeforeOpen(hook func(context.Context, *FileEvent)) {
+	p.beforeOpen = hook
 }
 
 func (p *DecisionPipeline) Config() DecisionPipelineConfig {
@@ -311,6 +317,13 @@ func (p *DecisionPipeline) decide(ctx context.Context, work *decisionWork) {
 				// process/profile lookup via DecideForResponse.
 				return
 			}
+		}
+		// filemaster labelling boundary: before an open is decided, give the
+		// labeller a chance to resolve a pending interpreter that is opening
+		// its script, so the script's profile (not the pending-deny policy)
+		// governs the structural operations the script goes on to make.
+		if p.beforeOpen != nil && event.Op == OpOpen {
+			p.beforeOpen(ctx, event)
 		}
 		if handler, ok := p.handler.(postResponseDecisionHandler); ok {
 			verdict, afterResponse = handler.DecideForResponse(ctx, event)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/safing/portmaster/service/fileaccess/bpflsm"
 	"github.com/safing/portmaster/service/mgr"
+	"github.com/safing/portmaster/service/process"
 )
 
 type structuralBackend = bpflsm.Enforcer
@@ -26,8 +27,15 @@ func (fa *FileAccess) startStructuralEnforcement() {
 	if !ok {
 		return
 	}
-	fa.structural = bpflsm.NewEnforcer()
-	apply := func() {
+	var apply func()
+	fa.labeller = newStructuralLabeller(fa, func() { apply() })
+	process.SetIdentityCaptureProvider(fa.labeller.capture)
+	fa.structural = bpflsm.NewEnforcerWithOptions(bpflsm.Options{
+		Labelling: true,
+		OnRecord:  fa.labeller.enqueue,
+	})
+	fa.labeller.enf = fa.structural
+	apply = func() {
 		structuralApplyMu.Lock()
 		defer structuralApplyMu.Unlock()
 		mode := bpflsm.Mode(cfgOptionStructural())
@@ -49,6 +57,19 @@ func (fa *FileAccess) startStructuralEnforcement() {
 		}
 	}
 	apply()
+	fa.mgr.Go("file-access structural label resolver", func(w *mgr.WorkerCtx) error {
+		fa.labeller.run(w)
+		return nil
+	})
+	// Seed already-running processes once structural enforcement is live, so
+	// they are not stuck pending; a process that execs meanwhile gets its own
+	// record instead.
+	if fa.structural.Status().State == bpflsm.StateActive {
+		fa.mgr.Go("file-access structural label seed", func(w *mgr.WorkerCtx) error {
+			fa.labeller.seedRunning(w.Ctx())
+			return nil
+		})
+	}
 	fa.registerStructuralProfilePublisher(apply)
 	fa.mgr.Go("file-access structural mount watch", func(w *mgr.WorkerCtx) error {
 		fa.watchStructuralMounts(w, apply)
@@ -66,6 +87,10 @@ func (fa *FileAccess) startStructuralEnforcement() {
 }
 
 func (fa *FileAccess) closeStructuralEnforcement() {
+	process.SetIdentityCaptureProvider(nil)
+	if fa.labeller != nil {
+		fa.labeller.stop()
+	}
 	if fa.structural != nil {
 		fa.structural.Close()
 	}

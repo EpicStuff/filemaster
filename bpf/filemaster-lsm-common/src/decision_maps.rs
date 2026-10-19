@@ -38,7 +38,7 @@ pub const MAX_RANGES: usize = 16384;
 pub const TOKEN_LITERAL: u8 = 0;
 pub const TOKEN_QUESTION: u8 = 1;
 pub const TOKEN_CLASS: u8 = 2;
-/// Rule references one context can hold before its object denies.
+/// Rule references one policy's list for one context can hold before it denies.
 pub const CONTEXT_RULES: usize = 256;
 /// Watch-scope entries one context can hold before its object denies.
 pub const CONTEXT_SCOPES: usize = 32;
@@ -69,7 +69,6 @@ pub const EVAL_BUDGET: u32 = 1 << 23;
 
 /// One per-CPU would-deny counter per decision operation.
 pub const AUDIT_COUNTERS: usize = 5;
-pub const NOMATCH_ENTRIES: usize = NUM_BANKS * 5 * 2;
 
 /// The structural hooks, as indexes of the per-hook counters.
 pub const HOOKS: usize = 5;
@@ -79,8 +78,9 @@ pub const HOOK_MKDIR: u32 = 2;
 pub const HOOK_LINK: u32 = 3;
 pub const HOOK_RENAME: u32 = 4;
 
-/// Cases the kernel cannot decide exactly. Each is counted per hook.
-pub const REASONS: usize = 6;
+/// Cases the kernel cannot decide exactly, and labelling denials. Each is
+/// counted per hook.
+pub const REASONS: usize = 8;
 /// A kernel value could not be read; the operation was allowed.
 pub const REASON_UNREADABLE: u32 = 0;
 /// The target is more than [`WALK_LIMIT`] levels below its object; denied.
@@ -93,6 +93,10 @@ pub const REASON_UNREGISTERED_ROOT: u32 = 3;
 pub const REASON_CONTEXT_OVERFLOW: u32 = 4;
 /// An evaluation used its whole `bpf_loop` budget; denied.
 pub const REASON_BUDGET: u32 = 5;
+/// The caller's label was still pending; the pending policy denied.
+pub const REASON_PENDING: u32 = 6;
+/// The caller had no label (label map full) or an unpublished one; denied.
+pub const REASON_UNLABELLED: u32 = 7;
 pub const COUNTERS: usize = REASONS * HOOKS;
 
 /// Rule lists. A rule reference carries the list its rule came from.
@@ -106,7 +110,7 @@ pub const RULE_ALLOW: u8 = 1;
 pub const RULE_KIND_SHIFT: u8 = 1;
 pub const RULE_KIND_MASK: u8 = 3;
 
-/// `Context::flags`: the context overflowed its rule or scope array.
+/// `Context::flags`: the context overflowed its scope array.
 pub const CONTEXT_OVERFLOW: u32 = 1;
 
 /// The existing Filemaster engine's operation dimension.
@@ -192,8 +196,8 @@ pub struct RuleRef {
 	pub flags: u8,
 }
 
-/// One absolute path an object is reachable at, with the scope entries and
-/// rules that can apply at or below it.
+/// One absolute path an object is reachable at, with the scope entries that
+/// can apply at or below it. Each policy's rules for it are a `RuleList`.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Context {
@@ -205,9 +209,8 @@ pub struct Context {
 	pub parent_len: u32,
 	pub flags: u32,
 	pub scope_count: u32,
-	pub rule_count: u32,
+	pub _pad: u32,
 	pub scopes: [ScopeRef; CONTEXT_SCOPES],
-	pub rules: [RuleRef; CONTEXT_RULES],
 }
 
 /// One rule pattern. A `recursive` pattern holds the cleaned `/**` prefix in
@@ -289,7 +292,7 @@ mod tests {
 	extern crate std;
 
 	use super::*;
-	use crate::maps::Settings;
+	use crate::label_maps::*;
 	use crate::offsets::Offsets;
 	use core::mem::{offset_of, size_of};
 	use std::string::{String, ToString};
@@ -303,11 +306,12 @@ mod tests {
 				"Settings",
 				size_of::<Settings>(),
 				&[
-					("daemon_pid", offset_of!(Settings, daemon_pid)),
+					("daemon_start", offset_of!(Settings, daemon_start)),
+					("daemon_tgid", offset_of!(Settings, daemon_tgid)),
+					("daemon_span", offset_of!(Settings, daemon_span)),
 					("active_bank", offset_of!(Settings, active_bank)),
-					("daemon_exe", offset_of!(Settings, daemon_exe)),
 					("audit", offset_of!(Settings, audit)),
-					("pad", offset_of!(Settings, _pad)),
+					("flags", offset_of!(Settings, flags)),
 				],
 			),
 			(
@@ -346,9 +350,7 @@ mod tests {
 					("parent_len", offset_of!(Context, parent_len)),
 					("flags", offset_of!(Context, flags)),
 					("scope_count", offset_of!(Context, scope_count)),
-					("rule_count", offset_of!(Context, rule_count)),
 					("scopes", offset_of!(Context, scopes)),
-					("rules", offset_of!(Context, rules)),
 				],
 			),
 			(
@@ -379,6 +381,54 @@ mod tests {
 				],
 			),
 			("Range", size_of::<Range>(), &[("lo", offset_of!(Range, lo)), ("hi", offset_of!(Range, hi))]),
+			(
+				"ExecFile",
+				size_of::<ExecFile>(),
+				&[("dev", offset_of!(ExecFile, dev)), ("ino", offset_of!(ExecFile, ino)), ("generation", offset_of!(ExecFile, generation))],
+			),
+			("ExecLabelKey", size_of::<ExecLabelKey>(), &[("exe", offset_of!(ExecLabelKey, exe)), ("script", offset_of!(ExecLabelKey, script))]),
+			(
+				"ProcValue",
+				size_of::<ProcValue>(),
+				&[
+					("start", offset_of!(ProcValue, start)),
+					("seq", offset_of!(ProcValue, seq)),
+					("span", offset_of!(ProcValue, span)),
+					("label", offset_of!(ProcValue, label)),
+				],
+			),
+			(
+				"Resolved",
+				size_of::<Resolved>(),
+				&[("start", offset_of!(Resolved, start)), ("seq", offset_of!(Resolved, seq)), ("label", offset_of!(Resolved, label))],
+			),
+			(
+				"PolicyListKey",
+				size_of::<PolicyListKey>(),
+				&[("bank", offset_of!(PolicyListKey, bank)), ("policy", offset_of!(PolicyListKey, policy)), ("context", offset_of!(PolicyListKey, context))],
+			),
+			(
+				"RuleList",
+				size_of::<RuleList>(),
+				&[("rule_count", offset_of!(RuleList, rule_count)), ("flags", offset_of!(RuleList, flags)), ("rules", offset_of!(RuleList, rules))],
+			),
+			(
+				"RecordHeader",
+				size_of::<RecordHeader>(),
+				&[
+					("kind", offset_of!(RecordHeader, kind)),
+					("tgid", offset_of!(RecordHeader, tgid)),
+					("start", offset_of!(RecordHeader, start)),
+					("seq", offset_of!(RecordHeader, seq)),
+					("exe", offset_of!(RecordHeader, exe)),
+					("script", offset_of!(RecordHeader, script)),
+					("parent_seq", offset_of!(RecordHeader, parent_seq)),
+					("parent_tgid", offset_of!(RecordHeader, parent_tgid)),
+					("flags", offset_of!(RecordHeader, flags)),
+					("args_len", offset_of!(RecordHeader, args_len)),
+					("env_len", offset_of!(RecordHeader, env_len)),
+				],
+			),
 			("Arena", size_of::<Arena>(), &[]),
 			("Scratch", size_of::<Scratch>(), &[]),
 			("Offsets", size_of::<Offsets>(), &[]),
@@ -405,6 +455,18 @@ mod tests {
 			("NOMATCH_ENTRIES", NOMATCH_ENTRIES),
 			("HOOKS", HOOKS),
 			("REASONS", REASONS),
+			("MAX_LABELS", MAX_LABELS),
+			("MAX_POLICIES", MAX_POLICIES),
+			("MAX_RULELISTS", MAX_RULELISTS),
+			("MAX_POLICY_LISTS", MAX_POLICY_LISTS),
+			("MAX_PROCS", MAX_PROCS),
+			("MAX_EXEC_LABELS", MAX_EXEC_LABELS),
+			("EXEC_SCRATCH_ENTRIES", EXEC_SCRATCH_ENTRIES),
+			("RECORDS_SIZE", RECORDS_SIZE),
+			("RECORD_BUF_SIZE", RECORD_BUF_SIZE),
+			("ARGS_MAX", ARGS_MAX as usize),
+			("ENV_MAX", ENV_MAX as usize),
+			("LABEL_COUNTERS", LABEL_COUNTERS),
 		];
 		manifest.push_str(",\n  \"constants\": {");
 		for (index, (name, value)) in counts.iter().enumerate() {

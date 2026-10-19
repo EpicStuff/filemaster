@@ -58,12 +58,20 @@ type ScopeInput struct {
 	Exclude bool
 }
 
-// Policy is the plain policy the compiler receives. The package cannot
-// import fileaccess, so the caller flattens its snapshot into this.
-type Policy struct {
-	Scopes       []ScopeInput
+// LabelPolicy is one label's profile snapshot: its rules in engine order
+// and whether its no-match default allows.
+type LabelPolicy struct {
+	Label        uint32
 	Rules        []RuleInput
 	DefaultAllow bool
+}
+
+// Policy is the plain policy the compiler receives. The package cannot
+// import fileaccess, so the caller flattens its snapshots into this. A label
+// left out maps to the pending policy, which denies.
+type Policy struct {
+	Scopes []ScopeInput
+	Labels []LabelPolicy
 }
 
 // CompiledPattern is one distinct kernel pattern: a cleaned `/**` prefix
@@ -97,7 +105,7 @@ type CompiledRange struct {
 	Hi uint32
 }
 
-// CompiledRule is one rule reference in a context's ordered list.
+// CompiledRule is one rule reference in a rule list.
 type CompiledRule struct {
 	Pattern uint16
 	List    RuleList
@@ -111,7 +119,20 @@ type CompiledContext struct {
 	ParentLen uint32
 	Overflow  bool
 	Scopes    []ScopeInput
-	Rules     []CompiledRule
+}
+
+// CompiledRuleList is one policy's ordered rules for a context. An overflowed
+// list denies.
+type CompiledRuleList struct {
+	Overflow bool
+	Rules    []CompiledRule
+}
+
+// CompiledPolicy is one distinct rule set. Lists maps a context index to its
+// rule list; a context without an entry has no rules for this policy.
+type CompiledPolicy struct {
+	DefaultAllow bool
+	Lists        map[uint32]uint32
 }
 
 // CompiledObject is one inode-keyed walk stop and its contexts.
@@ -121,15 +142,18 @@ type CompiledObject struct {
 	ContextCount uint32
 }
 
-// Table is the complete bank image Enforcer.Publish writes.
+// Table is the complete bank image Enforcer.Publish writes. Policies[0] is
+// the pending policy: every label's rules as denies, and a deny default.
 type Table struct {
-	Objects      []CompiledObject
-	Contexts     []CompiledContext
-	Patterns     []CompiledPattern
-	Chunks       []CompiledChunk
-	Tokens       []CompiledToken
-	Ranges       []CompiledRange
-	DefaultAllow bool
+	Objects   []CompiledObject
+	Contexts  []CompiledContext
+	Patterns  []CompiledPattern
+	Chunks    []CompiledChunk
+	Tokens    []CompiledToken
+	Ranges    []CompiledRange
+	Policies  []CompiledPolicy
+	RuleLists []CompiledRuleList
+	Labels    map[uint32]uint32
 }
 
 // classifiedRule is a rule after matchPathPattern's split into the `/**`
@@ -151,14 +175,48 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 	}
 	warnings := newWarnings()
 
-	var rules []classifiedRule
-	for _, rule := range policy.Rules {
-		classified, ok := classifyRule(rule)
-		if !ok {
-			warnings.add("pattern-never-matches", rule.Pattern)
-			continue
+	// Each distinct rule set becomes one policy. Policy 0 is the pending policy
+	// and is never shared with a label's own.
+	type labelRules struct {
+		rules        []classifiedRule
+		defaultAllow bool
+	}
+	var sets []labelRules
+	setIndex := make(map[string]uint32)
+	labels := make(map[uint32]uint32, len(policy.Labels))
+	var pending []classifiedRule
+	seenPending := make(map[string]struct{})
+	for _, label := range policy.Labels {
+		var rules []classifiedRule
+		var key strings.Builder
+		fmt.Fprintf(&key, "%t", label.DefaultAllow)
+		for _, rule := range label.Rules {
+			classified, ok := classifyRule(rule)
+			if !ok {
+				warnings.add("pattern-never-matches", rule.Pattern)
+				continue
+			}
+			rules = append(rules, classified)
+			fmt.Fprintf(&key, "\x00%d|%d|%t|%s", rule.List, rule.Kind, rule.Allow, rule.Pattern)
+			denied := classified
+			denied.input.Allow = false
+			pendingKey := fmt.Sprintf("%d|%d|%s", rule.List, rule.Kind, rule.Pattern)
+			if _, ok := seenPending[pendingKey]; !ok {
+				seenPending[pendingKey] = struct{}{}
+				pending = append(pending, denied)
+			}
 		}
-		rules = append(rules, classified)
+		index, ok := setIndex[key.String()]
+		if !ok {
+			index = uint32(len(sets)) + 1
+			setIndex[key.String()] = index
+			sets = append(sets, labelRules{rules: rules, defaultAllow: label.DefaultAllow})
+		}
+		labels[label.Label] = index
+	}
+	sets = append([]labelRules{{rules: pending}}, sets...)
+	if len(sets) > maxPolicies {
+		return Table{}, warnings.list(), fmt.Errorf("compile structural table: %d distinct policies, more than %d", len(sets), maxPolicies)
 	}
 
 	var scopes []ScopeInput
@@ -177,7 +235,7 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 			}
 		}
 	}
-	for _, rule := range rules {
+	for _, rule := range pending {
 		if anchor, ok := existingDirectory(anchorPath(rule)); ok {
 			candidates[anchor] = struct{}{}
 		}
@@ -218,9 +276,14 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 		return ids[i].ino < ids[j].ino
 	})
 
-	table := Table{DefaultAllow: policy.DefaultAllow}
+	table := Table{Labels: labels}
+	for _, set := range sets {
+		table.Policies = append(table.Policies, CompiledPolicy{DefaultAllow: set.defaultAllow, Lists: make(map[uint32]uint32)})
+	}
 	patternIndex := make(map[string]uint16)
+	listIndex := make(map[string]uint32)
 	overflowPatterns := make(map[string]struct{})
+	policyLists := 0
 	for _, id := range ids {
 		paths := make([]string, 0, len(contextsByObject[id]))
 		for path := range contextsByObject[id] {
@@ -232,6 +295,7 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 			if len(path) > maxString {
 				return Table{}, warnings.list(), fmt.Errorf("compile structural table: path %q is longer than %d bytes", path, maxString)
 			}
+			contextIndex := uint32(len(table.Contexts))
 			context := CompiledContext{Path: path, ParentLen: uint32(len(filepath.Dir(path)))}
 			for _, scope := range scopes {
 				if pathContains(scope.Path, path) {
@@ -242,38 +306,56 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 					context.Scopes = append(context.Scopes, scope)
 				}
 			}
-			var included []string
-			unrepresentable := false
-			for _, rule := range rules {
-				if !couldMatchAtOrBelow(rule.literal, path) {
-					continue
-				}
-				included = append(included, rule.input.Pattern)
-				index, ok, fits, err := internPattern(&table, patternIndex, rule)
-				if err != nil {
-					return Table{}, warnings.list(), err
-				}
-				if !fits {
-					// The pattern does not fit the token tables: deny this
-					// context, like a rule-count overflow.
-					unrepresentable = true
-					continue
-				}
-				_ = ok
-				context.Rules = append(context.Rules, CompiledRule{
-					Pattern: index,
-					List:    rule.input.List,
-					Allow:   rule.input.Allow,
-					Kind:    rule.input.Kind,
-				})
-			}
-			if unrepresentable || len(context.Rules) > contextRules || len(context.Scopes) > contextScopes {
+			if len(context.Scopes) > contextScopes {
 				context.Overflow = true
-				context.Rules = nil
 				context.Scopes = nil
-				for _, pattern := range included {
-					overflowPatterns[pattern] = struct{}{}
+				warnings.add("context-scope-overflow", path)
+			}
+			for policyIndex, set := range sets {
+				var list CompiledRuleList
+				var included []string
+				for _, rule := range set.rules {
+					if !couldMatchAtOrBelow(rule.literal, path) {
+						continue
+					}
+					included = append(included, rule.input.Pattern)
+					index, fits, err := internPattern(&table, patternIndex, rule)
+					if err != nil {
+						return Table{}, warnings.list(), err
+					}
+					if !fits {
+						// The pattern does not fit the token tables: deny this
+						// context for this policy, like a rule-count overflow.
+						list.Overflow = true
+						continue
+					}
+					list.Rules = append(list.Rules, CompiledRule{
+						Pattern: index,
+						List:    rule.input.List,
+						Allow:   rule.input.Allow,
+						Kind:    rule.input.Kind,
+					})
 				}
+				if len(list.Rules) > contextRules {
+					list.Overflow = true
+				}
+				if list.Overflow {
+					list.Rules = nil
+					for _, pattern := range included {
+						overflowPatterns[pattern] = struct{}{}
+					}
+				} else if len(list.Rules) == 0 {
+					continue
+				}
+				key := fmt.Sprint(list)
+				index, ok := listIndex[key]
+				if !ok {
+					index = uint32(len(table.RuleLists))
+					listIndex[key] = index
+					table.RuleLists = append(table.RuleLists, list)
+				}
+				table.Policies[policyIndex].Lists[contextIndex] = index
+				policyLists++
 			}
 			table.Contexts = append(table.Contexts, context)
 		}
@@ -281,6 +363,12 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 	}
 	if len(table.Contexts) > maxContexts {
 		return Table{}, warnings.list(), fmt.Errorf("compile structural table: %d path contexts, more than %d", len(table.Contexts), maxContexts)
+	}
+	if len(table.RuleLists) > maxRuleLists {
+		return Table{}, warnings.list(), fmt.Errorf("compile structural table: %d distinct rule lists, more than %d", len(table.RuleLists), maxRuleLists)
+	}
+	if policyLists > maxPolicyLists/numBanks {
+		return Table{}, warnings.list(), fmt.Errorf("compile structural table: %d policy rule lists, more than %d", policyLists, maxPolicyLists/numBanks)
 	}
 	for pattern := range overflowPatterns {
 		warnings.add("context-rule-overflow", pattern)
@@ -318,17 +406,17 @@ func classifyRule(rule RuleInput) (classifiedRule, bool) {
 // a tokenized pattern, its chunks/tokens/ranges) on first use. fits is false
 // when the pattern would overflow a token table; err is a hard publish error
 // when a global table limit is reached.
-func internPattern(table *Table, index map[string]uint16, rule classifiedRule) (slot uint16, added, fits bool, err error) {
+func internPattern(table *Table, index map[string]uint16, rule classifiedRule) (slot uint16, fits bool, err error) {
 	if existing, ok := index[rule.input.Pattern]; ok {
-		return existing, false, true, nil
+		return existing, true, nil
 	}
 	if rule.recursive {
 		if len(rule.prefix) > maxString {
-			return 0, false, false, nil
+			return 0, false, nil
 		}
 	}
 	if len(table.Patterns) >= maxPatterns {
-		return 0, false, false, fmt.Errorf("compile structural table: more than %d distinct patterns", maxPatterns)
+		return 0, false, fmt.Errorf("compile structural table: more than %d distinct patterns", maxPatterns)
 	}
 	pattern := CompiledPattern{Text: rule.input.Pattern, Recursive: rule.recursive}
 	if rule.recursive {
@@ -356,7 +444,7 @@ func internPattern(table *Table, index map[string]uint16, rule classifiedRule) (
 			table.Chunks = table.Chunks[:chunkOff]
 			table.Tokens = table.Tokens[:tokenOff0]
 			table.Ranges = table.Ranges[:rangeOff0]
-			return 0, false, false, nil
+			return 0, false, nil
 		}
 		pattern.ChunkOff = uint32(chunkOff)
 		pattern.ChunkLen = uint32(len(rule.program.Chunks))
@@ -364,7 +452,7 @@ func internPattern(table *Table, index map[string]uint16, rule classifiedRule) (
 	slot = uint16(len(table.Patterns))
 	index[rule.input.Pattern] = slot
 	table.Patterns = append(table.Patterns, pattern)
-	return slot, true, true, nil
+	return slot, true, nil
 }
 
 // anchorPath is the directory whose deepest existing ancestor anchors rule.

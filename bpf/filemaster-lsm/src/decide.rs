@@ -15,9 +15,11 @@ use filemaster_lsm_common::decision_maps::{
 	REASON_CONTEXT_OVERFLOW, REASON_DEPTH, REASON_PATH_TOO_LONG, REASON_UNREADABLE,
 	REASON_UNREGISTERED_ROOT, REL_END, SCRATCH_MASK, WALK_LIMIT,
 };
-use filemaster_lsm_common::{Bank, DecisionOp, FileId, ObjectKey, Settings, TargetKind, Verdict};
+use filemaster_lsm_common::label_maps::MAX_POLICIES;
+use filemaster_lsm_common::{Bank, DecisionOp, FileId, ObjectKey, TargetKind, Verdict};
 
 use crate::kernel;
+use crate::label::{self, NO_REASON};
 use crate::maps::{AUDIT, COUNTERS, EVAL, NOMATCH, OBJECTS, SCRATCH, SETTINGS};
 use crate::matcher::{self, SIDE_ALLOW, SIDE_DENY, SIDE_NOT_COVERED};
 
@@ -37,6 +39,7 @@ const NO_LEAF: u32 = u32::MAX;
 struct Walk {
 	dentry: u64,
 	bank: u32,
+	policy: u32,
 	slot: u32,
 	rel: u32,
 	leaf: u32,
@@ -44,6 +47,7 @@ struct Walk {
 	first_context: u32,
 	context_count: u32,
 	depth: u32,
+	_pad: u32,
 }
 
 
@@ -54,6 +58,9 @@ pub struct DecisionResult {
 	verdict: Verdict,
 	operation: DecisionOp,
 	audit: bool,
+	/// The labelling reason to count when this result denies.
+	reason: u32,
+	hook: u32,
 }
 
 /// Lower a result to a verifier-bounded LSM return. `None` means an unreadable
@@ -64,6 +71,9 @@ pub fn clamped(result: Option<DecisionResult>) -> i32 {
 	};
 	if result.verdict.allows() {
 		return 0;
+	}
+	if result.reason != NO_REASON {
+		count(result.reason, result.hook);
 	}
 	if result.audit {
 		increment(&AUDIT, result.operation.0);
@@ -79,21 +89,19 @@ pub fn clamped(result: Option<DecisionResult>) -> i32 {
 
 /// `inode_unlink` and `inode_rmdir`: Filemaster's `DecisionDelete`.
 pub fn remove(dentry: kernel::Dentry, folder: bool, hook: u32) -> Option<DecisionResult> {
-	let settings = live_settings()?;
-	let bank = settings.active_bank.masked().0;
+	let (bank, policy, reason, audit) = live_settings(hook)?;
 	let kind = if folder { TargetKind::FOLDER } else { positive_kind(dentry, hook)? };
-	let target = walk(bank, 0, dentry, hook)?;
-	let mut decision = Decision::new(bank, settings.audit != 0);
+	let target = walk(bank, policy, 0, dentry, hook)?;
+	let mut decision = Decision::new(bank, policy, audit, reason, hook);
 	decision.side(&target, DecisionOp::DELETE, kind, hook);
 	Some(decision.finish())
 }
 
 /// `inode_mkdir`: Filemaster's `DecisionCreate` on a negative dentry.
 pub fn mkdir(dentry: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	let settings = live_settings()?;
-	let bank = settings.active_bank.masked().0;
-	let target = walk(bank, 0, dentry, hook)?;
-	let mut decision = Decision::new(bank, settings.audit != 0);
+	let (bank, policy, reason, audit) = live_settings(hook)?;
+	let target = walk(bank, policy, 0, dentry, hook)?;
+	let mut decision = Decision::new(bank, policy, audit, reason, hook);
 	decision.side(&target, DecisionOp::CREATE, TargetKind::FOLDER, hook);
 	Some(decision.finish())
 }
@@ -101,13 +109,12 @@ pub fn mkdir(dentry: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
 /// `inode_link`: `DecisionSnapshot.DecideHardLink`'s source read/write/execute
 /// order, then the destination delete/create order.
 pub fn hard_link(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	let settings = live_settings()?;
-	let bank = settings.active_bank.masked().0;
+	let (bank, policy, reason, audit) = live_settings(hook)?;
 	let kind = positive_kind(source, hook)?;
 	let destination_exists = exists(destination, hook)?;
-	let source_walk = walk(bank, 0, source, hook)?;
-	let destination_walk = walk(bank, 1, destination, hook)?;
-	let mut decision = Decision::new(bank, settings.audit != 0);
+	let source_walk = walk(bank, policy, 0, source, hook)?;
+	let destination_walk = walk(bank, policy, 1, destination, hook)?;
+	let mut decision = Decision::new(bank, policy, audit, reason, hook);
 	for operation in [DecisionOp::READ, DecisionOp::WRITE, DecisionOp::EXECUTE] {
 		if decision.side(&source_walk, operation, kind, hook) {
 			return Some(decision.finish());
@@ -124,14 +131,13 @@ pub fn hard_link(source: kernel::Dentry, destination: kernel::Dentry, hook: u32)
 /// calls the hook a second time with the sides swapped for `RENAME_EXCHANGE`,
 /// so each call is one directed rename onto an existing destination.
 pub fn rename(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	let settings = live_settings()?;
-	let bank = settings.active_bank.masked().0;
+	let (bank, policy, reason, audit) = live_settings(hook)?;
 	let source_kind = positive_kind(source, hook)?;
 	let destination_exists = exists(destination, hook)?;
 	let destination_kind = if destination_exists { positive_kind(destination, hook)? } else { source_kind };
-	let source_walk = walk(bank, 0, source, hook)?;
-	let destination_walk = walk(bank, 1, destination, hook)?;
-	let mut decision = Decision::new(bank, settings.audit != 0);
+	let source_walk = walk(bank, policy, 0, source, hook)?;
+	let destination_walk = walk(bank, policy, 1, destination, hook)?;
+	let mut decision = Decision::new(bank, policy, audit, reason, hook);
 	if decision.side(&source_walk, DecisionOp::DELETE, source_kind, hook) {
 		return Some(decision.finish());
 	}
@@ -151,7 +157,10 @@ pub fn rename(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) ->
 /// evaluation takes the profile default, and the first deny decides.
 struct Decision {
 	bank: u32,
+	policy: u32,
 	audit: bool,
+	reason: u32,
+	hook: u32,
 	covered: bool,
 	deny: Option<DecisionOp>,
 	covered_deny: bool,
@@ -159,8 +168,8 @@ struct Decision {
 
 impl Decision {
 	#[inline(always)]
-	fn new(bank: u32, audit: bool) -> Decision {
-		Decision { bank, audit, covered: false, deny: None, covered_deny: false }
+	fn new(bank: u32, policy: u32, audit: bool, reason: u32, hook: u32) -> Decision {
+		Decision { bank, policy, audit, reason, hook, covered: false, deny: None, covered_deny: false }
 	}
 
 	/// Adds one evaluation. Returns true once the verdict cannot change.
@@ -168,7 +177,7 @@ impl Decision {
 	fn side(&mut self, target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -> bool {
 		let side = evaluate(target, operation, kind, hook);
 		let denies = match side {
-			SIDE_NOT_COVERED => !nomatch(self.bank, operation, kind),
+			SIDE_NOT_COVERED => !nomatch(self.bank, self.policy, operation, kind),
 			SIDE_ALLOW => {
 				self.covered = true;
 				false
@@ -188,20 +197,28 @@ impl Decision {
 	#[inline(always)]
 	fn finish(&self) -> DecisionResult {
 		match self.deny {
-			Some(operation) if self.covered => DecisionResult { verdict: Verdict::DENY, operation, audit: self.audit },
-			_ => DecisionResult { verdict: Verdict::ALLOW, operation: DecisionOp::READ, audit: self.audit },
+			Some(operation) if self.covered => {
+				DecisionResult { verdict: Verdict::DENY, operation, audit: self.audit, reason: self.reason, hook: self.hook }
+			}
+			_ => DecisionResult {
+				verdict: Verdict::ALLOW,
+				operation: DecisionOp::READ,
+				audit: self.audit,
+				reason: self.reason,
+				hook: self.hook,
+			},
 		}
 	}
 }
 
-/// Reads settings and applies the daemon's M1 pid+executable bypass.
+/// The active bank, the caller's policy and labelling reason, and audit mode.
+/// `None` is the daemon's own bypass or an unreadable caller.
 #[inline(always)]
-fn live_settings() -> Option<Settings> {
+fn live_settings(hook: u32) -> Option<(u32, u32, u32, bool)> {
 	let settings = SETTINGS.get(0).copied()?;
-	if kernel::current_pid() == settings.daemon_pid && kernel::caller_exe() == Some(settings.daemon_exe) {
-		return None;
-	}
-	Some(settings)
+	let bank = Bank(settings.active_bank).masked().0;
+	let (policy, reason) = label::caller_policy(&settings, bank, hook)?;
+	Some((bank, policy, reason, settings.audit != 0))
 }
 
 #[inline(always)]
@@ -237,7 +254,7 @@ fn is_dir(mode: u16) -> bool {
 /// Walks from `dentry` to its object. `None` (counted) means a kernel value
 /// was unreadable and the operation fails open.
 #[inline(always)]
-fn walk(bank: u32, slot: u32, dentry: kernel::Dentry, hook: u32) -> Option<Walk> {
+fn walk(bank: u32, policy: u32, slot: u32, dentry: kernel::Dentry, hook: u32) -> Option<Walk> {
 	let mut storage = core::mem::MaybeUninit::<Walk>::uninit();
 	// Volatile word stores, so LLVM emits no `memset` (the verifier rejects the
 	// linker's global one). Walk is all integers, size a multiple of 4.
@@ -252,6 +269,7 @@ fn walk(bank: u32, slot: u32, dentry: kernel::Dentry, hook: u32) -> Option<Walk>
 	let state = unsafe { storage.assume_init_mut() };
 	state.dentry = dentry.raw();
 	state.bank = bank;
+	state.policy = policy;
 	state.slot = slot;
 	state.rel = REL_END;
 	state.leaf = NO_LEAF;
@@ -380,6 +398,7 @@ fn evaluate(target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -
 	let e = unsafe { &mut *state };
 	e.reset();
 	e.bank = target.bank;
+	e.policy = target.policy;
 	e.slot = target.slot;
 	e.rel = target.rel;
 	e.leaf = target.leaf;
@@ -388,7 +407,7 @@ fn evaluate(target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -
 	e.list = list as u32;
 	e.kind = kind.0;
 	e.entry = entry as u32;
-	e.nomatch_allows = nomatch(target.bank, operation, kind) as u32;
+	e.nomatch_allows = nomatch(target.bank, target.policy, operation, kind) as u32;
 	// SAFETY: the callback reads the EVAL map value, which outlives the call.
 	unsafe {
 		bpf_loop(EVAL_BUDGET, matcher::eval_step as *mut c_void, core::ptr::null_mut(), 0);
@@ -416,13 +435,13 @@ fn evaluate(target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -
 }
 
 #[inline(always)]
-fn nomatch(bank: u32, operation: DecisionOp, kind: TargetKind) -> bool {
-	let index = bank * 10 + operation.0 * 2 + kind.0.wrapping_sub(1);
+fn nomatch(bank: u32, policy: u32, operation: DecisionOp, kind: TargetKind) -> bool {
+	let index = (bank * MAX_POLICIES as u32 + policy) * 10 + operation.0 * 2 + kind.0.wrapping_sub(1);
 	NOMATCH.get(index).copied().unwrap_or(Verdict::DENY.0) == Verdict::ALLOW.0
 }
 
 #[inline(always)]
-fn count(reason: u32, hook: u32) {
+pub fn count(reason: u32, hook: u32) {
 	increment(&COUNTERS, reason * HOOKS as u32 + hook);
 }
 

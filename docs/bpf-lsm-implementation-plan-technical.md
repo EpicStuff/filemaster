@@ -407,6 +407,89 @@ processes that started before the daemon, it is seeded once by walking `/proc`
 at load. `/proc/<pid>/stat` `starttime` is in clock ticks; it is converted and
 matched within one tick.
 
+**As built in M3:**
+
+Kernel rule lookup is now per-label. A **label** is a daemon-assigned profile
+number stable for the daemon's lifetime (0 = the unidentified profile). Labels
+map to **policies** — the de-duplicated rule sets — so a profile edit
+re-publishes a policy without relabelling live processes, and equal-ruled
+profiles share one policy. The matcher's context/rule split changed to keep the
+M2 verifier budget: a `Context` keeps only the path and watch scopes; its rules
+moved into `RULELISTS`, and `POLICY_LISTS[(bank, policy, context)]` selects one
+list. The M2 matcher state machine is unchanged apart from fetching the active
+policy's list per context, so its convergence (and budget) survives — re-measured
+below. `NOMATCH` is now keyed by `(bank, policy, operation, kind)`.
+
+- **Maps.** `PROCS` (HASH `tgid → {start_boottime, seq, span, label}`),
+  `RESOLVED` (HASH `tgid → {start, seq, label}`, daemon-written), `EXEC_LABELS`
+  (HASH `{exe(dev,ino,gen), script(dev,ino,gen)} → label`, the `EXE_LABEL`/
+  `SCRIPT_LABEL` fast path), `EXEC_SCRATCH` (LRU `binprm → first-pass file`),
+  `LABEL_POLICY` (per-bank array `label → policy`), `POLICY_LISTS`, `RULELISTS`,
+  `RECORDS` (ring buffer), `RECORD_BUF` (per-CPU assembly), `LABEL_COUNTERS`
+  (per-CPU: map-full, record-drop, unreadable). `SETTINGS` moved here and now
+  carries the daemon's `(tgid, start_boottime, span)` self-bypass, replacing the
+  M1 pid+exe record; `span` is one clock tick, because `/proc` start times are
+  tick-granular.
+- **HASH + exit cleanup, not task storage (§2.6 revisited).** The M2 fix-up
+  added BTF to the object, so task-local storage is no longer blocked by missing
+  BTF. It was still rejected: (1) task storage is per-thread, but a label is a
+  per-thread-group property, so it would need the group leader's storage plus a
+  lookup on every hook; (2) it has no "map full → deny" semantics — allocation
+  failures silently fall back, which would turn a labelled process unlabelled
+  without a signal; and (3) aya-ebpf 0.1.1 ships no task-storage map type, and
+  `bpf_local_storage_map_alloc_check` (verified in both kernel sources) requires
+  BTF key/value type ids the daemon would have to synthesise. A plain `HASH`
+  keyed by tgid with `sched_process_exit` cleanup (group leader only, detected by
+  `signal->live == 0`) gives exact control, a real full-map deny, and one lookup.
+- **Hook order (verified against v6.12.107 and v7.1.9 sources, not assumed).**
+  `sched_process_fork` fires after `copy_process` sets `start_boottime` and
+  before `wake_up_new_task`, so the child's key is valid. `bprm_check_security`
+  runs once per binfmt pass inside `search_binary_handler`; the first pass is
+  detected by `bprm->interp == bprm->filename`, and its file is the script when a
+  later pass substitutes an interpreter. `bprm_committed_creds` runs inside
+  `begin_new_exec`, *before* `load_elf_binary` sets `mm->arg_start`, so argv/envp
+  are **not** captured there; the recompute and the argv/envp `bpf_probe_read_user`
+  happen at `tp_btf/sched_process_exec`, which fires at the end of `exec_binprm`
+  after `load_binary` and before the new program runs. `sched_process_exit` is
+  `TP_PROTO(p)` on 6.12 and `TP_PROTO(p, group_dead)` on 7.1; only arg 0 is read,
+  so one program fits both, and group death is read from `signal->live`.
+- **PENDING flow.** Recompute at exec: `EXE_LABELS{exe, 0}` (fast path, no gap) →
+  a carried script's `EXE_LABELS{exe, script}` → otherwise `PENDING`. A pending
+  or unlabelled caller uses policy 0 (the pending policy: every label's rules as
+  denies plus every scope under a deny default), so structural ops deny with a
+  counted reason (`label-pending` / `unlabelled`). The daemon learns the exe-only
+  fast path only for non-interpreters without cmdline/env/tag fingerprints, so
+  distinct scripts under one interpreter never collapse onto one label.
+- **Script-open path.** A minimal pre-decide hook in the fanotify open path
+  (`DecisionPipeline.SetBeforeOpen`, invoked only for `OpOpen`) lets the labeller
+  resolve a still-pending opener before the open is answered, so a script an
+  interpreter is about to run is labelled before it runs. The exec-record argv
+  path already names the script for `python a.py`, `-m`, `-c` and env-shebang
+  interpreters, so this hook is the backstop for the resolution window.
+- **Core (non-BPF) files touched.** `service/process/process.go` (the pre-captured
+  cmdline/env override at the boundary of the ported `loadProcess` block, behind
+  the new `service/process/identity_capture.go`) and
+  `service/fileaccess/decision_pipeline.go` (the `beforeOpen` open hook). Both are
+  the two boundaries §2.6 names; the ported `loadProcess` logic is unchanged and
+  falls back to `/proc` when no capture is registered.
+- **Verifier cost (verified instructions / largest single stack frame).**
+  Arch 7.1 — unlink 31 565 / 24+200+64+40+72, rmdir 31 315, mkdir 15 645 /
+  176+64+40+72, link 254 796 / 240+…, rename 149 609 / 240+…, bprm_check 145 / 40,
+  fork 240 / 64, exec 909 / 168, exit 187 / 16. Debian 6.12 — unlink 43 667,
+  rmdir 43 409, mkdir 14 623, link 95 874, rename 97 535, bprm_check 148, fork
+  258, exec 959, exit 189. All well under the 1,000,000-instruction limit.
+  (The structural counts shifted from the M2 fix-up because rules moved behind a
+  per-context `POLICY_LISTS` lookup; both kernels still verify.)
+- **Known gaps.** An interpreter invocation (`python a.py`, `-m`, `-c`,
+  env-shebang) is never learned as an exe-only fast path, so every such exec
+  emits a record and has a brief pending window the open hook closes for watched
+  mounts; a short-lived interpreter that mutates before resolution and outside a
+  watched mount denies (the documented PENDING fallback). argv-rewrite immunity
+  comes from capturing argv at `sched_process_exec` before user code; a later
+  `prctl(PR_SET_MM_*)` cannot retrigger it. The btrfs subvolume identity
+  collision (risk 7) is still deferred to M5. UI exposure of labels and the deny
+  notice are M4.
+
 ### 2.7 Events, feedback and status
 
 - **Records.** The ring buffer carries `DecisionRecord`s: operation, verdict,
@@ -455,7 +538,7 @@ The load, lifecycle and startup daemon checks also passed on Debian 6.12
 | M0 | Vendor the crates with port headers and the licence; apply the gate patch; strip blessing/open/exec; Makefile `bpf` target, `go:embed`, `test-fake` stub | `make core` embeds the object; a Go test loads every program through the verifier on both kernels | 0.5 |
 | M1 ✅ | Loader, probe, `.rodata` offsets, attach, pin generations, handover, self-test, teardown, mode option, degraded warnings | Enable → 5 hooks attached and shown in diagnostics; SIGKILL → enforcement persists; restart → generation swap with no gap; `off` → detached and reported unprotected | 1.5 |
 | M2 ✅ (fixed up) | Full-path kernel matcher (`matcher.rs`, faithful `filepath.Match` port over a Go-tokenized program, all state in a per-CPU `EVAL` map) + Go compiler with mount-root objects and per-path contexts + banked publish + ABI manifest test; single label `UNIDENTIFIED` | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: Gate B matched ≥11 k generated `(pattern, path)` pairs against `filepath.Match` with zero mismatches; the generated-rule differential (8 seeds × 505 ops, ~60% expected denies) agrees with `DecideOperation`/`DecideRename`/`DecideHardLink` across the operation matrix — folder renames, `DestExists`, `RENAME_EXCHANGE`/`RENAME_NOREPLACE`, `*at()` callers, >100-deep paths, post-publish creations, and a tmpfs mounted inside a scope with re-publish — with zero mismatches; self-test, lifecycle, handover and live-daemon (enforce/SIGKILL-persist/restart/off) all pass | 2–2.5 |
-| M3 | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny | `python a.py` vs `python b.py` get distinct verdicts; `./x.py` with env shebang; bash/node/perl; `-m` resolves; `-c` falls to the interpreter profile; argv rewrite after start does not change the label; a child `rm` gets `rm`'s label | 2–2.5 |
+| M3 ✅ | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny, `(tgid, start_time)` self-bypass, `/proc` seeding, per-label kernel rule lookup | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: `python a.py` (allow) vs `python b.py` (deny) get distinct verdicts; `./x.py`, `./s.sh`, `./s.js`, `./s.pl` env-shebang scripts labelled by their script arg; `python -m fmmod` resolves to the module profile and `python -c` to the interpreter profile; a child `rm` spawned by a deny-profile script gets `rm`'s allow label; an unresolved process stays `PENDING` and denies; a fork storm against an 8-entry label map denies and increments the map-full counter; argv rewrite after start does not change the label. No regressions: self-test, lifecycle, handover, the Gate B/differential (8×505, 0 mismatches) and live-daemon enforce/off all pass on both kernels and filesystems | 2–2.5 |
 | M4 | Events → filequery, deny notification with Allow-and-retry, Write list active in rule model and UI | Monitor shows delete/rename/link records; the notification appears; Allow → retry succeeds; screenshots of dashboard/monitor/settings checked per CLAUDE.md | 1.5–2 |
 | M5 | Hardening matrix (§4) and fixes; **btrfs subvolume/snapshot identity** (risk 7) — key objects by a subvolume-aware id, not just `(s_dev, ino)` | §4 matrix green; coverage warnings correct for every injected failure; multi-subvolume btrfs no longer collides objects | 1–1.5 |
 | | **Total** | | **8.5–11.5** |
@@ -463,7 +546,10 @@ The load, lifecycle and startup daemon checks also passed on Debian 6.12
 ## 4. Test plan
 
 **VM matrix.** Kernels: Arch 7.1 and Debian 6.12 (`vmctl kernel linux` /
-`vmctl kernel linux-debian`). Filesystems:
+`vmctl kernel linux-debian`). Develop and iterate on Arch 7.1, the VM
+default. Run the full matrix on Debian 6.12 as well once per milestone,
+before its commit; any 6.12-only verifier failure blocks the commit like any
+other failure. Filesystems:
 
 - tmpfs, btrfs (root), and ext4 (a loop device);
 - overlayfs, both lower and upper; untested so far, and Cordon measured only

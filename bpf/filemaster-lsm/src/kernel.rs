@@ -3,6 +3,8 @@
 // `EVENTS`, `SCRATCH`, and `SUPPRESS` maps with their event-only helpers. The M2
 // fix-up removed the scalar-argument reader and added raw dentry handles, a
 // negative-versus-unreadable inode read and the `d_name` reader for the path walk.
+// M3 replaces `caller_exe` with the task, mm, binprm and inode-generation
+// readers for labelling.
 //! The unsafe boundary: every read of kernel memory lives here, behind safe typed
 //! handles, so the decision flow in `main.rs` is `unsafe`-free.
 //!
@@ -25,7 +27,7 @@
 //! ([`FileId`]).
 
 use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_get_current_task, bpf_probe_read_kernel};
-use filemaster_lsm_common::{Dev, FileId, Ino, Offsets, Pid};
+use filemaster_lsm_common::{Dev, ExecFile, FileId, Ino, Offsets, Pid};
 
 /// Running-kernel field offsets, injected into `.rodata` by the daemon
 /// (`override_global("OFFSETS", …)`) after it parses the kernel BTF. The initializer
@@ -164,20 +166,89 @@ impl SuperBlock {
     }
 }
 
-/// The current task's executable identity (`mm->exe_file`'s inode). `None` for a
-/// kernel thread (no `mm`) or an unreadable chain — the caller fails open.
-#[inline(always)]
-pub fn caller_exe() -> Option<FileId> {
-    current_exe_file()?.inode()?.file_id()
+/// A `struct task_struct *`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Task(*const u8);
+
+impl Task {
+    pub fn current() -> Task {
+        Task(unsafe { bpf_get_current_task() } as *const u8)
+    }
+    pub fn from_raw(raw: *const u8) -> Task {
+        Task(raw)
+    }
+    pub fn tgid(self) -> Option<u32> {
+        read_at::<u32>(self.0, offset!(task_tgid))
+    }
+    pub fn group_leader(self) -> Option<Task> {
+        Some(Task(ptr_at(self.0, offset!(task_group_leader))?))
+    }
+    /// The task's `start_boottime`; the group leader's identifies the process.
+    pub fn start_boottime(self) -> Option<u64> {
+        read_at::<u64>(self.0, offset!(task_start_boottime))
+    }
+    /// `Some(None)` for a kernel thread (no `mm`).
+    pub fn mm(self) -> Option<Option<Mm>> {
+        let mm = ptr_at(self.0, offset!(task_mm))?;
+        Some((!mm.is_null()).then_some(Mm(mm)))
+    }
+    /// `signal->live`: the thread group's live thread count.
+    pub fn live_threads(self) -> Option<i32> {
+        let signal = ptr_at(self.0, offset!(task_signal))?;
+        read_at::<i32>(signal, offset!(signal_live))
+    }
 }
 
-/// The current task's `mm->exe_file`, if any (kernel threads have no `mm`).
-fn current_exe_file() -> Option<File> {
-    let task = unsafe { bpf_get_current_task() } as *const u8;
-    let mm = ptr_at(task, offset!(task_mm))?;
-    if mm.is_null() {
-        return None;
+/// A `struct mm_struct *`.
+#[derive(Clone, Copy)]
+pub struct Mm(*const u8);
+
+impl Mm {
+    pub fn exe_file(self) -> Option<File> {
+        let exe_file = ptr_at(self.0, offset!(mm_exe_file))?;
+        (!exe_file.is_null()).then_some(File(exe_file))
     }
-    let exe_file = ptr_at(mm, offset!(mm_exe_file))?;
-    (!exe_file.is_null()).then_some(File(exe_file))
+    /// The user-space `[start, end)` of the argv strings.
+    pub fn args(self) -> Option<(u64, u64)> {
+        Some((read_at::<u64>(self.0, offset!(mm_arg_start))?, read_at::<u64>(self.0, offset!(mm_arg_end))?))
+    }
+    /// The user-space `[start, end)` of the envp strings.
+    pub fn env(self) -> Option<(u64, u64)> {
+        Some((read_at::<u64>(self.0, offset!(mm_env_start))?, read_at::<u64>(self.0, offset!(mm_env_end))?))
+    }
+}
+
+/// A `struct linux_binprm *`.
+#[derive(Clone, Copy)]
+pub struct Binprm(*const u8);
+
+impl Binprm {
+    pub fn from_raw(raw: *const u8) -> Binprm {
+        Binprm(raw)
+    }
+    pub fn raw(self) -> u64 {
+        self.0 as u64
+    }
+    pub fn file(self) -> Option<File> {
+        Some(File(ptr_at(self.0, offset!(binprm_file))?))
+    }
+    /// True on the first binfmt pass: no handler has replaced `interp` yet.
+    pub fn first_pass(self) -> Option<bool> {
+        Some(ptr_at(self.0, offset!(binprm_filename))? == ptr_at(self.0, offset!(binprm_interp))?)
+    }
+}
+
+impl Inode {
+    pub fn generation(self) -> Option<u32> {
+        read_at::<u32>(self.0, offset!(inode_i_generation))
+    }
+}
+
+impl File {
+    /// The file's `(dev, ino, generation)` identity.
+    pub fn exec_file(self) -> Option<ExecFile> {
+        let inode = self.inode()?;
+        let id = inode.file_id()?;
+        Some(ExecFile { dev: id.dev.0, ino: id.ino.0, generation: inode.generation()?, _pad: 0 })
+    }
 }

@@ -30,6 +30,7 @@ type FileAccess struct {
 	effectivePipelineConfig DecisionPipelineConfig
 	profileHandler          *ProfileHandler
 	structural              *structuralBackend
+	labeller                *structuralLabeller
 	lifecycle               *PipelineLifecycle
 	states                  *mgr.StateMgr
 	warningMu               sync.Mutex
@@ -186,6 +187,9 @@ func (fa *FileAccess) Start() error {
 	}
 	fa.effectivePipelineConfig = config
 	fa.pipeline = newDecisionPipeline(fa.handler, config, fa.lifecycle)
+	if fa.labeller != nil {
+		fa.pipeline.SetBeforeOpen(fa.labeller.beforeOpen)
+	}
 	fa.pipeline.Activate()
 	if source, ok := src.(descriptorBudgetSource); ok {
 		source.SetDescriptorBudget(config.OutstandingLimit)

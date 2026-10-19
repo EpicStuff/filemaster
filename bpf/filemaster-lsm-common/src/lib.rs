@@ -1,4 +1,5 @@
-// Ported from cordon crates/bpf-common/src/lib.rs @ b40a8c7 (Apache-2.0) — renamed the crate only.
+// Ported from cordon crates/bpf-common/src/lib.rs @ b40a8c7 (Apache-2.0) — renamed the crate; Filemaster adds
+// `decision_maps` and `label_maps`.
 //! Layout shared, byte-for-byte, between the eBPF data plane (`crates/bpf`) and
 //! the userspace control plane (`crates/daemon`, `bpf-lsm` feature).
 //!
@@ -26,6 +27,7 @@ mod layout;
 
 pub mod decision_maps;
 pub mod ids;
+pub mod label_maps;
 pub mod maps;
 pub mod offsets;
 pub mod policy_maps;
@@ -34,12 +36,16 @@ pub use decision_maps::{
     Arena, Chunk, Context, DecisionOp, ObjectKey, ObjectValue, Pattern, Range, RuleRef, Scratch,
     ScopeRef, TargetKind, Token, Verdict,
 };
+pub use label_maps::{
+    ExecFile, ExecLabelKey, PolicyListKey, ProcValue, RecordBuf, RecordHeader, Resolved, RuleList,
+    Settings,
+};
 pub use ids::{
     Bank, CgroupId, Decision, Dev, Ino, Nanos, Opens, Pid, Suppressed, SuppressedTotal, Uid,
 };
 pub use maps::{
-    DecisionEvent, FileId, MAP_EVENTS, MAP_SETTINGS, MAP_SUPPRESS, PATH_MAX_DEPTH, PATH_NAME_MAX,
-    PathComp, Settings, SuppressKey, SuppressVal,
+    DecisionEvent, FileId, MAP_EVENTS, MAP_SUPPRESS, PATH_MAX_DEPTH, PATH_NAME_MAX, PathComp,
+    SuppressKey, SuppressVal,
 };
 pub use offsets::Offsets;
 pub use policy_maps::{Action, ClassId, ObjId, Policy, SubjectFlags, SubjectMatch};

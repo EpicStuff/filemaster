@@ -76,10 +76,10 @@ func runDifferentialSeed(t *testing.T, seed int64) (allow, deny int) {
 	nested := filepath.Join(scopeA, "nested-mount")
 	mustMkdirAll(t, nested)
 
-	policy := structuralPolicy(
-		&watchRuleSnapshot{Rules: []watchRule{{Path: scopeA}, {Path: scopeB}}},
-		LookupResult{Snapshot: snapshot, DefaultAction: defaultAction},
-	)
+	policy := bpflsm.Policy{
+		Scopes: scopesFromWatchRules(&watchRuleSnapshot{Rules: []watchRule{{Path: scopeA}, {Path: scopeB}}}),
+		Labels: []bpflsm.LabelPolicy{unidentifiedLabelPolicy(LookupResult{Snapshot: snapshot, DefaultAction: defaultAction})},
+	}
 	table, warnings, err := bpflsm.Compile(policy)
 	if err != nil {
 		t.Fatalf("seed=%d compile: %v", seed, err)

@@ -6,9 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/ringbuf"
 	"golang.org/x/sys/unix"
 )
 
@@ -42,17 +47,17 @@ func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string)
 	audit := collection.Maps["AUDIT"]
 	defer func() {
 		err = errors.Join(err,
-			settings.Put(uint32(0), encodeSettings(0, 0, fileID{}, false)),
+			settings.Put(uint32(0), encodeSettings(publishedSettings{})),
 			writeBank(collection.Maps, 1, Table{}),
 			resetAudit(audit),
 		)
 	}()
 	seed := func(allow bool) error {
-		policy := Policy{Scopes: []ScopeInput{{Path: vault}}, DefaultAllow: true}
+		label := LabelPolicy{Label: LabelUnidentified, DefaultAllow: true}
 		for _, list := range []RuleList{ListRead, ListWrite, ListExecute} {
-			policy.Rules = append(policy.Rules, RuleInput{List: list, Pattern: vault + "/**", Allow: allow})
+			label.Rules = append(label.Rules, RuleInput{List: list, Pattern: vault + "/**", Allow: allow})
 		}
-		table, _, err := Compile(policy)
+		table, _, err := Compile(Policy{Scopes: []ScopeInput{{Path: vault}}, Labels: []LabelPolicy{label}})
 		if err != nil {
 			return err
 		}
@@ -85,7 +90,7 @@ func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string)
 	if err := seed(false); err != nil {
 		return err
 	}
-	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{}, false)); err != nil {
+	if err := settings.Put(uint32(0), encodeSettings(publishedSettings{bank: 1})); err != nil {
 		return err
 	}
 	if err := run("deny", unix.EPERM, []testCase{
@@ -100,7 +105,7 @@ func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string)
 		return err
 	}
 
-	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{}, true)); err != nil {
+	if err := settings.Put(uint32(0), encodeSettings(publishedSettings{bank: 1, audit: true})); err != nil {
 		return err
 	}
 	before, err := auditTotal(audit, OperationDelete)
@@ -128,7 +133,7 @@ func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string)
 	if err := seed(true); err != nil {
 		return err
 	}
-	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{}, false)); err != nil {
+	if err := settings.Put(uint32(0), encodeSettings(publishedSettings{bank: 1})); err != nil {
 		return err
 	}
 	return run("allow", nil, []testCase{
@@ -169,6 +174,83 @@ func resetAudit(audit *ebpf.Map) error {
 		if err := audit.Put(uint32(operation), values); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// labelSelfTest proves the labelling programs read their kernel fields: an
+// exec of an unlabelled shell must leave a pending record with its leader's
+// /proc start time and a ring-buffer record with its argv and envp, and its
+// exit must remove the record. It runs with an empty bank 0 and no bypass.
+func labelSelfTest(collection *ebpf.Collection) (err error) {
+	settings := collection.Maps["SETTINGS"]
+	if err := settings.Put(uint32(0), encodeSettings(publishedSettings{labelling: true})); err != nil {
+		return err
+	}
+	defer func() {
+		err = errors.Join(err, settings.Put(uint32(0), encodeSettings(publishedSettings{})))
+	}()
+	reader, err := ringbuf.NewReader(collection.Maps["RECORDS"])
+	if err != nil {
+		return fmt.Errorf("open records: %w", err)
+	}
+	defer reader.Close()
+
+	shell := exec.Command("/bin/sh", "-c", "read line")
+	shell.Env = []string{"FILEMASTER_LABEL_SELFTEST=1"}
+	stdin, err := shell.StdinPipe()
+	if err != nil {
+		return err
+	}
+	if err := shell.Start(); err != nil {
+		return fmt.Errorf("start /bin/sh: %w", err)
+	}
+	pid := uint32(shell.Process.Pid)
+	defer func() {
+		_ = stdin.Close()
+		_ = shell.Wait()
+	}()
+
+	reader.SetDeadline(time.Now().Add(5 * time.Second))
+	var record Record
+	for {
+		raw, err := reader.Read()
+		if err != nil {
+			return fmt.Errorf("no exec record for /bin/sh (pid %d): %w", pid, err)
+		}
+		if record, err = decodeRecord(raw.RawSample); err == nil && record.TGID == pid && record.Kind == recordExec {
+			break
+		}
+	}
+	if !slices.Equal(record.Args, []string{"/bin/sh", "-c", "read line"}) || !slices.Contains(record.Env, "FILEMASTER_LABEL_SELFTEST=1") {
+		return fmt.Errorf("exec record argv %q envp %q", record.Args, record.Env)
+	}
+	start, _, err := procStart(int(pid))
+	if err != nil {
+		return err
+	}
+	if record.Start < start || record.Start-start >= clockTick {
+		return fmt.Errorf("exec record start %d is not within a tick of /proc's %d", record.Start, start)
+	}
+	exe, err := pathFileID("/proc/" + strconv.Itoa(int(pid)) + "/exe")
+	if err != nil {
+		return err
+	}
+	if record.Exe.Dev != exe.dev || record.Exe.Ino != exe.ino {
+		return fmt.Errorf("exec record exe %+v, /proc says %+v", record.Exe, exe)
+	}
+	value := make([]byte, procValueSize)
+	if err := collection.Maps["PROCS"].Lookup(pid, value); err != nil {
+		return fmt.Errorf("no label record for /bin/sh: %w", err)
+	}
+	if proc := decodeProcValue(value); proc.Label != labelPending || proc.Start != record.Start || proc.Seq != record.Seq {
+		return fmt.Errorf("label record %+v does not match exec record %+v", proc, record)
+	}
+
+	_ = stdin.Close()
+	_ = shell.Wait()
+	if err := collection.Maps["PROCS"].Lookup(pid, value); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("label record for exited /bin/sh still present: %v", err)
 	}
 	return nil
 }

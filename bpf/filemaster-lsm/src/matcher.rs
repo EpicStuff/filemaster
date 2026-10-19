@@ -15,8 +15,10 @@ use filemaster_lsm_common::decision_maps::{
 	MAX_RANGES, MAX_STRING, MAX_TOKENS, REL_END, RULE_ALLOW, RULE_KIND_MASK, RULE_KIND_SHIFT,
 	SCRATCH_MASK, TOKEN_CLASS, TOKEN_LITERAL, TOKEN_QUESTION,
 };
+use filemaster_lsm_common::label_maps::{MAX_RULELISTS, RULELIST_OVERFLOW};
+use filemaster_lsm_common::PolicyListKey;
 
-use crate::maps::{ARENA, CHUNKS, CONTEXTS, PATTERNS, RANGES, SCRATCH, TOKENS};
+use crate::maps::{ARENA, CHUNKS, CONTEXTS, PATTERNS, POLICY_LISTS, RANGES, RULELISTS, SCRATCH, TOKENS};
 
 // Eval-level phases.
 const E_CONTEXT: u32 = 0;
@@ -71,6 +73,9 @@ pub struct EvalState {
 	pub kind: u32,
 	pub entry: u32,
 	pub nomatch_allows: u32,
+	pub policy: u32,
+	// The current context's rule list in RULELISTS.
+	pub rulelist: u32,
 	// Outer iteration.
 	pub phase: u32,
 	pub context: u32,
@@ -189,7 +194,7 @@ fn step_context(e: &mut EvalState, arena: *const u8, scratch: *const u8) -> i64 
 		e.phase = E_DONE;
 		return 1;
 	};
-	if context.flags & CONTEXT_OVERFLOW != 0 || context.rule_count > CONTEXT_RULES as u32 || context.scope_count > CONTEXT_SCOPES as u32 {
+	if context.flags & CONTEXT_OVERFLOW != 0 || context.scope_count > CONTEXT_SCOPES as u32 {
 		e.overflow = 1;
 		e.denied = 1;
 		e.covered = 1;
@@ -242,9 +247,29 @@ fn step_context(e: &mut EvalState, arena: *const u8, scratch: *const u8) -> i64 
 		start + context.parent_len
 	};
 	e.rule = 0;
-	e.rule_count = context.rule_count;
+	e.rule_count = 0;
 	e.scope_count = context.scope_count;
 	e.phase = E_RULE;
+	let key = PolicyListKey { bank: e.bank, policy: e.policy, context: e.context };
+	// SAFETY: copied immediately.
+	if let Some(list) = unsafe { POLICY_LISTS.get(&key) }.copied() {
+		let index = e.bank.wrapping_mul(MAX_RULELISTS as u32).wrapping_add(list);
+		let Some(rules) = RULELISTS.get(index) else {
+			e.denied = 1;
+			e.phase = E_DONE;
+			return 1;
+		};
+		if rules.flags & RULELIST_OVERFLOW != 0 || rules.rule_count > CONTEXT_RULES as u32 {
+			e.overflow = 1;
+			e.denied = 1;
+			e.covered = 1;
+			e.context += 1;
+			e.phase = E_CONTEXT;
+			return 0;
+		}
+		e.rulelist = index;
+		e.rule_count = rules.rule_count;
+	}
 	0
 }
 
@@ -254,12 +279,12 @@ fn step_rule(e: &mut EvalState, _arena: *const u8, _scratch: *const u8) -> i64 {
 		e.phase = E_SCOPE;
 		return 0;
 	}
-	let Some(context) = CONTEXTS.get(ctx_index(e)) else {
+	let Some(rules) = RULELISTS.get(e.rulelist) else {
 		e.denied = 1;
 		e.phase = E_DONE;
 		return 1;
 	};
-	let rule = context.rules[(e.rule as usize) & (CONTEXT_RULES - 1)];
+	let rule = rules.rules[(e.rule as usize) & (CONTEXT_RULES - 1)];
 	if rule.list as u32 != e.list {
 		e.rule += 1;
 		return 0;

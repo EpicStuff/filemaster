@@ -313,10 +313,21 @@ func loadProcess(ctx context.Context, key string, pInfo *processInfo.Process) (*
 		}
 	}
 
+	// filemaster boundary: a pre-captured command line and environment (read
+	// by the BPF labeller from the new image's stack at exec, before the
+	// process could rewrite them) override the /proc reads below, so a process
+	// cannot hide its identity. Set before the ported /proc block; when it is
+	// absent, the upstream reads run unchanged.
+	capturedCmdline, capturedEnv, captured := preCapturedIdentity(pInfo.Pid)
+
 	// Command line arguments
-	process.CmdLine, err = pInfo.CmdlineWithContext(ctx)
-	if err != nil {
-		log.Tracer(ctx).Warningf("process: failed to get cmdline (PID %d): %s", pInfo.Pid, err)
+	if captured {
+		process.CmdLine = capturedCmdline
+	} else {
+		process.CmdLine, err = pInfo.CmdlineWithContext(ctx)
+		if err != nil {
+			log.Tracer(ctx).Warningf("process: failed to get cmdline (PID %d): %s", pInfo.Pid, err)
+		}
 	}
 
 	// Name
@@ -329,7 +340,10 @@ func loadProcess(ctx context.Context, key string, pInfo *processInfo.Process) (*
 	}
 
 	// Get all environment variables
-	env, err := pInfo.EnvironWithContext(ctx)
+	env, err := capturedEnv, error(nil)
+	if !captured {
+		env, err = pInfo.EnvironWithContext(ctx)
+	}
 	if err == nil {
 		// Split env variables in key and value.
 		process.Env = make(map[string]string, len(env))

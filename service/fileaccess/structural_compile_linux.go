@@ -22,15 +22,31 @@ func (fa *FileAccess) compileStructuralTable() (bpflsm.Table, []bpflsm.CompileWa
 	if err != nil {
 		return bpflsm.Table{}, nil, fmt.Errorf("parse structural watch paths: %w", err)
 	}
-	return bpflsm.Compile(structuralPolicy(watchRules, lookup))
+	policy := bpflsm.Policy{Scopes: scopesFromWatchRules(watchRules)}
+	unidentified := unidentifiedLabelPolicy(lookup)
+	if fa.labeller != nil {
+		policy.Labels = fa.labeller.labelPolicies(unidentified)
+	} else {
+		policy.Labels = []bpflsm.LabelPolicy{unidentified}
+	}
+	return bpflsm.Compile(policy)
 }
 
-// structuralPolicy flattens the watch rules and the unidentified profile's
-// snapshot, in engine order, into the BPF compiler's plain input.
-func structuralPolicy(watchRules *watchRuleSnapshot, lookup LookupResult) bpflsm.Policy {
-	policy := bpflsm.Policy{DefaultAllow: verdictFromDefaultAction(lookup.DefaultAction) == VerdictAllow}
+// scopesFromWatchRules preserves the configured order and exclusions.
+func scopesFromWatchRules(watchRules *watchRuleSnapshot) []bpflsm.ScopeInput {
+	var scopes []bpflsm.ScopeInput
 	for _, rule := range watchRules.Rules {
-		policy.Scopes = append(policy.Scopes, bpflsm.ScopeInput{Path: rule.Path, Exclude: rule.Exclude})
+		scopes = append(scopes, bpflsm.ScopeInput{Path: rule.Path, Exclude: rule.Exclude})
+	}
+	return scopes
+}
+
+// unidentifiedLabelPolicy flattens the unidentified profile's snapshot, in
+// engine order, into the BPF compiler's plain label input (label 0).
+func unidentifiedLabelPolicy(lookup LookupResult) bpflsm.LabelPolicy {
+	policy := bpflsm.LabelPolicy{
+		Label:        bpflsm.LabelUnidentified,
+		DefaultAllow: verdictFromDefaultAction(lookup.DefaultAction) == VerdictAllow,
 	}
 	if lookup.Snapshot == nil {
 		return policy

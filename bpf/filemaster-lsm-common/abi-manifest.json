@@ -1,17 +1,24 @@
 {
   "FileId": {"size": 16, "offsets": {"dev": 0, "ino": 8}},
-  "Settings": {"size": 32, "offsets": {"daemon_pid": 0, "active_bank": 4, "daemon_exe": 8, "audit": 24, "pad": 28}},
+  "Settings": {"size": 32, "offsets": {"daemon_start": 0, "daemon_tgid": 8, "daemon_span": 12, "active_bank": 16, "audit": 20, "flags": 24}},
   "ObjectKey": {"size": 24, "offsets": {"file": 0, "bank": 16, "pad": 20}},
   "ObjectValue": {"size": 8, "offsets": {"first_context": 0, "context_count": 4}},
   "ScopeRef": {"size": 12, "offsets": {"off": 0, "len": 4, "exclude": 8}},
   "RuleRef": {"size": 4, "offsets": {"pattern": 0, "list": 2, "flags": 3}},
-  "Context": {"size": 1432, "offsets": {"path_off": 0, "path_len": 4, "parent_len": 8, "flags": 12, "scope_count": 16, "rule_count": 20, "scopes": 24, "rules": 408}},
+  "Context": {"size": 408, "offsets": {"path_off": 0, "path_len": 4, "parent_len": 8, "flags": 12, "scope_count": 16, "scopes": 24}},
   "Pattern": {"size": 20, "offsets": {"off": 0, "len": 4, "recursive": 8, "chunk_off": 12, "chunk_len": 16}},
   "Chunk": {"size": 12, "offsets": {"star": 0, "token_off": 4, "token_len": 8}},
   "Token": {"size": 12, "offsets": {"kind": 0, "byte": 1, "negated": 2, "range_off": 4, "range_len": 8}},
   "Range": {"size": 8, "offsets": {"lo": 0, "hi": 4}},
+  "ExecFile": {"size": 24, "offsets": {"dev": 0, "ino": 8, "generation": 16}},
+  "ExecLabelKey": {"size": 48, "offsets": {"exe": 0, "script": 24}},
+  "ProcValue": {"size": 24, "offsets": {"start": 0, "seq": 8, "span": 16, "label": 20}},
+  "Resolved": {"size": 24, "offsets": {"start": 0, "seq": 8, "label": 16}},
+  "PolicyListKey": {"size": 12, "offsets": {"bank": 0, "policy": 4, "context": 8}},
+  "RuleList": {"size": 1032, "offsets": {"rule_count": 0, "flags": 4, "rules": 8}},
+  "RecordHeader": {"size": 96, "offsets": {"kind": 0, "tgid": 4, "start": 8, "seq": 16, "exe": 24, "script": 48, "parent_seq": 72, "parent_tgid": 80, "flags": 84, "args_len": 88, "env_len": 92}},
   "Arena": {"size": 1052672},
   "Scratch": {"size": 20480},
-  "Offsets": {"size": 64},
-  "constants": {"NUM_BANKS": 2, "MAX_OBJECTS": 1024, "MAX_CONTEXTS": 1024, "MAX_PATTERNS": 1024, "MAX_CHUNKS": 8192, "MAX_TOKENS": 32768, "MAX_RANGES": 16384, "CONTEXT_RULES": 256, "CONTEXT_SCOPES": 32, "ARENA_SIZE": 1048576, "MAX_STRING": 4095, "AUDIT_COUNTERS": 5, "NOMATCH_ENTRIES": 20, "HOOKS": 5, "REASONS": 6}
+  "Offsets": {"size": 112},
+  "constants": {"NUM_BANKS": 2, "MAX_OBJECTS": 1024, "MAX_CONTEXTS": 1024, "MAX_PATTERNS": 1024, "MAX_CHUNKS": 8192, "MAX_TOKENS": 32768, "MAX_RANGES": 16384, "CONTEXT_RULES": 256, "CONTEXT_SCOPES": 32, "ARENA_SIZE": 1048576, "MAX_STRING": 4095, "AUDIT_COUNTERS": 5, "NOMATCH_ENTRIES": 20480, "HOOKS": 5, "REASONS": 8, "MAX_LABELS": 16384, "MAX_POLICIES": 1024, "MAX_RULELISTS": 2048, "MAX_POLICY_LISTS": 65536, "MAX_PROCS": 65536, "MAX_EXEC_LABELS": 65536, "EXEC_SCRATCH_ENTRIES": 4096, "RECORDS_SIZE": 8388608, "RECORD_BUF_SIZE": 32768, "ARGS_MAX": 8191, "ENV_MAX": 16383, "LABEL_COUNTERS": 3}
 }

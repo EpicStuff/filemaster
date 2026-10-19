@@ -4,6 +4,7 @@ package bpflsm
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -32,25 +33,40 @@ func TestLoadEmbeddedObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	collection, err := ebpf.NewCollection(spec)
+	collection, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{LogLevel: ebpf.LogLevelStats},
+	})
 	if err != nil {
 		t.Fatalf("load embedded BPF object through verifier: %v", verifierError(err))
 	}
 	defer collection.Close()
 
-	if len(collection.Programs) != len(Hooks) {
-		t.Fatalf("loaded %d programs, want only the %d structural hooks: %v", len(collection.Programs), len(Hooks), collection.Programs)
+	if len(collection.Programs) != len(Hooks)+len(labelPrograms) {
+		t.Fatalf("loaded %d programs, want the %d structural hooks and %d labelling programs: %v",
+			len(collection.Programs), len(Hooks), len(labelPrograms), collection.Programs)
 	}
+	var names []string
 	for _, hook := range Hooks {
-		program, ok := collection.Programs[hook.Program]
+		names = append(names, hook.Program)
+	}
+	for _, name := range append(names, labelPrograms...) {
+		program, ok := collection.Programs[name]
 		if !ok {
-			t.Errorf("program %q was not loaded", hook.Program)
+			t.Errorf("program %q was not loaded", name)
 			continue
 		}
-		if _, err := program.Info(); err != nil {
-			t.Errorf("program %q did not load: %v", hook.Program, err)
+		info, err := program.Info()
+		if err != nil {
+			t.Errorf("program %q did not load: %v", name, err)
 			continue
 		}
-		t.Logf("verifier passed: %s", hook.Program)
+		instructions, _ := info.VerifiedInstructions()
+		stack := ""
+		for _, line := range strings.Split(program.VerifierLog, "\n") {
+			if index := strings.Index(line, "stack depth"); index >= 0 {
+				stack = line[index:]
+			}
+		}
+		t.Logf("verifier passed: %s, %d verified instructions, %s", name, instructions, stack)
 	}
 }

@@ -60,8 +60,7 @@ func probe(kernel *btf.Spec) (problems []string, missingHooks map[string]string)
 }
 
 // loadSpec parses the embedded object and writes the running kernel's struct
-// offsets into its OFFSETS global. The object carries no BTF, so
-// VariableSpec.Set refuses; the .rodata bytes are written directly.
+// offsets into its OFFSETS global, as raw .rodata bytes.
 func loadSpec(object []byte, kernel *btf.Spec) (*ebpf.CollectionSpec, error) {
 	if len(object) == 0 {
 		return nil, errors.New("no BPF object is embedded in this build")
@@ -95,6 +94,18 @@ func loadSpec(object []byte, kernel *btf.Spec) (*ebpf.CollectionSpec, error) {
 		{"task_struct", []string{"mm"}},
 		{"mm_struct", []string{"exe_file"}},
 		{"linux_binprm", []string{"file"}},
+		{"task_struct", []string{"tgid"}},
+		{"task_struct", []string{"group_leader"}},
+		{"task_struct", []string{"start_boottime"}},
+		{"task_struct", []string{"signal"}},
+		{"signal_struct", []string{"live"}},
+		{"mm_struct", []string{"arg_start"}},
+		{"mm_struct", []string{"arg_end"}},
+		{"mm_struct", []string{"env_start"}},
+		{"mm_struct", []string{"env_end"}},
+		{"inode", []string{"i_generation"}},
+		{"linux_binprm", []string{"filename"}},
+		{"linux_binprm", []string{"interp"}},
 	}
 	variable, ok := spec.Variables["OFFSETS"]
 	if !ok {

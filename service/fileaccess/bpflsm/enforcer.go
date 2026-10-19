@@ -17,6 +17,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
 )
 
 const (
@@ -78,6 +79,8 @@ type Status struct {
 	Undecided []UndecidedCount
 	// CompileWarnings describe rules the compiler left out or could not fit.
 	CompileWarnings []CompileWarning
+	// Labelling reports process labelling, when the generation runs it.
+	Labelling LabelStatus
 }
 
 // UndecidedCount is one non-zero COUNTERS total.
@@ -95,10 +98,13 @@ const (
 	ReasonUnregisteredRoot = "unregistered-root"
 	ReasonContextOverflow  = "context-overflow"
 	ReasonBudget           = "evaluation-budget"
+	ReasonPending          = "label-pending"
+	ReasonUnlabelled       = "unlabelled"
 )
 
 var undecidedReasons = [reasonCount]string{
 	ReasonUnreadable, ReasonDepth, ReasonPathTooLong, ReasonUnregisteredRoot, ReasonContextOverflow, ReasonBudget,
+	ReasonPending, ReasonUnlabelled,
 }
 
 // Enforcer owns the loaded BPF LSM object and its pinned generations.
@@ -112,27 +118,40 @@ type Enforcer struct {
 	pinRoot           string
 	selfTestDir       string
 	daemonPIDOverride *uint32
+	labelling         bool
+	maxProcs          uint32
+	onRecord          func(Record)
 	collection        *ebpf.Collection
 	links             []link.Link
+	records           *ringbuf.Reader
+	recordsDone       chan struct{}
 	status            Status
 	settings          publishedSettings
 	table             Table
 }
 
 type publishedSettings struct {
-	daemonPID uint32
+	daemon    daemonIdentity
 	bank      uint32
-	exe       fileID
 	audit     bool
+	labelling bool
 }
 
 // Options supplies non-default paths and identity only when an embedding
 // caller needs them. Production uses NewEnforcer; the explicit identity is
 // also what lets isolated kernel tests disable the daemon bypass.
+//
+// Labelling attaches the fork/exec/exit labelling programs: unlabelled and
+// pending processes then use the pending policy, and OnRecord receives every
+// pending exec and fork. Without it every process uses label 0 (M2).
+// MaxProcs overrides the label map size, for tests that fill it.
 type Options struct {
 	PinRoot     string
 	SelfTestDir string
 	DaemonPID   *uint32
+	Labelling   bool
+	MaxProcs    uint32
+	OnRecord    func(Record)
 }
 
 // NewEnforcer returns an enforcer that has not attached anything.
@@ -158,6 +177,9 @@ func NewEnforcerWithOptions(options Options) *Enforcer {
 		pid := *options.DaemonPID
 		e.daemonPIDOverride = &pid
 	}
+	e.labelling = options.Labelling
+	e.maxProcs = options.MaxProcs
+	e.onRecord = options.OnRecord
 	return e
 }
 
@@ -179,6 +201,12 @@ func (e *Enforcer) Status() Status {
 		status.Undecided = counters
 	} else if e.collection != nil {
 		status.Error = joinStatusError(status.Error, "read undecided counters: "+err.Error())
+	}
+	status.Labelling.Programs = slices.Clone(status.Labelling.Programs)
+	if full, drops, unreadable, err := labelCounterTotals(e.collection); err == nil {
+		status.Labelling.MapFull, status.Labelling.RecordDrops, status.Labelling.Unreadable = full, drops, unreadable
+	} else if e.collection != nil {
+		status.Error = joinStatusError(status.Error, "read labelling counters: "+err.Error())
 	}
 	return status
 }
@@ -285,6 +313,11 @@ func (e *Enforcer) Close() {
 }
 
 func (e *Enforcer) release() {
+	if e.records != nil {
+		_ = e.records.Close()
+		<-e.recordsDone
+		e.records = nil
+	}
 	for _, l := range e.links {
 		_ = l.Close()
 	}
@@ -316,6 +349,10 @@ func (e *Enforcer) start(mode Mode, table Table) Status {
 		status.Error = err.Error()
 		return status
 	}
+	if e.maxProcs != 0 {
+		spec.Maps["PROCS"].MaxEntries = e.maxProcs
+		spec.Maps["RESOLVED"].MaxEntries = e.maxProcs
+	}
 	collection, err := ebpf.NewCollection(spec)
 	if err != nil {
 		status.Error = "load BPF LSM object: " + verifierError(err).Error()
@@ -324,7 +361,7 @@ func (e *Enforcer) start(mode Mode, table Table) Status {
 	// Bank 0 is deliberately empty during attachment and self-test. The caller's
 	// table is published into bank 1 before this generation is pinned or any
 	// older generation is swept.
-	if err := collection.Maps["SETTINGS"].Put(uint32(0), encodeSettings(0, 0, fileID{}, mode == ModeAudit)); err != nil {
+	if err := collection.Maps["SETTINGS"].Put(uint32(0), encodeSettings(publishedSettings{audit: mode == ModeAudit})); err != nil {
 		collection.Close()
 		status.Error = fmt.Sprintf("seed settings: %v", err)
 		return status
@@ -359,27 +396,36 @@ func (e *Enforcer) start(mode Mode, table Table) Status {
 	if len(links) == 0 {
 		return fail("no BPF LSM hook attached")
 	}
+	if e.labelling {
+		status.Labelling.Enabled = true
+		labelLinks, programs, err := attachLabelling(collection)
+		links = append(links, labelLinks...)
+		status.Labelling.Programs = programs
+		if err != nil {
+			return fail("attach labelling programs: %v", err)
+		}
+	}
 	if err := selfTest(collection, attached, e.selfTestDir); err != nil {
 		return fail("BPF LSM self-test failed, so the new programs were detached: %v", err)
 	}
+	if e.labelling {
+		if err := labelSelfTest(collection); err != nil {
+			return fail("BPF LSM labelling self-test failed, so the new programs were detached: %v", err)
+		}
+	}
 
 	// The daemon's own structural operations bypass enforcement. The record
-	// names the executable as well as the pid, because pinned links outlive
-	// the daemon and its pid can be reused.
-	exe, err := daemonFileID()
+	// names the thread group's start time as well as its tgid, because pinned
+	// links outlive the daemon and its tgid can be reused.
+	daemon, err := ownIdentity()
 	if err != nil {
-		return fail("identify daemon executable: %v", err)
-	}
-	settings := publishedSettings{
-		daemonPID: uint32(os.Getpid()),
-		bank:      0,
-		exe:       exe,
-		audit:     mode == ModeAudit,
+		return fail("identify daemon: %v", err)
 	}
 	if e.daemonPIDOverride != nil {
-		settings.daemonPID = *e.daemonPIDOverride
+		daemon.tgid = *e.daemonPIDOverride
 	}
-	if err := collection.Maps["SETTINGS"].Put(uint32(0), encodeSettings(settings.daemonPID, settings.bank, settings.exe, settings.audit)); err != nil {
+	settings := publishedSettings{daemon: daemon, audit: mode == ModeAudit, labelling: e.labelling}
+	if err := collection.Maps["SETTINGS"].Put(uint32(0), encodeSettings(settings)); err != nil {
 		return fail("publish settings: %v", err)
 	}
 	e.collection = collection
@@ -408,6 +454,16 @@ func (e *Enforcer) start(mode Mode, table Table) Status {
 	if err != nil {
 		status.Error = err.Error()
 	}
+	if e.labelling && e.onRecord != nil {
+		reader, err := ringbuf.NewReader(collection.Maps["RECORDS"])
+		if err != nil {
+			status.Error = joinStatusError(status.Error, "open labelling records: "+err.Error())
+		} else {
+			e.records = reader
+			e.recordsDone = make(chan struct{})
+			go readRecords(reader, e.onRecord, e.recordsDone)
+		}
+	}
 	status.State = StateActive
 	return status
 }
@@ -420,10 +476,7 @@ func (e *Enforcer) publishLocked(table Table, mode Mode) error {
 	settings := e.settings
 	settings.bank = inactive
 	settings.audit = mode == ModeAudit
-	if err := e.collection.Maps["SETTINGS"].Put(
-		uint32(0),
-		encodeSettings(settings.daemonPID, settings.bank, settings.exe, settings.audit),
-	); err != nil {
+	if err := e.collection.Maps["SETTINGS"].Put(uint32(0), encodeSettings(settings)); err != nil {
 		return fmt.Errorf("flip active decision-table bank: %w", err)
 	}
 	e.settings = settings
@@ -475,14 +528,33 @@ func writeBank(maps map[string]*ebpf.Map, bank uint32, table Table) error {
 			return fmt.Errorf("write CONTEXTS[%d]: %w", i, err)
 		}
 	}
-	verdict := uint32(0)
-	if table.DefaultAllow {
-		verdict = 1
-	}
-	for index := bank * 10; index < bank*10+10; index++ {
-		if err := maps["NOMATCH"].Put(index, verdict); err != nil {
-			return fmt.Errorf("write NOMATCH[%d]: %w", index, err)
+	for i, list := range table.RuleLists {
+		if err := maps["RULELISTS"].Put(bank*maxRuleLists+uint32(i), encodeRuleList(list)); err != nil {
+			return fmt.Errorf("write RULELISTS[%d]: %w", i, err)
 		}
+	}
+	if err := clearPolicyListBank(maps["POLICY_LISTS"], bank); err != nil {
+		return fmt.Errorf("clear inactive POLICY_LISTS bank: %w", err)
+	}
+	for policy, compiled := range table.Policies {
+		for context, list := range compiled.Lists {
+			if err := maps["POLICY_LISTS"].Put(encodePolicyListKey(bank, uint32(policy), context), list); err != nil {
+				return fmt.Errorf("write POLICY_LISTS: %w", err)
+			}
+		}
+		verdict := uint32(0)
+		if compiled.DefaultAllow {
+			verdict = 1
+		}
+		first := (bank*maxPolicies + uint32(policy)) * 10
+		for index := first; index < first+10; index++ {
+			if err := maps["NOMATCH"].Put(index, verdict); err != nil {
+				return fmt.Errorf("write NOMATCH[%d]: %w", index, err)
+			}
+		}
+	}
+	if err := writeLabelPolicies(maps["LABEL_POLICY"], bank, table.Labels); err != nil {
+		return fmt.Errorf("write LABEL_POLICY: %w", err)
 	}
 	for _, object := range table.Objects {
 		if err := maps["OBJECTS"].Put(encodeObjectKey(bank, object.File), encodeObjectValue(object.FirstContext, object.ContextCount)); err != nil {
@@ -507,6 +579,49 @@ func clearObjectBank(m *ebpf.Map, bank uint32) error {
 	}
 	for _, key := range keys {
 		if err := m.Delete(key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func clearPolicyListBank(m *ebpf.Map, bank uint32) error {
+	var key [policyListKey]byte
+	var value uint32
+	var keys [][policyListKey]byte
+	iter := m.Iterate()
+	for iter.Next(&key, &value) {
+		if binary.LittleEndian.Uint32(key[0:]) == bank {
+			keys = append(keys, key)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := m.Delete(key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeLabelPolicies rewrites one bank's whole label range, so a label the
+// table leaves out reads as the pending policy.
+func writeLabelPolicies(m *ebpf.Map, bank uint32, labels map[uint32]uint32) error {
+	keys := make([]uint32, maxLabels)
+	values := make([]uint32, maxLabels)
+	for label := range uint32(maxLabels) {
+		keys[label] = bank*maxLabels + label
+		values[label] = labels[label]
+	}
+	if _, err := m.BatchUpdate(keys, values, nil); err == nil {
+		return nil
+	} else if !errors.Is(err, ebpf.ErrNotSupported) {
+		return err
+	}
+	for i := range keys {
+		if err := m.Put(keys[i], values[i]); err != nil {
 			return err
 		}
 	}

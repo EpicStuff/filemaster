@@ -2,6 +2,7 @@
 // `PROTECTED`, `RULES`, and `RULE_COUNT` maps and delegates all Filemaster
 // policy evaluation to the custom `decide` module; the M2 fix-up drops the
 // nonexistent `inode_rename` flags argument and passes each hook's counter index.
+// M3 adds the observe-only labelling programs, which delegate to `label`.
 //! Filemaster's eBPF LSM hook boundary for structural mutations.
 
 #![no_std]
@@ -9,11 +10,12 @@
 
 mod decide;
 mod kernel;
+mod label;
 mod maps;
 mod matcher;
 
-use aya_ebpf::macros::lsm;
-use aya_ebpf::programs::LsmContext;
+use aya_ebpf::macros::{btf_tracepoint, lsm};
+use aya_ebpf::programs::{BtfTracePointContext, LsmContext};
 use filemaster_lsm_common::decision_maps::{HOOK_LINK, HOOK_MKDIR, HOOK_RENAME, HOOK_RMDIR, HOOK_UNLINK};
 
 /// `inode_link(struct dentry *old_dentry, struct inode *dir, struct dentry *new_dentry)`.
@@ -53,6 +55,35 @@ pub fn inode_rmdir(ctx: LsmContext) -> i32 {
 #[lsm(hook = "inode_mkdir")]
 pub fn inode_mkdir(ctx: LsmContext) -> i32 {
     decide::clamped(decide::mkdir(kernel::Dentry::from_arg(&ctx, 1), HOOK_MKDIR))
+}
+
+/// `bprm_check_security(struct linux_binprm *bprm)`. Observes only.
+#[lsm(hook = "bprm_check_security")]
+pub fn bprm_check_security(ctx: LsmContext) -> i32 {
+    label::bprm_check(kernel::Binprm::from_raw(unsafe { ctx.arg(0) }));
+    0
+}
+
+/// `sched_process_fork(struct task_struct *parent, struct task_struct *child)`.
+#[btf_tracepoint(function = "sched_process_fork")]
+pub fn sched_process_fork(ctx: BtfTracePointContext) -> i32 {
+    label::fork(kernel::Task::from_raw(unsafe { ctx.arg(0) }), kernel::Task::from_raw(unsafe { ctx.arg(1) }));
+    0
+}
+
+/// `sched_process_exec(struct task_struct *p, pid_t old_pid, struct linux_binprm *bprm)`.
+#[btf_tracepoint(function = "sched_process_exec")]
+pub fn sched_process_exec(ctx: BtfTracePointContext) -> i32 {
+    label::exec(kernel::Task::from_raw(unsafe { ctx.arg(0) }), kernel::Binprm::from_raw(unsafe { ctx.arg(2) }));
+    0
+}
+
+/// `sched_process_exit(struct task_struct *p[, bool group_dead])`; only the
+/// first argument is read, so one program fits both kernels.
+#[btf_tracepoint(function = "sched_process_exit")]
+pub fn sched_process_exit(ctx: BtfTracePointContext) -> i32 {
+    label::exit(kernel::Task::from_raw(unsafe { ctx.arg(0) }));
+    0
 }
 
 /// eBPF programs calling GPL-only helpers must declare a GPL-compatible license.
