@@ -104,31 +104,17 @@ func TestEnforcerLifecycle(t *testing.T) {
 	if err := os.WriteFile(victim, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	id, err := pathFileID(protectedDir)
-	if err != nil {
-		t.Fatal(err)
+	pinned := make(map[string]*ebpf.Map)
+	for _, name := range policyMaps {
+		m, err := ebpf.LoadPinnedMap(filepath.Join(firstDir, name), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer m.Close()
+		pinned[name] = m
 	}
-	objects, err := ebpf.LoadPinnedMap(filepath.Join(firstDir, "OBJECTS"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer objects.Close()
-	verdicts, err := ebpf.LoadPinnedMap(filepath.Join(firstDir, "VERDICT"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer verdicts.Close()
-	noMatch, err := ebpf.LoadPinnedMap(filepath.Join(firstDir, "NOMATCH"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer noMatch.Close()
-	settings, err := ebpf.LoadPinnedMap(filepath.Join(firstDir, "SETTINGS"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer settings.Close()
-	if err := seedSelfTestTable(objects, verdicts, noMatch, id, VerdictDeny, VerdictAllow); err != nil {
+	settings := pinned["SETTINGS"]
+	if err := writeBank(pinned, 1, denyDeletesTable(t, protectedDir)); err != nil {
 		t.Fatal(err)
 	}
 	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{}, false)); err != nil {
@@ -209,14 +195,7 @@ func TestEnforcerInitialTableHandover(t *testing.T) {
 	if err := os.WriteFile(victim, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	table, err := Compile(
-		[]ObjectInput{{Path: protectedDir}},
-		func(string, Operation, bool) Verdict { return VerdictDeny },
-		VerdictAllow,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	table := denyDeletesTable(t, protectedDir)
 	zero := uint32(0)
 	first := NewEnforcerWithOptions(Options{
 		PinRoot:     root,
@@ -254,7 +233,7 @@ func TestEnforcerInitialTableHandover(t *testing.T) {
 		SelfTestDir: filepath.Join(t.TempDir(), "second-selftest"),
 		DaemonPID:   &zero,
 	})
-	err = second.SetModeWithTable(ModeEnforce, table)
+	err := second.SetModeWithTable(ModeEnforce, table)
 	close(stop)
 	<-done
 	if err != nil {
@@ -267,4 +246,19 @@ func TestEnforcerInitialTableHandover(t *testing.T) {
 	if err := os.Remove(victim); !errors.Is(err, unix.EPERM) {
 		t.Fatalf("replacement generation policy: got %v, want EPERM", err)
 	}
+}
+
+// denyDeletesTable denies every Write-list operation in dir and allows by
+// default.
+func denyDeletesTable(t *testing.T, dir string) Table {
+	t.Helper()
+	table, _, err := Compile(Policy{
+		Scopes:       []ScopeInput{{Path: dir}},
+		Rules:        []RuleInput{{List: ListWrite, Pattern: dir + "/**"}},
+		DefaultAllow: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return table
 }

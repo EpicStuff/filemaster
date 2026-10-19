@@ -61,6 +61,8 @@ install: build
 	fi
 bpf:
 	bpf-linker --version
+	# .cargo/config.toml adds `-C debuginfo=2 -C link-arg=--btf`: the kernel
+	# rejects a bpf_loop callback without the BTF func_info that BTF carries.
 	cd "$(BPF_CRATE)" && cargo +nightly-2026-06-23 build --release -Z build-std=core --target bpfel-unknown-none
 	@mkdir -p "$(dir $(BPF_OBJECT))"
 	cp "$(BPF_DIR)/target/bpfel-unknown-none/release/filemaster-lsm" "$(BPF_OBJECT)"

@@ -130,107 +130,106 @@ direct dependency in `go.mod:15`).
 
 ### 2.4 Decision table and policy compiler (`bpflsm/compile.go`)
 
-**Cordon's matcher is not Filemaster's.** Cordon resolves the deepest protected
-object, then applies its own precedence: object depth → subject → deny>allow,
-plus an unconditional "escape" deny. Filemaster rules are instead:
+**Cordon's matcher is not Filemaster's, and neither was M2's precomputed table.**
+Filemaster rules are per-profile **ordered first-match** lists (profile rules
+then global rules, `rule_scope.go:78-93`), of three kinds — exact path, `dir/**`,
+or a `filepath.Match` glob (`rule.go:115-126`) — with entry operations also
+consulting the containing folder (`rule_decision.go:122-145`). A glob character
+class can match `/`, and `filepath.Match` commits each star chunk at its leftmost
+match, so segment splitting and two-pointer globbing are both wrong. The engine
+is `matchPathPattern` over the **whole** path string.
 
-- per-profile **ordered first-match** lists, with the profile's own rules first
-  and then the global rules (`rule_scope.go:78-93`);
-- of three kinds only: exact path, `dir/**`, or a single-segment glob
-  (`rule.go:115-126`);
-- with entry operations also consulting the containing folder
-  (`rule_decision.go:122-145`).
+The as-built M2-fix-up design reproduces that engine exactly by rebuilding each
+target's full path in the kernel and running a faithful port of Go's
+`path/filepath.Match` over it.
 
-The port keeps Cordon's **mechanism** and replaces its **decision**:
+**Walk and path reconstruction.** The dentry ancestor walk (`decide.rs`,
+`bpf_loop`, limit `WALK_LIMIT = 4096`) climbs from the target to the nearest
+registered object, writing each component name backwards into a per-CPU path
+buffer (`SCRATCH`, 16 KiB + 4 KiB slack, with bounded masked offsets). The
+object context's stored absolute path is prefixed to give the target's exact
+full path (and the parent's, for Create/Delete). Past the walk limit the
+operation is **denied and counted**; a path longer than the buffer is **denied
+and counted**; an unreadable kernel value **fails open and is counted**; a walk
+that reaches an unregistered filesystem root is **not covered and counted**.
 
-- **Kept:** the dentry ancestor walk to the deepest object (`find_object`),
-  the banked maps, the R0 clamp, path reconstruction for events.
-- **Replaced:** what the walk looks up. It now reads a precomputed verdict table:
+**Objects** are keyed by `(mountinfo s_dev, ino)` — `pathFileID` takes the
+superblock device from `/proc/self/mountinfo` via `statx`'s `STATX_MNT_ID`,
+never `stat`'s `st_dev` (btrfs minors differ). The object set is: every watch
+scope root; the deepest existing ancestor of each rule's literal prefix; and
+**every mount root** in `/proc/self/mountinfo` (including bind mounts whose root
+is a subdirectory). Because mount roots are objects, the walk stops at them, so
+nested mounts are covered with no separate splice step. A filesystem root
+mounted at several paths produces several **contexts** (below), one per absolute
+path, and the operation is denied if any denies.
 
-```
-VERDICT[(bank, object_id, label, decision_op, relation, target_kind)] -> allow | deny
-relation = SELF (target is the object) | CHILD (object is the target's parent)
-         | DESCENDANT (deeper, no closer object)
-target_kind = file | folder
-```
+**Contexts and rule lists.** Each object has one or more `Context`s, one per
+absolute path it is reachable at, each holding: the absolute path; the watch
+scopes that could contain a target under it (stored as strings, so scopes that
+don't exist yet still decide by string); and its ordered list of rule
+references, each carrying its list (Read/Write/Execute), verdict and ObjectKind.
+A rule is included in a context's list if it could match the context path or
+anything at or below it — over-inclusion is always safe because the kernel
+matches exactly. The per-context cap is 256 rules / 32 scopes; past it the
+context's operations are denied, an `error` warning lists the patterns, and it
+is counted. The kernel evaluates every context and denies if any denies.
 
-**Compiler.** For each object `O` and each label `L`:
+**Kernel matching (`matcher.rs`).** Pattern *parsing* — `scanChunk`, `getEsc`,
+class syntax and `ErrBadPattern` detection — is static, so it runs in Go at
+compile time (`tokens.go`), which emits a flat **token program** per pattern:
+chunks (each with a star flag and a token range), tokens (literal byte, `?`, or
+a class with a negated flag and a rune-range range), and ranges. A rule whose
+pattern `filepath.Match` rejects never matches, so it is left out, with a
+non-blocking `pattern-never-matches` diagnostic. The kernel executes only Go's
+`Match`/`matchChunk` **control flow** over those tokens — the outer chunk loop,
+the byte-wise star skip that cannot skip `/`, the last-chunk and trailing-star
+rules, `matchChunk` per token, and the `DecodeRuneInString` port — as one flat
+`bpf_loop` state machine, one small step per iteration (one token, one
+class-range compare, or one chunk restart). A recursive `/**` rule and a watch
+scope are matched by the exact `pathContains` prefix rule instead.
 
-1. Evaluate the profile's existing `DecisionSnapshot.DecideOperation`
-   (`rule_decision.go:150`) on three synthetic paths: `O`, `O/<n>` and
-   `O/<n>/<n>`. `<n>` is a sentinel name that no pattern can match.
-2. Do this for Delete, Create, Write, Read and Execute; the hard-link source
-   needs Read/Write/Execute.
+**Verifier convergence (the gate lesson).** Every mutable walk and matcher field
+lives in a per-CPU map value (`EVAL`), not on the stack: the verifier does not
+track map-value contents precisely, so the `bpf_loop` callback converges in a
+few passes. Precise stack scalars in the callback are what previously blew
+through the 1,000,000-instruction limit. Nested `bpf_loop` is not viable (it
+explodes the verifier even for a trivial callback), so the matcher is one flat
+loop. `memset`/`memcpy` from the linker are rejected by the verifier, so state
+is zeroed with volatile word stores and subprograms return packed `u64`s rather
+than multi-word tuples (which otherwise spill through an invalid `r11`).
 
-This is exact for `/**` and exact-path rules: every descendant of `O` with no
-closer object sees the same applicable rule set. Order semantics stay
-Filemaster's own because the Go engine computes them.
+**Destinations with no object (owner decision).** "Not covered → allow" applies
+only when *every* object an operation touches is uncovered. A rename or hard
+link whose source is covered still decides its destination: the destination's
+context evaluates it, and with no matching rule the in-scope profile default
+(`NOMATCH[(bank, operation, target_kind)]`, from `verdictFromDefaultAction`)
+applies, matching `DecideRename`/`DecideHardLink` exactly. A hard link's target
+is always a negative dentry (the VFS returns `EEXIST` before the hook), so the
+link-over case does not arise.
 
-**Where the BPF side applies it.** Rename and link combine table lookups in the
-same order as `DecideRename` and `DecideHardLink`. "Destination exists" comes
-from the destination dentry being positive, which is how Cordon already detects
-rename-over (`decide_reparent`). Unlink, rmdir and mkdir are single lookups.
+**Operations.** Unlink, rmdir and mkdir are single evaluations. Rename and hard
+link combine evaluations in `DecideRename`/`DecideHardLink` order; `evaluate` is
+an out-of-line subprogram so a hook that calls it up to five times stays within
+the verifier's budget. `RENAME_EXCHANGE` is **not** read from a flags argument
+(`inode_rename` has four arguments, no flags): `security_inode_rename` calls the
+hook a second time with the sides swapped, so each call is one directed rename
+onto an existing destination (verified from the v6.12.107 and v7.1.9
+`security/security.c` sources).
 
-**Destinations with no object (owner decision, 2026-10-03).** "Not covered →
-allow" applies only when *every* object an operation touches is uncovered. A
-rename or hard link whose source is covered still decides its destination,
-even when the destination has no object.
+**Re-publish.** The compiler re-publishes on profile/rule and watch-path
+changes, and on mount changes: structural code polls `/proc/self/mountinfo` for
+`POLLPRI` (the fanotify mount code is untouched). The 1,024-object limit stays a
+visible publish error, never a partial table; banked publication (fill the
+inactive bank, flip `SETTINGS.active_bank` in one write) is unchanged.
 
-Such a destination matches no rule, so it gets the label's no-match verdict:
-the profile default through `verdictFromDefaultAction`
-(`decision_snapshot.go:46`). The compiler stores this per label as
-`NOMATCH[(bank, label, decision_op, target_kind)]`. The result matches `DecideHardLink`
-(`rule_decision.go:228`) and `DecideRename` (`:201`) exactly:
+**Labels.** M2 still uses the single `UNIDENTIFIED` label and the daemon's
+pid+executable bypass; process labelling is M3.
 
-- a hard link or move out of a watched folder to a place with no rules is
-  denied unless the profile default is Permit;
-- a destination covered by a rule, including a global rule outside every watch
-  scope, which is an object in its own right, follows that rule.
-
-This replaces Cordon's unconditional escape deny. M2's differential test must
-include link and rename to an uncovered destination.
-
-**Objects** are:
-
-- each configured watch-path scope root (`config.go:13`, `mount_linux.go:42`);
-  there the profile default applies, and outside every scope the operation is
-  **not covered** and allowed (reported as coverage);
-- the base path of every rule (exact path, or the prefix of a `/**` rule);
-- every current match of each single-segment glob.
-
-Objects are keyed by `(sb->s_dev, ino)`. `s_dev` comes from
-`/proc/self/mountinfo` (`readMountInfo`, `mount_linux.go:198`) and never from
-`stat`, because the btrfs minors differ (gate finding).
-
-**Globs.** A glob is expanded when the policy is built. A file created later
-that matches a glob falls back to its folder's or the scope's verdict. This
-degradation is shown as a `DegradedWarning` that lists the affected rule
-patterns (not user paths). M2 re-expands on each re-publish; mount/reconcile
-triggers are deliberately deferred to M5.
-
-**Labels.** A label is an equivalence class of *(ordered Read/Write/Exec lists,
-default action)* over all profiles, after global rules are merged. Profiles
-that share both get one label. Reserved labels:
-
-| Label | Meaning |
-|---|---|
-| `0 = PENDING` | Every verdict is deny |
-| `1 = UNIDENTIFIED` | The unidentified-process profile, with `DefaultActionAsk`, as in `profile_binding.go:86-92` |
-| `2 = SELF` | The Filemaster daemon; every verdict is allow |
-
-**Publication.**
-
-1. Fill the inactive bank.
-2. Flip `SETTINGS.active_bank` in one write (Cordon `seed.rs`).
-3. M2 owns its configuration and profile callbacks rather than changing the
-   existing snapshot observer. It re-publishes on profile/rule and watch-path
-   changes, plus each glob re-expansion. Mount-change triggers wait for M5;
-   exe inode changes wait for M3.
-
-**ABI agreement.** `filemaster-lsm-common` has a `cargo test` that emits a
-JSON manifest of `size_of` and `offset_of` for every map key/value. A Go test
-asserts its mirrored structs against that manifest; it fails the build on any
-drift.
+**ABI agreement.** `filemaster-lsm-common` has a `cargo test` that emits a JSON
+manifest of `size_of`/`offset_of` for every published table type and the table
+sizes. A Go test asserts its mirrored structs and constants against that
+manifest; it fails the build on any drift. The in-kernel `EvalState` is not
+published, so it has no ABI.
 
 ### 2.5 Lifecycle and crash behaviour (`bpflsm/enforcer.go`, `selftest.go`)
 
@@ -305,6 +304,43 @@ drift.
   v6.12 and v7.1 `fs/namei.c` sources invoke `security_inode_rename` once with
   exchange flags, so the second direction is evaluated in BPF rather than
   assumed to arrive as another hook invocation.
+
+**As built in the M2 fix-up:**
+
+The precomputed `VERDICT`/sentinel table above was replaced wholesale, because a
+sentinel-based synthetic-path scheme cannot express `filepath.Match` globs (a
+class matches `/`), names that do not exist yet, or nested mounts. The as-built
+design is §2.4 "as-built": full-path reconstruction in the kernel plus a faithful
+`filepath.Match` port over a Go-tokenized program, with all walk/matcher state in
+a per-CPU `EVAL` map value for verifier convergence. Corrections to the notes
+above:
+
+- The maps are now `OBJECTS` (hash → `ObjectValue`), `CONTEXTS`, `PATTERNS`,
+  `CHUNKS`, `TOKENS`, `RANGES`, `ARENA` (per-bank string arenas), `NOMATCH`
+  (profile default by bank/operation/kind), `AUDIT` (per-CPU would-deny), and
+  `COUNTERS` (per-CPU undecidable cases by reason × hook). `SETTINGS` is
+  unchanged. There is no `VERDICT` table and no `SELF`/`PENDING` labels.
+- The exchange double-call is **verified from source** in `security/security.c`
+  (not `fs/namei.c`), on v6.12.107 and v7.1.9: `inode_rename` has four arguments
+  and no flags, and the hook is called twice for `RENAME_EXCHANGE`. M2's earlier
+  "once with exchange flags" claim was wrong.
+- The compiler still delegates verdicts to `DecisionSnapshot.DecideOperation`
+  semantics, but the kernel now matches names itself, so there are no
+  glob-future-match / rule-no-existing-inode / glob-matches-sentinel warnings. A
+  rule on a not-yet-existing path just works once created, with no re-publish.
+- Mount-change re-publication is done (mountinfo `POLLPRI`), not deferred.
+- Cases that are denied-or-counted rather than decided exactly: walk depth > 4096
+  (deny), path longer than the buffer (deny), per-context rule/scope overflow
+  (deny), evaluation step-budget exhaustion (deny), unregistered filesystem root
+  (not covered), and unreadable kernel value (fail open). All are counted in
+  `COUNTERS` and surfaced in diagnostics; a non-zero unreadable count is a
+  warning.
+- Per-hook verifier cost (verified instructions; largest single stack frame):
+  Debian 6.12 — unlink 75 474 / 160 B, rmdir 75 377 / 160 B, mkdir 77 326 /
+  144 B, link 185 110 / 208 B, rename 333 273 / 192 B. Arch 7.1 — unlink
+  70 548 / 160 B, rmdir 70 448 / 160 B, mkdir 69 269 / 144 B, link 209 281 /
+  208 B, rename 297 771 / 192 B. The matcher test object verifies at 2 136
+  (6.12) / 2 688 (7.1) instructions.
 
 ### 2.6 Process labelling (`label.rs`, `bpflsm/labeller.go`)
 
@@ -418,10 +454,10 @@ The load, lifecycle and startup daemon checks also passed on Debian 6.12
 |---|---|---|---:|
 | M0 | Vendor the crates with port headers and the licence; apply the gate patch; strip blessing/open/exec; Makefile `bpf` target, `go:embed`, `test-fake` stub | `make core` embeds the object; a Go test loads every program through the verifier on both kernels | 0.5 |
 | M1 ✅ | Loader, probe, `.rodata` offsets, attach, pin generations, handover, self-test, teardown, mode option, degraded warnings | Enable → 5 hooks attached and shown in diagnostics; SIGKILL → enforcement persists; restart → generation swap with no gap; `off` → detached and reported unprotected | 1.5 |
-| M2 ✅ | Decision table (`decide.rs`) + Go compiler + banked publish + ABI manifest test; single label `UNIDENTIFIED` | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: generated-rule differential test agrees with `DecideOperation`/`DecideRename`/`DecideHardLink` across the operation matrix, including rename-over, atomic save, cross-directory moves and `*at()` callers | 2–2.5 |
+| M2 ✅ (fixed up) | Full-path kernel matcher (`matcher.rs`, faithful `filepath.Match` port over a Go-tokenized program, all state in a per-CPU `EVAL` map) + Go compiler with mount-root objects and per-path contexts + banked publish + ABI manifest test; single label `UNIDENTIFIED` | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: Gate B matched ≥11 k generated `(pattern, path)` pairs against `filepath.Match` with zero mismatches; the generated-rule differential (8 seeds × 505 ops, ~60% expected denies) agrees with `DecideOperation`/`DecideRename`/`DecideHardLink` across the operation matrix — folder renames, `DestExists`, `RENAME_EXCHANGE`/`RENAME_NOREPLACE`, `*at()` callers, >100-deep paths, post-publish creations, and a tmpfs mounted inside a scope with re-publish — with zero mismatches; self-test, lifecycle, handover and live-daemon (enforce/SIGKILL-persist/restart/off) all pass | 2–2.5 |
 | M3 | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny | `python a.py` vs `python b.py` get distinct verdicts; `./x.py` with env shebang; bash/node/perl; `-m` resolves; `-c` falls to the interpreter profile; argv rewrite after start does not change the label; a child `rm` gets `rm`'s label | 2–2.5 |
 | M4 | Events → filequery, deny notification with Allow-and-retry, Write list active in rule model and UI | Monitor shows delete/rename/link records; the notification appears; Allow → retry succeeds; screenshots of dashboard/monitor/settings checked per CLAUDE.md | 1.5–2 |
-| M5 | Hardening matrix (§4) and fixes | §4 matrix green; coverage warnings correct for every injected failure | 1–1.5 |
+| M5 | Hardening matrix (§4) and fixes; **btrfs subvolume/snapshot identity** (risk 7) — key objects by a subvolume-aware id, not just `(s_dev, ino)` | §4 matrix green; coverage warnings correct for every injected failure; multi-subvolume btrfs no longer collides objects | 1–1.5 |
 | | **Total** | | **8.5–11.5** |
 
 ## 4. Test plan
@@ -487,11 +523,17 @@ the actual coverage:
 
 ## 5. Risks and fallbacks
 
-1. **The decision table diverges from the Go engine on some rule shape.**
-   - *Detect:* M2's differential test.
-   - *If it fails:* restrict BPF to the shapes the table expresses exactly and
-     report the excluded patterns as degraded. Never guess. M2 already reports
-     future glob matches, missing rule inodes, and sentinel-matching rules.
+1. **The kernel matcher diverges from the Go engine on some rule shape.**
+   - *Detect:* M2's generated-rule differential test (kernel syscalls vs
+     `DecideOperation`/`DecideRename`/`DecideHardLink`) and the Gate B matcher
+     differential (≥10 k generated `(pattern, path)` pairs vs `filepath.Match`),
+     both on each kernel.
+   - *Resolved as built:* the kernel rebuilds the full path and runs a faithful
+     `filepath.Match` port over a Go-tokenized program, so there are no
+     excluded-shape degradations; a pattern `filepath.Match` rejects is left out
+     (it never matches). The only "can't decide exactly" cases are the counted
+     ones in §2.4 (walk depth, path too long, context overflow, step budget,
+     unregistered root, unreadable value).
 2. **Default Ask → Deny breaks the desktop on day one.** No profile has Write
    rules yet, because the list is hidden. So every delete, rename or mkdir
    inside a watched scope would deny.
@@ -517,6 +559,16 @@ the actual coverage:
    daemon's structural writes.
    - *If observed:* include the exe in `SELF`'s key with a generation-agnostic
      exe match, accepting the PID-reuse caveat only for the daemon's own exe.
+7. **btrfs subvolume identity collision (DEFERRED, M5).** Objects are keyed by
+   `(mountinfo s_dev, ino)`. That pair is **not** unique across btrfs
+   subvolumes and snapshots: every subvolume root is inode 256, and a snapshot
+   repeats the inode numbers (and generations) of its source. Two different
+   files in two subvolumes of one filesystem can therefore collide on
+   `(s_dev, ino)` and share an object, so a rule on one would wrongly apply to
+   the other. This work does not address it (test runs use a single subvolume);
+   a correct key needs the btrfs subvolume/root id (e.g. via `ino_lookup` or the
+   subvol id the kernel exposes), which is M5. Until then, multi-subvolume
+   btrfs coverage is unsound and must be documented as such.
 
 ## Estimate check
 

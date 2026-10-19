@@ -3,6 +3,8 @@
 # nightly pinned in rust-toolchain.toml.
 [build]
 target = "bpfel-unknown-none"
+# BTF carries the func_info the kernel requires for bpf_loop callbacks.
+rustflags = ["-C", "debuginfo=2", "-C", "link-arg=--btf"]
 
 [unstable]
 build-std = ["core"]

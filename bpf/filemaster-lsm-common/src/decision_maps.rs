@@ -1,46 +1,113 @@
-//! Filemaster's structural-decision-table ABI.
+//! Filemaster's structural-decision ABI.
 //!
 //! This is deliberately separate from the vendored Cordon rule-table types in
-//! `policy_maps`: M2 does not evaluate Cordon subjects or ordered rules in the
-//! kernel.  Userspace resolves Filemaster's existing decision engine into these
-//! complete, banked lookup tables instead.
+//! `policy_maps`. Userspace compiles Filemaster's ordered rule lists into
+//! per-object path contexts; the kernel rebuilds each target's full path and
+//! evaluates those lists with a port of Go's `path/filepath.Match`.
 
 use crate::ids::Bank;
 use crate::maps::FileId;
 
-/// Names of the M2 maps owned by the structural backend.
 pub const MAP_OBJECTS: &str = "OBJECTS";
-pub const MAP_VERDICT: &str = "VERDICT";
+pub const MAP_CONTEXTS: &str = "CONTEXTS";
+pub const MAP_PATTERNS: &str = "PATTERNS";
+pub const MAP_CHUNKS: &str = "CHUNKS";
+pub const MAP_TOKENS: &str = "TOKENS";
+pub const MAP_RANGES: &str = "RANGES";
+pub const MAP_ARENA: &str = "ARENA";
 pub const MAP_NOMATCH: &str = "NOMATCH";
 pub const MAP_AUDIT: &str = "AUDIT";
+pub const MAP_COUNTERS: &str = "COUNTERS";
+pub const MAP_SCRATCH: &str = "SCRATCH";
 
 /// The two generations used for atomic table publication.
 pub const NUM_BANKS: usize = 2;
-/// The number of inode-keyed object roots supported by one generation.
+/// Inode-keyed walk stops (scope roots, rule anchors, mount roots) per bank.
 pub const MAX_OBJECTS: usize = 1024;
-/// There is one M2 label, five operations, three relationships and two kinds.
-pub const MAX_VERDICTS: usize = NUM_BANKS * MAX_OBJECTS * 5 * 3 * 2;
-/// One no-object decision for each operation and target kind in each generation.
-pub const MAX_NOMATCH: usize = NUM_BANKS * 5 * 2;
+/// Absolute paths at which those objects are reachable, per bank.
+pub const MAX_CONTEXTS: usize = 1024;
+/// Distinct rule patterns per bank.
+pub const MAX_PATTERNS: usize = 1024;
+/// Tokenized-chunk, token and class-range table sizes per bank. A pattern that
+/// would overflow these is left out and its context denies, like a rule cap.
+pub const MAX_CHUNKS: usize = 8192;
+pub const MAX_TOKENS: usize = 32768;
+pub const MAX_RANGES: usize = 16384;
+
+/// Token kinds in a tokenized `filepath.Match` chunk.
+pub const TOKEN_LITERAL: u8 = 0;
+pub const TOKEN_QUESTION: u8 = 1;
+pub const TOKEN_CLASS: u8 = 2;
+/// Rule references one context can hold before its object denies.
+pub const CONTEXT_RULES: usize = 256;
+/// Watch-scope entries one context can hold before its object denies.
+pub const CONTEXT_SCOPES: usize = 32;
+
+/// Per-bank string arena: context paths, scope paths and patterns.
+pub const ARENA_SIZE: usize = 1 << 20;
+pub const ARENA_MASK: u32 = (ARENA_SIZE - 1) as u32;
+/// Every arena string is shorter than this, so a masked offset plus a string
+/// length stays inside the value.
+pub const ARENA_SLACK: usize = 4096;
+pub const MAX_STRING: usize = ARENA_SLACK - 1;
+
+/// One per-CPU path buffer. Names are written backwards so the relative path
+/// ends at [`REL_END`]; the context path is copied in front of it.
+pub const SCRATCH_SIZE: usize = 16384;
+pub const SCRATCH_MASK: u32 = (SCRATCH_SIZE - 1) as u32;
+pub const SCRATCH_SLACK: usize = 4096;
+pub const REL_END: u32 = 12288;
+/// Longest relative path (target below its object) the buffer accepts.
+pub const MAX_REL: u32 = 8192;
+/// Scratch slots: the source and destination of a two-path operation.
+pub const SCRATCH_SLOTS: usize = 2;
+
+/// Dentry levels between a target and its object.
+pub const WALK_LIMIT: u32 = 4096;
+/// `bpf_loop` iterations one evaluation may use.
+pub const EVAL_BUDGET: u32 = 1 << 23;
+
 /// One per-CPU would-deny counter per decision operation.
 pub const AUDIT_COUNTERS: usize = 5;
+pub const NOMATCH_ENTRIES: usize = NUM_BANKS * 5 * 2;
 
-/// A dense per-generation object identifier.  It is a lookup-table handle, not
-/// an inode number; [`ObjectKey`] maps the latter to this value.
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
-pub struct ObjectId(pub u32);
+/// The structural hooks, as indexes of the per-hook counters.
+pub const HOOKS: usize = 5;
+pub const HOOK_UNLINK: u32 = 0;
+pub const HOOK_RMDIR: u32 = 1;
+pub const HOOK_MKDIR: u32 = 2;
+pub const HOOK_LINK: u32 = 3;
+pub const HOOK_RENAME: u32 = 4;
 
-/// M2 process labels.  `SELF` is reserved for M3; the daemon uses its explicit
-/// pid+executable bypass and ordinary callers are `UNIDENTIFIED` today.
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Label(pub u32);
+/// Cases the kernel cannot decide exactly. Each is counted per hook.
+pub const REASONS: usize = 6;
+/// A kernel value could not be read; the operation was allowed.
+pub const REASON_UNREADABLE: u32 = 0;
+/// The target is more than [`WALK_LIMIT`] levels below its object; denied.
+pub const REASON_DEPTH: u32 = 1;
+/// The path does not fit the buffer; denied.
+pub const REASON_PATH_TOO_LONG: u32 = 2;
+/// The walk reached a filesystem root that is not registered; not covered.
+pub const REASON_UNREGISTERED_ROOT: u32 = 3;
+/// A context holds more rules or scopes than its arrays; denied.
+pub const REASON_CONTEXT_OVERFLOW: u32 = 4;
+/// An evaluation used its whole `bpf_loop` budget; denied.
+pub const REASON_BUDGET: u32 = 5;
+pub const COUNTERS: usize = REASONS * HOOKS;
 
-impl Label {
-    pub const UNIDENTIFIED: Label = Label(1);
-    pub const SELF: Label = Label(2);
-}
+/// Rule lists. A rule reference carries the list its rule came from.
+pub const LIST_READ: u8 = 0;
+pub const LIST_WRITE: u8 = 1;
+pub const LIST_EXECUTE: u8 = 2;
+
+/// `RuleRef::flags` bit 0: the rule allows.
+pub const RULE_ALLOW: u8 = 1;
+/// `RuleRef::flags` bits 1–2: the rule's ObjectKind (0 any, 1 file, 2 folder).
+pub const RULE_KIND_SHIFT: u8 = 1;
+pub const RULE_KIND_MASK: u8 = 3;
+
+/// `Context::flags`: the context overflowed its rule or scope array.
+pub const CONTEXT_OVERFLOW: u32 = 1;
 
 /// The existing Filemaster engine's operation dimension.
 #[repr(transparent)]
@@ -48,243 +115,330 @@ impl Label {
 pub struct DecisionOp(pub u32);
 
 impl DecisionOp {
-    pub const READ: DecisionOp = DecisionOp(0);
-    pub const WRITE: DecisionOp = DecisionOp(1);
-    pub const EXECUTE: DecisionOp = DecisionOp(2);
-    pub const CREATE: DecisionOp = DecisionOp(3);
-    pub const DELETE: DecisionOp = DecisionOp(4);
+	pub const READ: DecisionOp = DecisionOp(0);
+	pub const WRITE: DecisionOp = DecisionOp(1);
+	pub const EXECUTE: DecisionOp = DecisionOp(2);
+	pub const CREATE: DecisionOp = DecisionOp(3);
+	pub const DELETE: DecisionOp = DecisionOp(4);
 }
 
-/// How the target dentry relates to the matched object root.
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Relation(pub u32);
-
-impl Relation {
-    pub const SELF: Relation = Relation(0);
-    pub const CHILD: Relation = Relation(1);
-    pub const DESCENDANT: Relation = Relation(2);
-}
-
-/// Filemaster's rule-kind dimension, encoded in the verdict-table key.
+/// Whether the target is a file or a folder, for ObjectKind-qualified rules.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TargetKind(pub u32);
 
 impl TargetKind {
-    pub const FILE: TargetKind = TargetKind(1);
-    pub const FOLDER: TargetKind = TargetKind(2);
+	pub const FILE: TargetKind = TargetKind(1);
+	pub const FOLDER: TargetKind = TargetKind(2);
 }
 
-/// A table value.  A transparent integer keeps every map bit pattern valid.
+/// A table value. A transparent integer keeps every map bit pattern valid.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Verdict(pub u32);
 
 impl Verdict {
-    pub const DENY: Verdict = Verdict(0);
-    pub const ALLOW: Verdict = Verdict(1);
+	pub const DENY: Verdict = Verdict(0);
+	pub const ALLOW: Verdict = Verdict(1);
 
-    pub const fn allows(self) -> bool {
-        self.0 == Self::ALLOW.0
-    }
+	pub const fn allows(self) -> bool {
+		self.0 == Self::ALLOW.0
+	}
 }
 
 padded_pod! {
-    /// `(bank, inode identity) -> ObjectId`, the ancestor walk's only map.
-    #[repr(C)]
-    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-    pub struct ObjectKey {
-        pub file: FileId,
-        pub bank: Bank,
-    }
+	/// `(inode identity, bank) -> ObjectValue`, the walk's stop test.
+	#[repr(C)]
+	#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+	pub struct ObjectKey {
+		pub file: FileId,
+		pub bank: Bank,
+	}
 }
 
 impl ObjectKey {
-    pub const fn new(bank: Bank, file: FileId) -> Self {
-        ObjectKey {
-            file,
-            bank,
-            _pad: [0; Self::PAD],
-        }
-    }
+	pub const fn new(bank: Bank, file: FileId) -> Self {
+		ObjectKey {
+			file,
+			bank,
+			_pad: [0; Self::PAD],
+		}
+	}
 }
 
-/// Complete lookup key for a covered object operation.
+/// The contiguous run of `CONTEXTS` entries for one object.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct VerdictKey {
-    pub bank: Bank,
-    pub object: ObjectId,
-    pub label: Label,
-    pub operation: DecisionOp,
-    pub relation: Relation,
-    pub target_kind: TargetKind,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ObjectValue {
+	pub first_context: u32,
+	pub context_count: u32,
 }
 
-impl VerdictKey {
-    pub const fn new(
-        bank: Bank,
-        object: ObjectId,
-        label: Label,
-        operation: DecisionOp,
-        relation: Relation,
-        target_kind: TargetKind,
-    ) -> Self {
-        VerdictKey {
-            bank,
-            object,
-            label,
-            operation,
-            relation,
-            target_kind,
-        }
-    }
-}
-
-/// Fallback for an uncovered side of a multi-object operation.
+/// One watch-scope entry: an arena string and whether it excludes.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct NoMatchKey {
-    pub bank: Bank,
-    pub label: Label,
-    pub operation: DecisionOp,
-    pub target_kind: TargetKind,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ScopeRef {
+	pub off: u32,
+	pub len: u32,
+	pub exclude: u32,
 }
 
-impl NoMatchKey {
-    pub const fn new(
-        bank: Bank,
-        label: Label,
-        operation: DecisionOp,
-        target_kind: TargetKind,
-    ) -> Self {
-        NoMatchKey {
-            bank,
-            label,
-            operation,
-            target_kind,
-        }
-    }
+/// One rule in a context's ordered list.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RuleRef {
+	pub pattern: u16,
+	pub list: u8,
+	pub flags: u8,
 }
+
+/// One absolute path an object is reachable at, with the scope entries and
+/// rules that can apply at or below it.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Context {
+	/// Arena offset of the path.
+	pub path_off: u32,
+	/// Bytes copied in front of the relative path: 0 for `/`.
+	pub path_len: u32,
+	/// `len(filepath.Dir(path))`, for an entry operation on the object itself.
+	pub parent_len: u32,
+	pub flags: u32,
+	pub scope_count: u32,
+	pub rule_count: u32,
+	pub scopes: [ScopeRef; CONTEXT_SCOPES],
+	pub rules: [RuleRef; CONTEXT_RULES],
+}
+
+/// One rule pattern. A `recursive` pattern holds the cleaned `/**` prefix in
+/// the arena (`off`/`len`) and matches by path containment. A non-recursive
+/// pattern is a tokenized `filepath.Match` program: `chunk_off`/`chunk_len`
+/// index the `CHUNKS` table.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Pattern {
+	pub off: u32,
+	pub len: u32,
+	pub recursive: u32,
+	pub chunk_off: u32,
+	pub chunk_len: u32,
+}
+
+/// One chunk of a tokenized pattern: Go's scanChunk star flag and a token range.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Chunk {
+	pub star: u32,
+	pub token_off: u32,
+	pub token_len: u32,
+}
+
+/// One token: a literal byte, `?`, or a `[...]` class (`negated` plus a range
+/// range). Kinds are `TOKEN_LITERAL`/`TOKEN_QUESTION`/`TOKEN_CLASS`.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Token {
+	pub kind: u8,
+	pub byte: u8,
+	pub negated: u8,
+	pub _pad: u8,
+	pub range_off: u32,
+	pub range_len: u32,
+}
+
+/// One inclusive class rune range, as Go's getEsc resolves it.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Range {
+	pub lo: u32,
+	pub hi: u32,
+}
+
+/// One bank's string arena.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Arena(pub [u8; ARENA_SIZE + ARENA_SLACK]);
+
+/// One per-CPU path buffer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Scratch(pub [u8; SCRATCH_SIZE + SCRATCH_SLACK]);
 
 #[cfg(feature = "user")]
 mod user {
-    use super::*;
+	use super::*;
 
-    // SAFETY: each type is a fixed `repr(C)`/transparent arrangement of integer
-    // POD values with no implicit padding (ObjectKey has explicit zero padding).
-    unsafe impl aya::Pod for ObjectId {}
-    unsafe impl aya::Pod for Label {}
-    unsafe impl aya::Pod for DecisionOp {}
-    unsafe impl aya::Pod for Relation {}
-    unsafe impl aya::Pod for TargetKind {}
-    unsafe impl aya::Pod for Verdict {}
-    unsafe impl aya::Pod for ObjectKey {}
-    unsafe impl aya::Pod for VerdictKey {}
-    unsafe impl aya::Pod for NoMatchKey {}
+	// SAFETY: each type is a fixed `repr(C)`/transparent arrangement of integer
+	// POD values with no implicit padding (ObjectKey has explicit zero padding).
+	unsafe impl aya::Pod for DecisionOp {}
+	unsafe impl aya::Pod for TargetKind {}
+	unsafe impl aya::Pod for Verdict {}
+	unsafe impl aya::Pod for ObjectKey {}
+	unsafe impl aya::Pod for ObjectValue {}
+	unsafe impl aya::Pod for ScopeRef {}
+	unsafe impl aya::Pod for RuleRef {}
+	unsafe impl aya::Pod for Context {}
+	unsafe impl aya::Pod for Pattern {}
+	unsafe impl aya::Pod for Chunk {}
+	unsafe impl aya::Pod for Token {}
+	unsafe impl aya::Pod for Range {}
 }
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
+	extern crate std;
 
-    use super::*;
-    use crate::maps::Settings;
-    use core::mem::{offset_of, size_of};
-    use std::string::{String, ToString};
+	use super::*;
+	use crate::maps::Settings;
+	use crate::offsets::Offsets;
+	use core::mem::{offset_of, size_of};
+	use std::string::{String, ToString};
 
-    #[test]
-    fn writes_abi_manifest() {
-        let mut manifest = String::from("{\n");
-        append_layout(
-            &mut manifest,
-            "FileId",
-            size_of::<FileId>(),
-            &[
-                ("dev", offset_of!(FileId, dev)),
-                ("ino", offset_of!(FileId, ino)),
-            ],
-        );
-        manifest.push_str(",\n");
-        append_layout(
-            &mut manifest,
-            "Settings",
-            size_of::<Settings>(),
-            &[
-                ("daemon_pid", offset_of!(Settings, daemon_pid)),
-                ("active_bank", offset_of!(Settings, active_bank)),
-                ("daemon_exe", offset_of!(Settings, daemon_exe)),
-                ("audit", offset_of!(Settings, audit)),
-                ("pad", offset_of!(Settings, _pad)),
-            ],
-        );
-        manifest.push_str(",\n");
-        append_layout(
-            &mut manifest,
-            "ObjectKey",
-            size_of::<ObjectKey>(),
-            &[
-                ("file", offset_of!(ObjectKey, file)),
-                ("bank", offset_of!(ObjectKey, bank)),
-                ("pad", offset_of!(ObjectKey, _pad)),
-            ],
-        );
-        manifest.push_str(",\n");
-        append_layout(
-            &mut manifest,
-            "VerdictKey",
-            size_of::<VerdictKey>(),
-            &[
-                ("bank", offset_of!(VerdictKey, bank)),
-                ("object", offset_of!(VerdictKey, object)),
-                ("label", offset_of!(VerdictKey, label)),
-                ("operation", offset_of!(VerdictKey, operation)),
-                ("relation", offset_of!(VerdictKey, relation)),
-                ("target_kind", offset_of!(VerdictKey, target_kind)),
-            ],
-        );
-        manifest.push_str(",\n");
-        append_layout(
-            &mut manifest,
-            "NoMatchKey",
-            size_of::<NoMatchKey>(),
-            &[
-                ("bank", offset_of!(NoMatchKey, bank)),
-                ("label", offset_of!(NoMatchKey, label)),
-                ("operation", offset_of!(NoMatchKey, operation)),
-                ("target_kind", offset_of!(NoMatchKey, target_kind)),
-            ],
-        );
-        manifest.push_str(",\n");
-        append_layout(&mut manifest, "Verdict", size_of::<Verdict>(), &[]);
-        manifest.push_str(",\n  \"AUDIT\": {\"key_size\": ");
-        manifest.push_str(&size_of::<u32>().to_string());
-        manifest.push_str(", \"value_size\": ");
-        manifest.push_str(&size_of::<u64>().to_string());
-        manifest.push_str("}\n}\n");
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("abi-manifest.json");
-        std::fs::write(&path, manifest).expect("write ABI manifest");
-    }
+	#[test]
+	fn writes_abi_manifest() {
+		let mut manifest = String::from("{\n");
+		let layouts: &[(&str, usize, &[(&str, usize)])] = &[
+			("FileId", size_of::<FileId>(), &[("dev", offset_of!(FileId, dev)), ("ino", offset_of!(FileId, ino))]),
+			(
+				"Settings",
+				size_of::<Settings>(),
+				&[
+					("daemon_pid", offset_of!(Settings, daemon_pid)),
+					("active_bank", offset_of!(Settings, active_bank)),
+					("daemon_exe", offset_of!(Settings, daemon_exe)),
+					("audit", offset_of!(Settings, audit)),
+					("pad", offset_of!(Settings, _pad)),
+				],
+			),
+			(
+				"ObjectKey",
+				size_of::<ObjectKey>(),
+				&[
+					("file", offset_of!(ObjectKey, file)),
+					("bank", offset_of!(ObjectKey, bank)),
+					("pad", offset_of!(ObjectKey, _pad)),
+				],
+			),
+			(
+				"ObjectValue",
+				size_of::<ObjectValue>(),
+				&[
+					("first_context", offset_of!(ObjectValue, first_context)),
+					("context_count", offset_of!(ObjectValue, context_count)),
+				],
+			),
+			(
+				"ScopeRef",
+				size_of::<ScopeRef>(),
+				&[("off", offset_of!(ScopeRef, off)), ("len", offset_of!(ScopeRef, len)), ("exclude", offset_of!(ScopeRef, exclude))],
+			),
+			(
+				"RuleRef",
+				size_of::<RuleRef>(),
+				&[("pattern", offset_of!(RuleRef, pattern)), ("list", offset_of!(RuleRef, list)), ("flags", offset_of!(RuleRef, flags))],
+			),
+			(
+				"Context",
+				size_of::<Context>(),
+				&[
+					("path_off", offset_of!(Context, path_off)),
+					("path_len", offset_of!(Context, path_len)),
+					("parent_len", offset_of!(Context, parent_len)),
+					("flags", offset_of!(Context, flags)),
+					("scope_count", offset_of!(Context, scope_count)),
+					("rule_count", offset_of!(Context, rule_count)),
+					("scopes", offset_of!(Context, scopes)),
+					("rules", offset_of!(Context, rules)),
+				],
+			),
+			(
+				"Pattern",
+				size_of::<Pattern>(),
+				&[
+					("off", offset_of!(Pattern, off)),
+					("len", offset_of!(Pattern, len)),
+					("recursive", offset_of!(Pattern, recursive)),
+					("chunk_off", offset_of!(Pattern, chunk_off)),
+					("chunk_len", offset_of!(Pattern, chunk_len)),
+				],
+			),
+			(
+				"Chunk",
+				size_of::<Chunk>(),
+				&[("star", offset_of!(Chunk, star)), ("token_off", offset_of!(Chunk, token_off)), ("token_len", offset_of!(Chunk, token_len))],
+			),
+			(
+				"Token",
+				size_of::<Token>(),
+				&[
+					("kind", offset_of!(Token, kind)),
+					("byte", offset_of!(Token, byte)),
+					("negated", offset_of!(Token, negated)),
+					("range_off", offset_of!(Token, range_off)),
+					("range_len", offset_of!(Token, range_len)),
+				],
+			),
+			("Range", size_of::<Range>(), &[("lo", offset_of!(Range, lo)), ("hi", offset_of!(Range, hi))]),
+			("Arena", size_of::<Arena>(), &[]),
+			("Scratch", size_of::<Scratch>(), &[]),
+			("Offsets", size_of::<Offsets>(), &[]),
+		];
+		for (index, (name, size, offsets)) in layouts.iter().enumerate() {
+			if index != 0 {
+				manifest.push_str(",\n");
+			}
+			append_layout(&mut manifest, name, *size, offsets);
+		}
+		let counts: &[(&str, usize)] = &[
+			("NUM_BANKS", NUM_BANKS),
+			("MAX_OBJECTS", MAX_OBJECTS),
+			("MAX_CONTEXTS", MAX_CONTEXTS),
+			("MAX_PATTERNS", MAX_PATTERNS),
+			("MAX_CHUNKS", MAX_CHUNKS),
+			("MAX_TOKENS", MAX_TOKENS),
+			("MAX_RANGES", MAX_RANGES),
+			("CONTEXT_RULES", CONTEXT_RULES),
+			("CONTEXT_SCOPES", CONTEXT_SCOPES),
+			("ARENA_SIZE", ARENA_SIZE),
+			("MAX_STRING", MAX_STRING),
+			("AUDIT_COUNTERS", AUDIT_COUNTERS),
+			("NOMATCH_ENTRIES", NOMATCH_ENTRIES),
+			("HOOKS", HOOKS),
+			("REASONS", REASONS),
+		];
+		manifest.push_str(",\n  \"constants\": {");
+		for (index, (name, value)) in counts.iter().enumerate() {
+			if index != 0 {
+				manifest.push_str(", ");
+			}
+			manifest.push('"');
+			manifest.push_str(name);
+			manifest.push_str("\": ");
+			manifest.push_str(&value.to_string());
+		}
+		manifest.push_str("}\n}\n");
+		let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("abi-manifest.json");
+		std::fs::write(&path, manifest).expect("write ABI manifest");
+	}
 
-    fn append_layout(out: &mut String, name: &str, size: usize, offsets: &[(&str, usize)]) {
-        out.push_str("  \"");
-        out.push_str(name);
-        out.push_str("\": {\"size\": ");
-        out.push_str(&size.to_string());
-        if !offsets.is_empty() {
-            out.push_str(", \"offsets\": {");
-            for (index, (field, offset)) in offsets.iter().enumerate() {
-                if index != 0 {
-                    out.push_str(", ");
-                }
-                out.push_str("\"");
-                out.push_str(field);
-                out.push_str("\": ");
-                out.push_str(&offset.to_string());
-            }
-            out.push('}');
-        }
-        out.push('}');
-    }
+	fn append_layout(out: &mut String, name: &str, size: usize, offsets: &[(&str, usize)]) {
+		out.push_str("  \"");
+		out.push_str(name);
+		out.push_str("\": {\"size\": ");
+		out.push_str(&size.to_string());
+		if !offsets.is_empty() {
+			out.push_str(", \"offsets\": {");
+			for (index, (field, offset)) in offsets.iter().enumerate() {
+				if index != 0 {
+					out.push_str(", ");
+				}
+				out.push('"');
+				out.push_str(field);
+				out.push_str("\": ");
+				out.push_str(&offset.to_string());
+			}
+			out.push('}');
+		}
+		out.push('}');
+	}
 }

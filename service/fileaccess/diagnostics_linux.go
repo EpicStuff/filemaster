@@ -259,17 +259,33 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 		}
 	}
 	for _, warning := range structural.CompileWarnings {
-		message := "A structural rule shape is represented conservatively by the current BPF decision table."
+		severity := "warning"
+		message := "Some rules are not represented in the structural BPF decision table."
 		switch warning.ID {
-		case "glob-future-match":
-			message = "A glob can match a name created after the current BPF decision table was published."
-		case "rule-no-existing-inode":
-			message = "A rule has no current inode to key in the structural BPF decision table; creation uses its parent's verdict."
-		case "glob-matches-sentinel":
-			message = "A rule matches the structural compiler's sentinel probe name and is excluded from exact differential coverage."
+		case "context-rule-overflow":
+			severity = "error"
+			message = "Delete, folder create, hard link and rename operations are denied in some folders because more rules can apply there than the structural BPF table holds."
+		case "pattern-never-matches":
+			message = "A rule pattern can never match, because filepath.Match rejects it, so the structural BPF table leaves it out."
 		}
-		appendWarning("bpf-lsm-"+warning.ID, "warning", message,
+		appendWarning("bpf-lsm-"+warning.ID, severity, message,
 			"patterns="+strings.Join(warning.Patterns, ","))
+	}
+	undecided := make(map[string][]string)
+	for _, count := range structural.Undecided {
+		undecided[count.Reason] = append(undecided[count.Reason], count.Hook+"="+strconv.FormatUint(count.Count, 10))
+	}
+	for reason, message := range map[string]string{
+		bpflsm.ReasonUnreadable:       "The structural BPF LSM could not read some kernel values and allowed those operations.",
+		bpflsm.ReasonDepth:            "The structural BPF LSM denied operations on paths nested too deeply below their nearest registered folder.",
+		bpflsm.ReasonPathTooLong:      "The structural BPF LSM denied operations on paths too long for its path buffer.",
+		bpflsm.ReasonUnregisteredRoot: "The structural BPF LSM treated some operations as not covered because they were on a mount it had not registered yet.",
+		bpflsm.ReasonContextOverflow:  "The structural BPF LSM denied operations in folders whose rules do not fit its table.",
+		bpflsm.ReasonBudget:           "The structural BPF LSM denied operations whose rule evaluation exceeded its step budget.",
+	} {
+		if counts := undecided[reason]; len(counts) > 0 {
+			appendWarning("bpf-lsm-undecided-"+reason, "warning", message, counts...)
+		}
 	}
 	if len(structural.OrphanedGenerations) > 0 {
 		appendWarning("bpf-lsm-orphaned-generation", "warning",

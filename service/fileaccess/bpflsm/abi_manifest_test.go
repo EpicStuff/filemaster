@@ -16,16 +16,30 @@ type abiManifestLayout struct {
 }
 
 type abiManifest struct {
-	FileID     abiManifestLayout `json:"FileId"`
-	Settings   abiManifestLayout `json:"Settings"`
-	ObjectKey  abiManifestLayout `json:"ObjectKey"`
-	VerdictKey abiManifestLayout `json:"VerdictKey"`
-	NoMatchKey abiManifestLayout `json:"NoMatchKey"`
-	Verdict    abiManifestLayout `json:"Verdict"`
-	Audit      struct {
-		KeySize   int `json:"key_size"`
-		ValueSize int `json:"value_size"`
-	} `json:"AUDIT"`
+	Layouts   map[string]abiManifestLayout
+	Constants map[string]int
+}
+
+func (m *abiManifest) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	m.Layouts = make(map[string]abiManifestLayout)
+	for name, value := range raw {
+		if name == "constants" {
+			if err := json.Unmarshal(value, &m.Constants); err != nil {
+				return err
+			}
+			continue
+		}
+		var layout abiManifestLayout
+		if err := json.Unmarshal(value, &layout); err != nil {
+			return err
+		}
+		m.Layouts[name] = layout
+	}
+	return nil
 }
 
 func TestABImanifestMatchesGoLayout(t *testing.T) {
@@ -43,22 +57,49 @@ func TestABImanifestMatchesGoLayout(t *testing.T) {
 		t.Fatalf("parse Rust ABI manifest: %v", err)
 	}
 
-	assertLayout(t, "FileId", manifest.FileID, 16, map[string]int{"dev": 0, "ino": 8})
-	assertLayout(t, "Settings", manifest.Settings, settingsSize, map[string]int{
-		"daemon_pid": 0, "active_bank": 4, "daemon_exe": 8, "audit": 24, "pad": 28,
-	})
-	assertLayout(t, "ObjectKey", manifest.ObjectKey, objectKeySize, map[string]int{
-		"file": 0, "bank": 16, "pad": 20,
-	})
-	assertLayout(t, "VerdictKey", manifest.VerdictKey, verdictKeySize, map[string]int{
-		"bank": 0, "object": 4, "label": 8, "operation": 12, "relation": 16, "target_kind": 20,
-	})
-	assertLayout(t, "NoMatchKey", manifest.NoMatchKey, noMatchKeySize, map[string]int{
-		"bank": 0, "label": 4, "operation": 8, "target_kind": 12,
-	})
-	assertLayout(t, "Verdict", manifest.Verdict, verdictSize, nil)
-	if manifest.Audit.KeySize != auditKeySize || manifest.Audit.ValueSize != auditValueSize {
-		t.Fatalf("AUDIT ABI = key=%d value=%d, Go expects key=%d value=%d", manifest.Audit.KeySize, manifest.Audit.ValueSize, auditKeySize, auditValueSize)
+	layouts := []struct {
+		name    string
+		size    int
+		offsets map[string]int
+	}{
+		{"FileId", 16, map[string]int{"dev": 0, "ino": 8}},
+		{"Settings", settingsSize, map[string]int{"daemon_pid": 0, "active_bank": 4, "daemon_exe": 8, "audit": 24, "pad": 28}},
+		{"ObjectKey", objectKeySize, map[string]int{"file": 0, "bank": 16, "pad": 20}},
+		{"ObjectValue", objectValueSize, map[string]int{"first_context": 0, "context_count": 4}},
+		{"ScopeRef", scopeRefSize, map[string]int{"off": 0, "len": 4, "exclude": 8}},
+		{"RuleRef", ruleRefSize, map[string]int{"pattern": 0, "list": 2, "flags": 3}},
+		{"Context", contextSize, map[string]int{
+			"path_off": 0, "path_len": 4, "parent_len": 8, "flags": 12, "scope_count": 16, "rule_count": 20,
+			"scopes": 24, "rules": 24 + contextScopes*scopeRefSize,
+		}},
+		{"Pattern", patternSize, map[string]int{"off": 0, "len": 4, "recursive": 8, "chunk_off": 12, "chunk_len": 16}},
+		{"Chunk", chunkSize, map[string]int{"star": 0, "token_off": 4, "token_len": 8}},
+		{"Token", tokenSize, map[string]int{"kind": 0, "byte": 1, "negated": 2, "range_off": 4, "range_len": 8}},
+		{"Range", rangeSize, map[string]int{"lo": 0, "hi": 4}},
+		{"Arena", arenaValueSize, nil},
+		{"Scratch", scratchSize, nil},
+		{"Offsets", offsetsSize, nil},
+	}
+	for _, layout := range layouts {
+		got, ok := manifest.Layouts[layout.name]
+		if !ok {
+			t.Errorf("manifest has no %s", layout.name)
+			continue
+		}
+		assertLayout(t, layout.name, got, layout.size, layout.offsets)
+	}
+	for name, want := range map[string]int{
+		"NUM_BANKS": numBanks, "MAX_OBJECTS": maxObjects, "MAX_CONTEXTS": maxContexts, "MAX_PATTERNS": maxPatterns,
+		"MAX_CHUNKS": maxChunks, "MAX_TOKENS": maxTokens, "MAX_RANGES": maxRanges,
+		"CONTEXT_RULES": contextRules, "CONTEXT_SCOPES": contextScopes, "ARENA_SIZE": arenaSize, "MAX_STRING": maxString,
+		"AUDIT_COUNTERS": auditSlots, "NOMATCH_ENTRIES": nomatchEntries, "HOOKS": hookCount, "REASONS": reasonCount,
+	} {
+		if got, ok := manifest.Constants[name]; !ok || got != want {
+			t.Errorf("constant %s = %d (present %v), Go expects %d", name, got, ok, want)
+		}
+	}
+	if len(Hooks) != hookCount {
+		t.Errorf("Hooks has %d entries, COUNTERS has %d hook slots", len(Hooks), hookCount)
 	}
 }
 

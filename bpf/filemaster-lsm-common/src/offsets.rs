@@ -1,4 +1,5 @@
-// Ported from cordon crates/bpf-common/src/offsets.rs @ b40a8c7 (Apache-2.0) — unchanged apart from the crate rename.
+// Ported from cordon crates/bpf-common/src/offsets.rs @ b40a8c7 (Apache-2.0) — renamed the crate;
+// added `dentry_d_name_len` for the path rebuild.
 //! Running-kernel struct field offsets — the portability shim that replaces a
 //! build-time-pinned `vmlinux.rs`.
 //!
@@ -48,6 +49,9 @@ pub struct Offsets {
     /// (DESIGN §15.10 flow B). It addresses a NUL-terminated string, so the program reads
     /// it with `bpf_probe_read_kernel_str` and needs no separate length field.
     pub dentry_d_name_name: u32,
+    /// `dentry -> d_name.len` — the component length, so names can be written into the
+    /// path buffer back to front.
+    pub dentry_d_name_len: u32,
     /// `inode -> i_ino`.
     pub inode_i_ino: u32,
     /// `inode -> i_mode` (used to distinguish Filemaster file and folder rules).
@@ -81,6 +85,7 @@ impl Offsets {
         dentry_d_sb: u32::MAX,
         dentry_d_parent: u32::MAX,
         dentry_d_name_name: u32::MAX,
+        dentry_d_name_len: u32::MAX,
         inode_i_ino: u32::MAX,
         inode_i_mode: u32::MAX,
         inode_i_sb: u32::MAX,

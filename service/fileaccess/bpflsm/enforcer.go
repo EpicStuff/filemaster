@@ -52,8 +52,8 @@ type HookStatus struct {
 	Error     string
 }
 
-// CompileWarning names a rule shape that the finite inode table cannot express
-// exactly. Patterns are authored rule patterns, never watched user paths.
+// CompileWarning names rules the compiler left out of, or could not fit into,
+// the kernel tables. Patterns are authored rule patterns, never user paths.
 type CompileWarning struct {
 	ID       string
 	Patterns []string
@@ -73,8 +73,32 @@ type Status struct {
 	OrphanedGenerations []string
 	// WouldDeny is the per-operation total read from the per-CPU AUDIT map.
 	WouldDeny map[string]uint64
-	// CompileWarnings describe deliberate M2 table-coverage degradations.
+	// Undecided counts, per reason and hook, the cases the kernel could not
+	// decide exactly; only non-zero counts are listed.
+	Undecided []UndecidedCount
+	// CompileWarnings describe rules the compiler left out or could not fit.
 	CompileWarnings []CompileWarning
+}
+
+// UndecidedCount is one non-zero COUNTERS total.
+type UndecidedCount struct {
+	Reason string
+	Hook   string
+	Count  uint64
+}
+
+// Undecided reasons, in COUNTERS order.
+const (
+	ReasonUnreadable       = "unreadable"
+	ReasonDepth            = "depth-limit"
+	ReasonPathTooLong      = "path-too-long"
+	ReasonUnregisteredRoot = "unregistered-root"
+	ReasonContextOverflow  = "context-overflow"
+	ReasonBudget           = "evaluation-budget"
+)
+
+var undecidedReasons = [reasonCount]string{
+	ReasonUnreadable, ReasonDepth, ReasonPathTooLong, ReasonUnregisteredRoot, ReasonContextOverflow, ReasonBudget,
 }
 
 // Enforcer owns the loaded BPF LSM object and its pinned generations.
@@ -150,6 +174,11 @@ func (e *Enforcer) Status() Status {
 		status.WouldDeny = counters
 	} else if e.collection != nil {
 		status.Error = joinStatusError(status.Error, "read audit counters: "+err.Error())
+	}
+	if counters, err := undecidedCounts(e.collection); err == nil {
+		status.Undecided = counters
+	} else if e.collection != nil {
+		status.Error = joinStatusError(status.Error, "read undecided counters: "+err.Error())
 	}
 	return status
 }
@@ -385,38 +414,8 @@ func (e *Enforcer) start(mode Mode, table Table) Status {
 
 func (e *Enforcer) publishLocked(table Table, mode Mode) error {
 	inactive := e.settings.bank ^ 1
-	objects := e.collection.Maps["OBJECTS"]
-	verdicts := e.collection.Maps["VERDICT"]
-	noMatch := e.collection.Maps["NOMATCH"]
-	if objects == nil || verdicts == nil || noMatch == nil {
-		return errors.New("loaded BPF object is missing a decision-table map")
-	}
-	if err := clearObjectBank(objects, inactive); err != nil {
-		return fmt.Errorf("clear inactive OBJECTS bank: %w", err)
-	}
-	if err := clearVerdictBank(verdicts, inactive); err != nil {
-		return fmt.Errorf("clear inactive VERDICT bank: %w", err)
-	}
-	if err := clearNoMatchBank(noMatch, inactive); err != nil {
-		return fmt.Errorf("clear inactive NOMATCH bank: %w", err)
-	}
-	for _, object := range table.Objects {
-		if err := objects.Put(encodeObjectKey(inactive, object.File), object.ID); err != nil {
-			return fmt.Errorf("write OBJECTS[%d]: %w", object.ID, err)
-		}
-	}
-	for _, entry := range table.Verdicts {
-		if err := verdicts.Put(
-			encodeVerdictKey(inactive, entry.Object, entry.Operation, entry.Relation, entry.Kind),
-			uint32(entry.Verdict),
-		); err != nil {
-			return fmt.Errorf("write VERDICT object=%d operation=%d: %w", entry.Object, entry.Operation, err)
-		}
-	}
-	for _, entry := range table.NoMatches {
-		if err := noMatch.Put(encodeNoMatchKey(inactive, entry.Operation, entry.Kind), uint32(entry.Verdict)); err != nil {
-			return fmt.Errorf("write NOMATCH operation=%d: %w", entry.Operation, err)
-		}
+	if err := writeBank(e.collection.Maps, inactive, table); err != nil {
+		return err
 	}
 	settings := e.settings
 	settings.bank = inactive
@@ -432,9 +431,70 @@ func (e *Enforcer) publishLocked(table Table, mode Mode) error {
 	return nil
 }
 
+// writeBank replaces one bank's tables with table. The kernel reads only the
+// active bank, so the inactive one can be rewritten in any order.
+func writeBank(maps map[string]*ebpf.Map, bank uint32, table Table) error {
+	if len(table.Objects) > maxObjects || len(table.Contexts) > maxContexts || len(table.Patterns) > maxPatterns ||
+		len(table.Chunks) > maxChunks || len(table.Tokens) > maxTokens || len(table.Ranges) > maxRanges {
+		return fmt.Errorf("table exceeds a bank limit: %d/%d objects, %d/%d contexts, %d/%d patterns, %d/%d chunks, %d/%d tokens, %d/%d ranges",
+			len(table.Objects), maxObjects, len(table.Contexts), maxContexts, len(table.Patterns), maxPatterns,
+			len(table.Chunks), maxChunks, len(table.Tokens), maxTokens, len(table.Ranges), maxRanges)
+	}
+	arena, offsets, err := layoutArena(table)
+	if err != nil {
+		return err
+	}
+	if err := clearObjectBank(maps["OBJECTS"], bank); err != nil {
+		return fmt.Errorf("clear inactive OBJECTS bank: %w", err)
+	}
+	if err := maps["ARENA"].Put(bank, arena); err != nil {
+		return fmt.Errorf("write ARENA: %w", err)
+	}
+	for i, pattern := range table.Patterns {
+		if err := maps["PATTERNS"].Put(bank*maxPatterns+uint32(i), encodePattern(pattern, offsets)); err != nil {
+			return fmt.Errorf("write PATTERNS[%d]: %w", i, err)
+		}
+	}
+	for i, c := range table.Chunks {
+		if err := maps["CHUNKS"].Put(bank*maxChunks+uint32(i), encodeChunk(c)); err != nil {
+			return fmt.Errorf("write CHUNKS[%d]: %w", i, err)
+		}
+	}
+	for i, t := range table.Tokens {
+		if err := maps["TOKENS"].Put(bank*maxTokens+uint32(i), encodeToken(t)); err != nil {
+			return fmt.Errorf("write TOKENS[%d]: %w", i, err)
+		}
+	}
+	for i, r := range table.Ranges {
+		if err := maps["RANGES"].Put(bank*maxRanges+uint32(i), encodeRange(r)); err != nil {
+			return fmt.Errorf("write RANGES[%d]: %w", i, err)
+		}
+	}
+	for i, context := range table.Contexts {
+		if err := maps["CONTEXTS"].Put(bank*maxContexts+uint32(i), encodeContext(context, offsets)); err != nil {
+			return fmt.Errorf("write CONTEXTS[%d]: %w", i, err)
+		}
+	}
+	verdict := uint32(0)
+	if table.DefaultAllow {
+		verdict = 1
+	}
+	for index := bank * 10; index < bank*10+10; index++ {
+		if err := maps["NOMATCH"].Put(index, verdict); err != nil {
+			return fmt.Errorf("write NOMATCH[%d]: %w", index, err)
+		}
+	}
+	for _, object := range table.Objects {
+		if err := maps["OBJECTS"].Put(encodeObjectKey(bank, object.File), encodeObjectValue(object.FirstContext, object.ContextCount)); err != nil {
+			return fmt.Errorf("write OBJECTS: %w", err)
+		}
+	}
+	return nil
+}
+
 func clearObjectBank(m *ebpf.Map, bank uint32) error {
 	var key [objectKeySize]byte
-	var value uint32
+	var value [objectValueSize]byte
 	var keys [][objectKeySize]byte
 	iter := m.Iterate()
 	for iter.Next(&key, &value) {
@@ -453,46 +513,30 @@ func clearObjectBank(m *ebpf.Map, bank uint32) error {
 	return nil
 }
 
-func clearVerdictBank(m *ebpf.Map, bank uint32) error {
-	var key [verdictKeySize]byte
-	var value uint32
-	var keys [][verdictKeySize]byte
-	iter := m.Iterate()
-	for iter.Next(&key, &value) {
-		if binary.LittleEndian.Uint32(key[0:]) == bank {
-			keys = append(keys, key)
+func undecidedCounts(collection *ebpf.Collection) ([]UndecidedCount, error) {
+	if collection == nil || collection.Maps["COUNTERS"] == nil {
+		return nil, nil
+	}
+	var counts []UndecidedCount
+	for reason := range reasonCount {
+		for hook := range hookCount {
+			values, err := perCPUValues()
+			if err != nil {
+				return nil, err
+			}
+			if err := collection.Maps["COUNTERS"].Lookup(uint32(reason*hookCount+hook), &values); err != nil {
+				return nil, err
+			}
+			var total uint64
+			for _, value := range values {
+				total += value
+			}
+			if total > 0 {
+				counts = append(counts, UndecidedCount{Reason: undecidedReasons[reason], Hook: Hooks[hook].Program, Count: total})
+			}
 		}
 	}
-	if err := iter.Err(); err != nil {
-		return err
-	}
-	for _, key := range keys {
-		if err := m.Delete(key); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func clearNoMatchBank(m *ebpf.Map, bank uint32) error {
-	var key [noMatchKeySize]byte
-	var value uint32
-	var keys [][noMatchKeySize]byte
-	iter := m.Iterate()
-	for iter.Next(&key, &value) {
-		if binary.LittleEndian.Uint32(key[0:]) == bank {
-			keys = append(keys, key)
-		}
-	}
-	if err := iter.Err(); err != nil {
-		return err
-	}
-	for _, key := range keys {
-		if err := m.Delete(key); err != nil {
-			return err
-		}
-	}
-	return nil
+	return counts, nil
 }
 
 func auditCounters(collection *ebpf.Collection) (map[string]uint64, error) {

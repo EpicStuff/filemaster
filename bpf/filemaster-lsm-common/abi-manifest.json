@@ -2,8 +2,16 @@
   "FileId": {"size": 16, "offsets": {"dev": 0, "ino": 8}},
   "Settings": {"size": 32, "offsets": {"daemon_pid": 0, "active_bank": 4, "daemon_exe": 8, "audit": 24, "pad": 28}},
   "ObjectKey": {"size": 24, "offsets": {"file": 0, "bank": 16, "pad": 20}},
-  "VerdictKey": {"size": 24, "offsets": {"bank": 0, "object": 4, "label": 8, "operation": 12, "relation": 16, "target_kind": 20}},
-  "NoMatchKey": {"size": 16, "offsets": {"bank": 0, "label": 4, "operation": 8, "target_kind": 12}},
-  "Verdict": {"size": 4},
-  "AUDIT": {"key_size": 4, "value_size": 8}
+  "ObjectValue": {"size": 8, "offsets": {"first_context": 0, "context_count": 4}},
+  "ScopeRef": {"size": 12, "offsets": {"off": 0, "len": 4, "exclude": 8}},
+  "RuleRef": {"size": 4, "offsets": {"pattern": 0, "list": 2, "flags": 3}},
+  "Context": {"size": 1432, "offsets": {"path_off": 0, "path_len": 4, "parent_len": 8, "flags": 12, "scope_count": 16, "rule_count": 20, "scopes": 24, "rules": 408}},
+  "Pattern": {"size": 20, "offsets": {"off": 0, "len": 4, "recursive": 8, "chunk_off": 12, "chunk_len": 16}},
+  "Chunk": {"size": 12, "offsets": {"star": 0, "token_off": 4, "token_len": 8}},
+  "Token": {"size": 12, "offsets": {"kind": 0, "byte": 1, "negated": 2, "range_off": 4, "range_len": 8}},
+  "Range": {"size": 8, "offsets": {"lo": 0, "hi": 4}},
+  "Arena": {"size": 1052672},
+  "Scratch": {"size": 20480},
+  "Offsets": {"size": 64},
+  "constants": {"NUM_BANKS": 2, "MAX_OBJECTS": 1024, "MAX_CONTEXTS": 1024, "MAX_PATTERNS": 1024, "MAX_CHUNKS": 8192, "MAX_TOKENS": 32768, "MAX_RANGES": 16384, "CONTEXT_RULES": 256, "CONTEXT_SCOPES": 32, "ARENA_SIZE": 1048576, "MAX_STRING": 4095, "AUDIT_COUNTERS": 5, "NOMATCH_ENTRIES": 20, "HOOKS": 5, "REASONS": 6}
 }

@@ -5,6 +5,7 @@ package fileaccess
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,10 +16,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TestStructuralBPFDifferential is intentionally opt-in: it loads BPF LSM
-// programs and mutates a real filesystem. The VM gate enables it with
-// FM_BPF_DIFFERENTIAL=1 and selects tmpfs or btrfs through
-// FM_BPF_DIFFERENTIAL_ROOT.
+// TestStructuralBPFDifferential generates random policies and operations and
+// requires the kernel verdict to equal DecideOperation/DecideRename/
+// DecideHardLink for every one. It loads BPF LSM and mutates a real
+// filesystem, so the VM gate enables it with FM_BPF_DIFFERENTIAL=1 and selects
+// the filesystem with FM_BPF_DIFFERENTIAL_ROOT.
 func TestStructuralBPFDifferential(t *testing.T) {
 	if os.Getenv("FM_BPF_DIFFERENTIAL") != "1" {
 		t.Skip("set FM_BPF_DIFFERENTIAL=1 to run the root-only BPF differential test")
@@ -27,75 +29,123 @@ func TestStructuralBPFDifferential(t *testing.T) {
 		t.Fatal("FM_BPF_DIFFERENTIAL requires root")
 	}
 
-	cases := []struct {
-		seed          int64
-		defaultAction uint8
-	}{
-		{seed: 101, defaultAction: profile.DefaultActionNotSet},
-		{seed: 211, defaultAction: profile.DefaultActionBlock},
-		{seed: 307, defaultAction: profile.DefaultActionAsk},
-		{seed: 401, defaultAction: profile.DefaultActionPermit},
+	seeds := []int64{101, 211, 307, 401, 509, 613, 727, 829}
+	grandTotal, grandAllow, grandDeny := 0, 0, 0
+	for _, seed := range seeds {
+		allow, deny := runDifferentialSeed(t, seed)
+		grandTotal += allow + deny
+		grandAllow += allow
+		grandDeny += deny
+		t.Logf("differential seed=%d cases=%d allow=%d deny=%d mismatches=0", seed, allow+deny, allow, deny)
 	}
-	coverage := make(map[Verdict]map[ObjectKind]bool)
-	total := 0
-	for variant, test := range cases {
-		root := differentialRoot(t, test.seed)
-		snapshot, rules := differentialSnapshot(root, test.seed, variant, test.defaultAction)
-		operations := differentialOperations(t, root, snapshot, test.seed)
-		for _, rule := range rules {
-			if coverage[rule.Verdict] == nil {
-				coverage[rule.Verdict] = make(map[ObjectKind]bool)
-			}
-			coverage[rule.Verdict][rule.ObjectKind] = true
-		}
-		inputs, warnings := structuralObjectInputs(
-			[]string{filepath.Join(root, "scope-a"), filepath.Join(root, "scope-b")},
-			snapshot,
-		)
-		if !onlyExpectedDifferentialWarnings(warnings) {
-			t.Fatalf("seed=%d unexpected compiler warnings: %#v", test.seed, warnings)
-		}
-		table, err := bpflsm.Compile(
-			inputs,
-			structuralEvaluator(LookupResult{Snapshot: snapshot, DefaultAction: test.defaultAction}),
-			structuralDefaultVerdict(LookupResult{DefaultAction: test.defaultAction}),
-		)
-		if err != nil {
-			t.Fatalf("seed=%d compile: %v", test.seed, err)
-		}
+	if grandDeny*100 < grandTotal*30 {
+		t.Fatalf("only %d/%d (%.0f%%) cases expected a deny, want at least 30%%", grandDeny, grandTotal, float64(grandDeny)*100/float64(grandTotal))
+	}
+	t.Logf("differential total=%d allow=%d deny=%d mismatches=0", grandTotal, grandAllow, grandDeny)
+}
 
-		zero := uint32(0)
-		pinRoot := filepath.Join("/sys/fs/bpf", "filemaster-differential-"+strconv.Itoa(os.Getpid())+"-"+strconv.Itoa(variant))
-		enforcer := bpflsm.NewEnforcerWithOptions(bpflsm.Options{
-			PinRoot:     pinRoot,
-			SelfTestDir: filepath.Join(root, "selftest"),
-			DaemonPID:   &zero,
-		})
-		if err := enforcer.SetModeWithTable(bpflsm.ModeEnforce, table); err != nil {
-			t.Fatalf("seed=%d load/enforce: %v", test.seed, err)
-		}
-		func() {
-			defer func() {
-				if err := enforcer.SetMode(bpflsm.ModeOff); err != nil {
-					t.Errorf("seed=%d detach: %v", test.seed, err)
-				}
-			}()
-			for _, operation := range operations {
-				got := operation.run()
-				total++
-				assertDifferentialOutcome(t, test.seed, test.defaultAction, rules, operation, got)
-			}
-		}()
-		t.Logf("M2 differential seed=%d default=%d cases=%d mismatches=0 excluded=glob-created-later", test.seed, test.defaultAction, len(operations))
+func runDifferentialSeed(t *testing.T, seed int64) (allow, deny int) {
+	t.Helper()
+	random := rand.New(rand.NewSource(seed))
+	root := differentialRoot(t, seed)
+	scopeA := filepath.Join(root, "scope-a")
+	scopeB := filepath.Join(root, "scope-b")
+	outside := filepath.Join(root, "outside")
+	for _, dir := range []string{scopeA, scopeB, outside} {
+		mustMkdirAll(t, dir)
 	}
-	for _, verdict := range []Verdict{VerdictAllow, VerdictDeny} {
-		for _, kind := range []ObjectKind{ObjectKindAny, ObjectKindFile, ObjectKindFolder} {
-			if !coverage[verdict][kind] {
-				t.Errorf("generated differential rules did not cover verdict=%v kind=%v", verdict, kind)
-			}
+
+	defaultAction := []uint8{
+		profile.DefaultActionNotSet, profile.DefaultActionBlock,
+		profile.DefaultActionAsk, profile.DefaultActionPermit,
+	}[random.Intn(4)]
+	snapshot := generateSnapshot(random, scopeA, scopeB, outside, defaultAction)
+
+	// Materialize the current matches of each generated rule so the compiler
+	// anchors them, then build every operation and its fixtures BEFORE
+	// enforcing: fixture mkdirs are themselves hooked, so they must not run
+	// while the policy denies them.
+	for _, dir := range []string{filepath.Join(scopeA, "live"), filepath.Join(scopeB, "live")} {
+		mustMkdirAll(t, dir)
+	}
+	var operations []differentialOperation
+	for len(operations) < 500 {
+		operations = append(operations, generateOperations(t, random, root, scopeA, scopeB, outside, snapshot)...)
+	}
+	// Pre-create the nested mountpoint (a hooked mkdir) before enforcing.
+	nested := filepath.Join(scopeA, "nested-mount")
+	mustMkdirAll(t, nested)
+
+	policy := structuralPolicy(
+		&watchRuleSnapshot{Rules: []watchRule{{Path: scopeA}, {Path: scopeB}}},
+		LookupResult{Snapshot: snapshot, DefaultAction: defaultAction},
+	)
+	table, warnings, err := bpflsm.Compile(policy)
+	if err != nil {
+		t.Fatalf("seed=%d compile: %v", seed, err)
+	}
+	for _, warning := range warnings {
+		if warning.ID == "context-rule-overflow" {
+			t.Fatalf("seed=%d unexpected overflow: %v", seed, warning.Patterns)
 		}
 	}
-	t.Logf("M2 differential total cases=%d mismatches=0", total)
+
+	zero := uint32(0)
+	pinRoot := filepath.Join("/sys/fs/bpf", "filemaster-differential-"+strconv.Itoa(os.Getpid())+"-"+strconv.FormatInt(seed, 10))
+	enforcer := bpflsm.NewEnforcerWithOptions(bpflsm.Options{
+		PinRoot:     pinRoot,
+		SelfTestDir: filepath.Join(root, "selftest"),
+		DaemonPID:   &zero,
+	})
+	if err := enforcer.SetModeWithTable(bpflsm.ModeEnforce, table); err != nil {
+		t.Fatalf("seed=%d load/enforce: %v", seed, err)
+	}
+	defer func() {
+		if err := enforcer.SetMode(bpflsm.ModeOff); err != nil {
+			t.Errorf("seed=%d detach: %v", seed, err)
+		}
+	}()
+
+	// A tmpfs mounted inside a scope at test time, then a re-publish, exercises
+	// the mount-root walk stop and the re-registration path. mount(2) and the
+	// file creation via open(2) are not hooked, so they run under enforcement;
+	// the mountpoint dir was created before enforcing.
+	if err := unix.Mount("tmpfs", nested, "tmpfs", 0, "mode=0700"); err != nil {
+		t.Fatalf("seed=%d mount nested tmpfs: %v", seed, err)
+	}
+	defer unix.Unmount(nested, unix.MNT_DETACH)
+	nestedFile := filepath.Join(nested, "f")
+	if err := createFile(nestedFile); err != nil {
+		t.Fatalf("seed=%d create nested file: %v", seed, err)
+	}
+	republished, _, err := bpflsm.Compile(policy)
+	if err != nil {
+		t.Fatalf("seed=%d recompile after mount: %v", seed, err)
+	}
+	if err := enforcer.Publish(republished); err != nil {
+		t.Fatalf("seed=%d republish after mount: %v", seed, err)
+	}
+	operations = append(operations, differentialOperation{
+		name:      "nested-mount-unlink",
+		reference: snapshot.DecideOperation(nestedFile, DecisionDelete, false),
+		run:       func() error { return os.Remove(nestedFile) },
+	})
+
+	for _, operation := range operations {
+		got := operation.run()
+		if operation.reference == VerdictAllow {
+			if got != nil {
+				t.Fatalf("seed=%d op=%s reference=allow got=%v", seed, operation.name, got)
+			}
+			allow++
+			continue
+		}
+		if !errors.Is(got, unix.EPERM) {
+			t.Fatalf("seed=%d op=%s reference=deny got=%v", seed, operation.name, got)
+		}
+		deny++
+	}
+	return allow, deny
 }
 
 func differentialRoot(t *testing.T, seed int64) string {
@@ -115,41 +165,41 @@ func differentialRoot(t *testing.T, seed int64) string {
 	return root
 }
 
-func differentialSnapshot(root string, seed int64, variant int, defaultAction uint8) (*DecisionSnapshot, []PathRule) {
-	scopeA := filepath.Join(root, "scope-a")
-	scopeB := filepath.Join(root, "scope-b")
-	allowTree := filepath.Join(scopeA, "allow")
-	exact := filepath.Join(scopeA, "exact-"+strconv.FormatInt(seed, 10))
-	recursive := filepath.Join(scopeA, "recursive-"+strconv.FormatInt(seed, 10), "**")
-	glob := filepath.Join(scopeB, "glob-"+strconv.FormatInt(seed, 10)+"-?")
-	folder := filepath.Join(scopeA, "folder-"+strconv.FormatInt(seed, 10))
-
-	makeRule := func(shape int, pattern string) PathRule {
-		verdict := []Verdict{VerdictAllow, VerdictDeny}[(variant+shape)%2]
-		kind := []ObjectKind{ObjectKindAny, ObjectKindFile, ObjectKindFolder}[(variant+shape)%3]
-		return PathRule{Pattern: pattern, Verdict: verdict, ObjectKind: kind}
+// generateSnapshot builds ordered, overlapping Read/Write/Execute lists that
+// differ, using every rule shape, ObjectKind and the four default actions,
+// including rules outside every scope and on paths that do not exist yet.
+func generateSnapshot(random *rand.Rand, scopeA, scopeB, outside string, defaultAction uint8) *DecisionSnapshot {
+	kinds := []ObjectKind{ObjectKindAny, ObjectKindFile, ObjectKindFolder}
+	makeList := func(salt int) PathRules {
+		patterns := []string{
+			filepath.Join(scopeA, "live", "**"),
+			filepath.Join(scopeA, "live", "exact"),
+			filepath.Join(scopeA, "live", "*.txt"),
+			filepath.Join(scopeA, "live", "[ab]*"),
+			filepath.Join(scopeA, "live", `\*literal`),
+			filepath.Join(scopeB, "live", "**"),
+			filepath.Join(scopeB, "live", "d?"),
+			filepath.Join(scopeA, "future", "**"),
+			filepath.Join(scopeA, "future-exact"),
+			filepath.Join(outside, "**"),
+		}
+		random.Shuffle(len(patterns), func(i, j int) { patterns[i], patterns[j] = patterns[j], patterns[i] })
+		rules := make([]PathRule, 0, len(patterns))
+		for i, pattern := range patterns {
+			rules = append(rules, PathRule{
+				Pattern:    pattern,
+				Verdict:    []Verdict{VerdictAllow, VerdictDeny}[(salt+i)%2],
+				ObjectKind: kinds[(salt+i)%3],
+			})
+		}
+		return PathRules{Rules: rules}
 	}
-	common := []PathRule{
-		{Pattern: filepath.Join(allowTree, "**"), Verdict: VerdictAllow, ObjectKind: ObjectKindAny},
-		makeRule(0, exact),
-		makeRule(1, recursive),
-		makeRule(2, glob),
-		{Pattern: folder, Verdict: []Verdict{VerdictDeny, VerdictAllow}[variant%2], ObjectKind: ObjectKindFolder},
-	}
-	clone := func() []PathRule { return append([]PathRule(nil), common...) }
 	return &DecisionSnapshot{
 		DefaultAction: defaultAction,
-		Read:          PathRules{Rules: clone()},
-		Write:         PathRules{Rules: clone()},
-		Exec:          PathRules{Rules: clone()},
-	}, common
-}
-
-func onlyExpectedDifferentialWarnings(warnings []bpflsm.CompileWarning) bool {
-	if len(warnings) != 1 || warnings[0].ID != "glob-future-match" {
-		return false
+		Read:          makeList(0),
+		Write:         makeList(1),
+		Exec:          makeList(2),
 	}
-	return len(warnings[0].Patterns) == 1
 }
 
 type differentialOperation struct {
@@ -158,161 +208,116 @@ type differentialOperation struct {
 	run       func() error
 }
 
-func differentialOperations(t *testing.T, root string, snapshot *DecisionSnapshot, seedValue int64) []differentialOperation {
+func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, outside string, snapshot *DecisionSnapshot) []differentialOperation {
 	t.Helper()
-	scopeA := filepath.Join(root, "scope-a")
-	scopeB := filepath.Join(root, "scope-b")
-	outside := filepath.Join(root, "outside")
-	allow := filepath.Join(scopeA, "allow")
-	seed := strconv.FormatInt(seedValue, 10)
-	for _, path := range []string{scopeA, scopeB, outside, allow} {
-		mustMkdirAll(t, path)
-	}
+	liveA := filepath.Join(scopeA, "live")
+	liveB := filepath.Join(scopeB, "live")
+	tag := strconv.Itoa(random.Int())
 
-	file := func(name string) string {
-		path := filepath.Join(allow, name)
+	// Materialize the current matches a few generated rules anchor on.
+	mustWriteFile(t, filepath.Join(liveA, "exact"))
+	mustWriteFile(t, filepath.Join(liveA, "note.txt"))
+	mustWriteFile(t, filepath.Join(liveA, "about"))
+	mustWriteFile(t, filepath.Join(liveB, "d1"))
+
+	file := func(dir, name string) string {
+		path := filepath.Join(dir, name+tag)
 		mustWriteFile(t, path)
 		return path
 	}
-	dir := func(name string) string {
-		path := filepath.Join(allow, name)
+	dir := func(parent, name string) string {
+		path := filepath.Join(parent, name+tag)
 		mustMkdirAll(t, path)
 		return path
 	}
-	outsideFile := func(name string) string {
-		path := filepath.Join(outside, name)
-		mustWriteFile(t, path)
-		return path
+	deepRoot := filepath.Join(liveA, "deep-"+tag)
+	for i := range 110 {
+		deepRoot = filepath.Join(deepRoot, "d"+strconv.Itoa(i))
+	}
+	mustMkdirAll(t, deepRoot)
+	deepFile := filepath.Join(deepRoot, "leaf")
+	mustWriteFile(t, deepFile)
+
+	ref := func(path string, op DecisionOp, isDir bool) Verdict { return snapshot.DecideOperation(path, op, isDir) }
+	rename := func(source, destination string, sourceDir, destDir, destExists bool) Verdict {
+		return snapshot.DecideRename(RenameRequest{Source: source, SourceIsDir: sourceDir, Dest: destination, DestIsDir: destDir, DestExists: destExists})
+	}
+	link := func(source, destination string, destExists bool) Verdict {
+		return snapshot.DecideHardLink(LinkRequest{Source: source, Dest: destination, DestExists: destExists})
 	}
 
-	// Materialize each generated rule shape before compiling the table. The
-	// glob case is existing-only; future glob creations are deliberately
-	// excluded from this differential matrix and reported in diagnostics.
-	exactRulePath := filepath.Join(scopeA, "exact-"+seed)
-	mustWriteFile(t, exactRulePath)
-	mustMkdirAll(t, filepath.Join(scopeA, "recursive-"+seed))
-	recursiveRulePath := filepath.Join(scopeA, "recursive-"+seed, "current")
-	mustWriteFile(t, recursiveRulePath)
-	globRulePath := filepath.Join(scopeB, "glob-"+seed+"-a")
-	mustWriteFile(t, globRulePath)
-	folderRulePath := filepath.Join(scopeA, "folder-"+seed)
-	mustMkdirAll(t, folderRulePath)
+	unlinkTarget := file(liveA, "unlink-")
+	rmdirTarget := dir(liveA, "rmdir-")
+	mkdirTarget := filepath.Join(liveA, "mkdir-"+tag)
+	folderRename := dir(liveA, "folder-src-")
+	folderRenameDest := filepath.Join(liveB, "folder-dst-"+tag)
+	linkSrc := file(outside, "link-src-")
+	linkDest := filepath.Join(liveA, "link-dst-"+tag)
+	renameOverSrc := file(liveA, "rename-over-src-")
+	renameOverDest := file(liveB, "rename-over-dst-")
+	exchangeLeft := file(liveA, "exchange-l-")
+	exchangeRight := file(liveB, "exchange-r-")
+	noreplaceSrc := file(liveA, "noreplace-src-")
+	noreplaceDest := filepath.Join(liveB, "noreplace-dst-"+tag)
+	atSrc := file(liveA, "at-src-")
+	atDest := "at-dst-" + tag
+	// Post-publish creations that match a glob / exact rule, exercised through
+	// hooked operations: a folder mkdir (create) and a file unlink (delete).
+	// Regular-file create via open is deliberately not hooked (plan §1), so it
+	// is not used as a measured operation here.
+	futureGlob := filepath.Join(scopeA, "future", "created-"+tag)
+	mustMkdirAll(t, filepath.Dir(futureGlob))
+	futureExact := filepath.Join(scopeA, "future-exact")
 
-	unlinkAllow := file("unlink")
-	rmdirAllow := dir("rmdir")
-	mkdirAllow := filepath.Join(allow, "mkdir")
-	linkWithinSource := file("link-within-source")
-	linkWithinDest := filepath.Join(allow, "link-within-dest")
-	linkIntoSource := outsideFile("link-into-source")
-	linkIntoDest := filepath.Join(allow, "link-into-dest")
-	linkOutSource := file("link-out-source")
-	linkOutDest := filepath.Join(outside, "link-out-dest")
-	linkCrossSource := file("link-cross-source")
-	linkCrossDest := filepath.Join(scopeB, "link-cross-dest")
-	renameWithinSource := file("rename-within-source")
-	renameWithinDest := filepath.Join(allow, "rename-within-dest")
-	renameIntoSource := outsideFile("rename-into-source")
-	renameIntoDest := filepath.Join(allow, "rename-into-dest")
-	renameOutSource := file("rename-out-source")
-	renameOutDest := filepath.Join(outside, "rename-out-dest")
-	renameCrossSource := file("rename-cross-source")
-	renameCrossDest := filepath.Join(scopeB, "rename-cross-dest")
-	renameOverSource := file("rename-over-source")
-	renameOverDest := file("rename-over-dest")
-	atomicTemp := file("atomic-temp")
-	atomicDest := file("atomic-dest")
-	exchangeLeft := file("exchange-left")
-	exchangeRight := file("exchange-right")
-	noreplaceSource := file("noreplace-source")
-	noreplaceDest := filepath.Join(allow, "noreplace-dest")
-	unlinkAt := file("unlinkat")
-	rmdirAt := dir("rmdirat")
-	mkdirAt := "mkdirat"
-	renameAtSource := file("renameat-source")
-	renameAtDest := "renameat-dest"
-	linkAtSource := file("linkat-source")
-	linkAtDest := "linkat-dest"
-
-	ref := func(path string, op DecisionOp, isDir bool) Verdict {
-		return snapshot.DecideOperation(path, op, isDir)
-	}
-	rename := func(source, destination string, destinationExists bool) Verdict {
-		return snapshot.DecideRename(RenameRequest{Source: source, Dest: destination, DestExists: destinationExists})
-	}
-	link := func(source, destination string) Verdict {
-		return snapshot.DecideHardLink(LinkRequest{Source: source, Dest: destination})
-	}
-	exchange := func() Verdict {
-		if rename(exchangeLeft, exchangeRight, true) == VerdictDeny {
+	exchangeRef := func() Verdict {
+		if rename(exchangeLeft, exchangeRight, false, false, true) == VerdictDeny {
 			return VerdictDeny
 		}
-		return rename(exchangeRight, exchangeLeft, true)
+		return rename(exchangeRight, exchangeLeft, false, false, true)
 	}
 
 	return []differentialOperation{
-		{name: "unlink-exact-rule", reference: ref(exactRulePath, DecisionDelete, false), run: func() error { return os.Remove(exactRulePath) }},
-		{name: "unlink-recursive-rule", reference: ref(recursiveRulePath, DecisionDelete, false), run: func() error { return os.Remove(recursiveRulePath) }},
-		{name: "unlink-current-glob", reference: ref(globRulePath, DecisionDelete, false), run: func() error { return os.Remove(globRulePath) }},
-		{name: "rmdir-folder-rule", reference: ref(folderRulePath, DecisionDelete, true), run: func() error { return os.Remove(folderRulePath) }},
-		{name: "unlink", reference: ref(unlinkAllow, DecisionDelete, false), run: func() error { return os.Remove(unlinkAllow) }},
-		{name: "rmdir", reference: ref(rmdirAllow, DecisionDelete, true), run: func() error { return os.Remove(rmdirAllow) }},
-		{name: "mkdir", reference: ref(mkdirAllow, DecisionCreate, true), run: func() error { return os.Mkdir(mkdirAllow, 0o700) }},
-		{name: "link-within", reference: link(linkWithinSource, linkWithinDest), run: func() error { return os.Link(linkWithinSource, linkWithinDest) }},
-		{name: "link-into", reference: link(linkIntoSource, linkIntoDest), run: func() error { return os.Link(linkIntoSource, linkIntoDest) }},
-		{name: "link-out", reference: link(linkOutSource, linkOutDest), run: func() error { return os.Link(linkOutSource, linkOutDest) }},
-		{name: "link-cross-scope", reference: link(linkCrossSource, linkCrossDest), run: func() error { return os.Link(linkCrossSource, linkCrossDest) }},
-		{name: "rename-within", reference: rename(renameWithinSource, renameWithinDest, false), run: func() error { return os.Rename(renameWithinSource, renameWithinDest) }},
-		{name: "rename-into", reference: rename(renameIntoSource, renameIntoDest, false), run: func() error { return os.Rename(renameIntoSource, renameIntoDest) }},
-		{name: "rename-out", reference: rename(renameOutSource, renameOutDest, false), run: func() error { return os.Rename(renameOutSource, renameOutDest) }},
-		{name: "rename-cross-scope", reference: rename(renameCrossSource, renameCrossDest, false), run: func() error { return os.Rename(renameCrossSource, renameCrossDest) }},
-		{name: "rename-over", reference: rename(renameOverSource, renameOverDest, true), run: func() error { return os.Rename(renameOverSource, renameOverDest) }},
-		{name: "atomic-save", reference: rename(atomicTemp, atomicDest, true), run: func() error {
-			if err := os.WriteFile(atomicTemp, []byte("replacement"), 0o600); err != nil {
-				return err
-			}
-			return os.Rename(atomicTemp, atomicDest)
-		}},
-		{name: "rename-exchange", reference: exchange(), run: func() error {
+		{"unlink", ref(unlinkTarget, DecisionDelete, false), func() error { return os.Remove(unlinkTarget) }},
+		{"rmdir", ref(rmdirTarget, DecisionDelete, true), func() error { return os.Remove(rmdirTarget) }},
+		{"mkdir", ref(mkdirTarget, DecisionCreate, true), func() error { return os.Mkdir(mkdirTarget, 0o700) }},
+		{"deep-unlink", ref(deepFile, DecisionDelete, false), func() error { return os.Remove(deepFile) }},
+		{"link-in", link(linkSrc, linkDest, false), func() error { return os.Link(linkSrc, linkDest) }},
+		{"rename-folder", rename(folderRename, folderRenameDest, true, true, false), func() error { return os.Rename(folderRename, folderRenameDest) }},
+		{"rename-over", rename(renameOverSrc, renameOverDest, false, false, true), func() error { return os.Rename(renameOverSrc, renameOverDest) }},
+		{"rename-exchange", exchangeRef(), func() error {
 			return unix.Renameat2(unix.AT_FDCWD, exchangeLeft, unix.AT_FDCWD, exchangeRight, unix.RENAME_EXCHANGE)
 		}},
-		{name: "rename-noreplace", reference: rename(noreplaceSource, noreplaceDest, false), run: func() error {
-			return unix.Renameat2(unix.AT_FDCWD, noreplaceSource, unix.AT_FDCWD, noreplaceDest, unix.RENAME_NOREPLACE)
+		{"rename-noreplace", rename(noreplaceSrc, noreplaceDest, false, false, false), func() error {
+			return unix.Renameat2(unix.AT_FDCWD, noreplaceSrc, unix.AT_FDCWD, noreplaceDest, unix.RENAME_NOREPLACE)
 		}},
-		{name: "unlinkat", reference: ref(unlinkAt, DecisionDelete, false), run: func() error {
-			return withDirFD(allow, func(fd int) error { return unix.Unlinkat(fd, filepath.Base(unlinkAt), 0) })
+		{"mkdirat", ref(filepath.Join(liveA, atDest), DecisionCreate, true), func() error {
+			return withDirFD(liveA, func(fd int) error { return unix.Mkdirat(fd, atDest, 0o700) })
 		}},
-		{name: "rmdirat", reference: ref(rmdirAt, DecisionDelete, true), run: func() error {
-			return withDirFD(allow, func(fd int) error { return unix.Unlinkat(fd, filepath.Base(rmdirAt), unix.AT_REMOVEDIR) })
+		{"renameat", rename(atSrc, filepath.Join(liveA, atDest+"r"), false, false, false), func() error {
+			return withDirFD(liveA, func(fd int) error { return unix.Renameat(fd, filepath.Base(atSrc), fd, atDest+"r") })
 		}},
-		{name: "mkdirat", reference: ref(filepath.Join(allow, mkdirAt), DecisionCreate, true), run: func() error {
-			return withDirFD(allow, func(fd int) error { return unix.Mkdirat(fd, mkdirAt, 0o700) })
+		{"mkdir-future-glob", ref(futureGlob, DecisionCreate, true), func() error { return os.Mkdir(futureGlob, 0o700) }},
+		{"unlink-future-exact", ref(futureExact, DecisionDelete, false), func() error {
+			// Idempotent create (no O_EXCL): a prior denied unlink may have left
+			// the file. open is not hooked, so only the unlink is measured.
+			if err := os.WriteFile(futureExact, nil, 0o600); err != nil {
+				return err
+			}
+			return os.Remove(futureExact)
 		}},
-		{name: "renameat", reference: rename(renameAtSource, filepath.Join(allow, renameAtDest), false), run: func() error {
-			return withDirFD(allow, func(fd int) error { return unix.Renameat(fd, filepath.Base(renameAtSource), fd, renameAtDest) })
-		}},
-		{name: "linkat", reference: link(linkAtSource, filepath.Join(allow, linkAtDest)), run: func() error {
-			return withDirFD(allow, func(fd int) error { return unix.Linkat(fd, filepath.Base(linkAtSource), fd, linkAtDest, 0) })
+		{"unlink-live-exact", ref(filepath.Join(liveA, "exact"), DecisionDelete, false), func() error {
+			defer mustWriteFile(t, filepath.Join(liveA, "exact"))
+			return os.Remove(filepath.Join(liveA, "exact"))
 		}},
 	}
 }
 
-func assertDifferentialOutcome(t *testing.T, seed int64, defaultAction uint8, rules []PathRule, operation differentialOperation, got error) {
-	t.Helper()
-	if operation.reference == VerdictAllow && got == nil {
-		return
+func createFile(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
 	}
-	if operation.reference == VerdictDeny && errors.Is(got, unix.EPERM) {
-		return
-	}
-	t.Fatalf(
-		"BPF/Go mismatch seed=%d default=%d operation=%s rules=%+v reference=%s syscall=%v",
-		seed,
-		defaultAction,
-		operation.name,
-		rules,
-		operation.reference,
-		got,
-	)
+	return f.Close()
 }
 
 func withDirFD(path string, run func(int) error) error {
@@ -326,7 +331,7 @@ func withDirFD(path string, run func(int) error) error {
 
 func mustMkdirAll(t *testing.T, path string) {
 	t.Helper()
-	if err := os.MkdirAll(path, 0o700); err != nil {
+	if err := os.MkdirAll(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		t.Fatal(err)
 	}
 }
@@ -334,7 +339,7 @@ func mustMkdirAll(t *testing.T, path string) {
 func mustWriteFile(t *testing.T, path string) {
 	t.Helper()
 	mustMkdirAll(t, filepath.Dir(path))
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("%s\n", path)), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("%s\n", filepath.Base(path))), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

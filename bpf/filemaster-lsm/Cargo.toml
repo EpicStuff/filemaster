@@ -25,3 +25,10 @@ bench = false
 aya-ebpf = "0.1.1"
 # Shared map/record layout + identity hash (no_std, no `user` feature → no aya).
 filemaster-lsm-common = { path = "../filemaster-lsm-common" }
+
+[[bin]]
+# Test-only object for the Gate B matcher differential; never shipped.
+name = "matcher-test"
+path = "src/matcher_test.rs"
+test = false
+bench = false

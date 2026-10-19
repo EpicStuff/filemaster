@@ -3,11 +3,20 @@
 package fileaccess
 
 import (
+	"errors"
+	"sync"
+
+	"golang.org/x/sys/unix"
+
 	"github.com/safing/portmaster/service/fileaccess/bpflsm"
 	"github.com/safing/portmaster/service/mgr"
 )
 
 type structuralBackend = bpflsm.Enforcer
+
+// structuralApplyMu serializes compile-and-publish, so a slower compile of an
+// older mount table or policy can never be published after a newer one.
+var structuralApplyMu sync.Mutex
 
 // startStructuralEnforcement attaches the BPF LSM backend in the configured
 // mode and follows live profile/config/mode changes. It runs only in the
@@ -19,6 +28,8 @@ func (fa *FileAccess) startStructuralEnforcement() {
 	}
 	fa.structural = bpflsm.NewEnforcer()
 	apply := func() {
+		structuralApplyMu.Lock()
+		defer structuralApplyMu.Unlock()
 		mode := bpflsm.Mode(cfgOptionStructural())
 		if mode == bpflsm.ModeOff {
 			if err := fa.structural.SetMode(mode); err != nil {
@@ -39,6 +50,10 @@ func (fa *FileAccess) startStructuralEnforcement() {
 	}
 	apply()
 	fa.registerStructuralProfilePublisher(apply)
+	fa.mgr.Go("file-access structural mount watch", func(w *mgr.WorkerCtx) error {
+		fa.watchStructuralMounts(w, apply)
+		return nil
+	})
 	cfg.Config().EventConfigChange.AddCallback(
 		"fileaccess structural enforcement mode",
 		func(_ *mgr.WorkerCtx, _ struct{}) (bool, error) {
@@ -53,5 +68,33 @@ func (fa *FileAccess) startStructuralEnforcement() {
 func (fa *FileAccess) closeStructuralEnforcement() {
 	if fa.structural != nil {
 		fa.structural.Close()
+	}
+}
+
+// watchStructuralMounts re-publishes when this namespace's mount table
+// changes: mount roots are walk stops, and a new one is unregistered until the
+// next publish. /proc/self/mountinfo reports a change as POLLPRI.
+func (fa *FileAccess) watchStructuralMounts(w *mgr.WorkerCtx, apply func()) {
+	fd, err := unix.Open("/proc/self/mountinfo", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		fa.mgr.Warn("fileaccess: cannot watch mounts for structural re-publish", "err", err)
+		return
+	}
+	defer unix.Close(fd)
+	for w.Ctx().Err() == nil {
+		poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLPRI}}
+		if _, err := unix.Poll(poll, 1000); err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			fa.mgr.Warn("fileaccess: structural mount watch stopped", "err", err)
+			return
+		}
+		if poll[0].Revents&unix.POLLPRI == 0 || w.Ctx().Err() != nil {
+			continue
+		}
+		if fa.lifecycle != nil && fa.lifecycle.IsRunning() && bpflsm.Mode(cfgOptionStructural()) != bpflsm.ModeOff {
+			apply()
+		}
 	}
 }

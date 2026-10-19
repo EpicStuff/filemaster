@@ -31,9 +31,8 @@ pub mod offsets;
 pub mod policy_maps;
 
 pub use decision_maps::{
-    AUDIT_COUNTERS, DecisionOp, Label, MAP_AUDIT, MAP_NOMATCH, MAP_OBJECTS, MAP_VERDICT,
-    MAX_NOMATCH, MAX_OBJECTS, MAX_VERDICTS, NUM_BANKS, NoMatchKey, ObjectId, ObjectKey, Relation,
-    TargetKind, Verdict, VerdictKey,
+    Arena, Chunk, Context, DecisionOp, ObjectKey, ObjectValue, Pattern, Range, RuleRef, Scratch,
+    ScopeRef, TargetKind, Token, Verdict,
 };
 pub use ids::{
     Bank, CgroupId, Decision, Dev, Ino, Nanos, Opens, Pid, Suppressed, SuppressedTotal, Uid,

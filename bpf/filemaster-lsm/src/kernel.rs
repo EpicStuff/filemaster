@@ -1,6 +1,8 @@
 // Ported from cordon crates/bpf/src/kernel.rs @ b40a8c7 (Apache-2.0) — renamed
 // the common crate; removed cgroup/open/exec helpers and, in M2, the dead
-// `EVENTS`, `SCRATCH`, and `SUPPRESS` maps with their event-only helpers.
+// `EVENTS`, `SCRATCH`, and `SUPPRESS` maps with their event-only helpers. The M2
+// fix-up removed the scalar-argument reader and added raw dentry handles, a
+// negative-versus-unreadable inode read and the `d_name` reader for the path walk.
 //! The unsafe boundary: every read of kernel memory lives here, behind safe typed
 //! handles, so the decision flow in `main.rs` is `unsafe`-free.
 //!
@@ -61,12 +63,6 @@ pub fn current_pid() -> Pid {
     Pid((bpf_get_current_pid_tgid() >> 32) as u32)
 }
 
-/// Read a scalar LSM hook argument. `inode_rename`'s fifth parameter is its
-/// `unsigned int flags` value (including `RENAME_EXCHANGE`).
-pub fn u32_from_arg(ctx: &aya_ebpf::programs::LsmContext, n: usize) -> u32 {
-    unsafe { ctx.arg(n) }
-}
-
 /// A `struct file *`.
 #[derive(Clone, Copy)]
 pub struct File(*const u8);
@@ -112,6 +108,23 @@ impl Dentry {
     }
     pub fn parent(self) -> Option<Dentry> {
         Some(Dentry(ptr_at(self.0, offset!(dentry_d_parent))?))
+    }
+    /// The dentry as a plain integer, for a `bpf_loop` callback's state.
+    pub fn raw(self) -> u64 {
+        self.0 as u64
+    }
+    pub fn from_raw(raw: u64) -> Dentry {
+        Dentry(raw as *const u8)
+    }
+    /// `Some(None)` for a negative dentry, `None` when `d_inode` is unreadable.
+    pub fn inode_or_negative(self) -> Option<Option<Inode>> {
+        let inode = ptr_at(self.0, offset!(dentry_d_inode))?;
+        Some((!inode.is_null()).then_some(Inode(inode)))
+    }
+    /// The component name pointer and length from `d_name`.
+    pub fn name(self) -> Option<(*const u8, u32)> {
+        let len = read_at::<u32>(self.0, offset!(dentry_d_name_len))?;
+        Some((ptr_at(self.0, offset!(dentry_d_name_name))?, len))
     }
 }
 

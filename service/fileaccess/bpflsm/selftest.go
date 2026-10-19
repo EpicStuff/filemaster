@@ -38,25 +38,26 @@ func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string)
 			}
 		}
 	}
-	id, err := pathFileID(vault)
-	if err != nil {
-		return err
-	}
-
 	settings := collection.Maps["SETTINGS"]
-	objects := collection.Maps["OBJECTS"]
-	verdicts := collection.Maps["VERDICT"]
-	noMatch := collection.Maps["NOMATCH"]
 	audit := collection.Maps["AUDIT"]
 	defer func() {
 		err = errors.Join(err,
 			settings.Put(uint32(0), encodeSettings(0, 0, fileID{}, false)),
-			clearObjectBank(objects, 1),
-			clearVerdictBank(verdicts, 1),
-			clearNoMatchBank(noMatch, 1),
+			writeBank(collection.Maps, 1, Table{}),
 			resetAudit(audit),
 		)
 	}()
+	seed := func(allow bool) error {
+		policy := Policy{Scopes: []ScopeInput{{Path: vault}}, DefaultAllow: true}
+		for _, list := range []RuleList{ListRead, ListWrite, ListExecute} {
+			policy.Rules = append(policy.Rules, RuleInput{List: list, Pattern: vault + "/**", Allow: allow})
+		}
+		table, _, err := Compile(policy)
+		if err != nil {
+			return err
+		}
+		return writeBank(collection.Maps, 1, table)
+	}
 
 	path := func(folder, name string) string { return filepath.Join(folder, name) }
 	type testCase struct {
@@ -78,10 +79,10 @@ func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string)
 		return errors.Join(failures...)
 	}
 
-	// Deny every covered target while allowing NOMATCH. This makes the in and
-	// out link/rename cases reach both dentry arguments instead of short-
+	// Deny everything in the vault while the default allows. This makes the in
+	// and out link/rename cases reach both dentry arguments instead of short-
 	// circuiting at an uncovered source.
-	if err := seedSelfTestTable(objects, verdicts, noMatch, id, VerdictDeny, VerdictAllow); err != nil {
+	if err := seed(false); err != nil {
 		return err
 	}
 	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{}, false)); err != nil {
@@ -124,7 +125,7 @@ func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string)
 
 	// With both tables allow, including NOMATCH, all ordinary and formerly
 	// Cordon-denied escapes must succeed.
-	if err := seedSelfTestTable(objects, verdicts, noMatch, id, VerdictAllow, VerdictAllow); err != nil {
+	if err := seed(true); err != nil {
 		return err
 	}
 	if err := settings.Put(uint32(0), encodeSettings(0, 1, fileID{}, false)); err != nil {
@@ -139,34 +140,6 @@ func selfTest(collection *ebpf.Collection, attached map[string]bool, dir string)
 		{"inode_rename", "rename out", func() error { return os.Rename(path(vault, "g"), path(open, "g-moved")) }},
 		{"inode_rename", "rename in", func() error { return os.Rename(path(open, "x"), path(vault, "x-moved")) }},
 	})
-}
-
-func seedSelfTestTable(objects, verdicts, noMatch *ebpf.Map, id fileID, target, fallback Verdict) error {
-	if err := clearObjectBank(objects, 1); err != nil {
-		return err
-	}
-	if err := clearVerdictBank(verdicts, 1); err != nil {
-		return err
-	}
-	if err := clearNoMatchBank(noMatch, 1); err != nil {
-		return err
-	}
-	if err := objects.Put(encodeObjectKey(1, id), uint32(0)); err != nil {
-		return err
-	}
-	for _, operation := range allOperations {
-		for _, kind := range allKinds {
-			if err := noMatch.Put(encodeNoMatchKey(1, operation, kind), uint32(fallback)); err != nil {
-				return err
-			}
-			for _, relation := range [...]Relation{RelationSelf, RelationChild, RelationDescendant} {
-				if err := verdicts.Put(encodeVerdictKey(1, 0, operation, relation, kind), uint32(target)); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
 }
 
 func auditTotal(audit *ebpf.Map, operation Operation) (uint64, error) {
