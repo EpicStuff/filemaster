@@ -51,6 +51,8 @@ type structuralLabeller struct {
 	// over learnedPaths; empty when nothing is learned.
 	fingerprints string
 	learnedPaths map[string]bool
+	// learningState is the last exe-only learning summary, for diagnostics.
+	learningState string
 
 	captureMu sync.Mutex
 	captured  map[int32]capturedIdentity
@@ -249,7 +251,9 @@ func (l *structuralLabeller) resolve(ctx context.Context, record bpflsm.Record) 
 	case record.Script.Ino != 0 && p.MatchingPath != "":
 		l.learn(record.Exe, record.Script, label, p.MatchingPath)
 	case record.Script.Ino == 0 && !tags && !fingerprinted:
-		if identity, _ := scanFingerprints(nil); !identity {
+		learning, _ := scanFingerprints(nil)
+		l.setLearningState(learning.summary())
+		if ok, _ := learning.learnable(p.Path); ok {
 			l.learn(record.Exe, bpflsm.ExecFile{}, label, p.Path)
 		}
 	}
@@ -447,27 +451,26 @@ func (l *structuralLabeller) capture(pid int32) (string, []string, bool) {
 
 var profileQueryDB = database.NewInterface(&database.Options{Local: true, Internal: true})
 
-// scanFingerprints reports whether any profile matches on cmdline or env,
-// and a digest of the fingerprints that can decide a learned executable's or
-// script's profile: every prefix, regex, cmdline and env fingerprint, plus the
-// equals fingerprints naming one of the learned paths. A cmdline or env
-// profile can claim any executable's process, so no executable is labelled by
-// its inode alone while one exists.
-func scanFingerprints(learned map[string]bool) (identity bool, digest string) {
+// scanFingerprints returns the exe-only learning rules every profile's
+// fingerprints allow (see execLearning), and a digest of the fingerprints that
+// can decide a learned executable's or script's profile: every prefix, regex,
+// cmdline and env fingerprint, plus the equals fingerprints naming one of the
+// learned paths.
+func scanFingerprints(learned map[string]bool) (learning execLearning, digest string) {
+	unreadable := execLearning{off: "the profiles could not be read"}
 	it, err := profileQueryDB.Query(query.New(profile.ProfilesDBPath))
 	if err != nil {
-		return true, ""
+		return unreadable, ""
 	}
 	var all []string
+	prints := make(map[string][]profile.Fingerprint)
 	for r := range it.Next {
 		p, err := profile.EnsureProfile(r)
 		if err != nil {
 			continue
 		}
+		prints[p.ScopedID()] = p.Fingerprints
 		for _, fp := range p.Fingerprints {
-			if fp.Type == profile.FingerprintTypeCmdlineID || fp.Type == profile.FingerprintTypeEnvID {
-				identity = true
-			}
 			if fp.Operation == profile.FingerprintOperationEqualsID && !learned[fp.Value] {
 				continue
 			}
@@ -475,10 +478,29 @@ func scanFingerprints(learned map[string]bool) (identity bool, digest string) {
 		}
 	}
 	if it.Err() != nil {
-		return true, ""
+		return unreadable, ""
 	}
 	sort.Strings(all)
-	return identity, strings.Join(all, "\n")
+	return newExecLearning(prints, defaultAliasDirs()), strings.Join(all, "\n")
+}
+
+func (l *structuralLabeller) setLearningState(state string) {
+	l.mu.Lock()
+	l.learningState = state
+	l.mu.Unlock()
+}
+
+// exeLearningState reports which executables are labelled by inode alone.
+func (l *structuralLabeller) exeLearningState() string {
+	l.mu.Lock()
+	state := l.learningState
+	l.mu.Unlock()
+	if state == "" {
+		learning, _ := scanFingerprints(nil)
+		state = learning.summary()
+		l.setLearningState(state)
+	}
+	return state
 }
 
 // forgetIfFingerprintsChanged drops every learned exec label when a
@@ -489,10 +511,12 @@ func (l *structuralLabeller) forgetIfFingerprintsChanged() {
 	learnedAt := l.fingerprints
 	paths := maps.Clone(l.learnedPaths)
 	l.mu.Unlock()
+	learning, digest := scanFingerprints(paths)
+	l.setLearningState(learning.summary())
 	if learnedAt == "" {
 		return
 	}
-	if _, digest := scanFingerprints(paths); digest != learnedAt {
+	if digest != learnedAt {
 		l.mu.Lock()
 		l.fingerprints = ""
 		l.learnedPaths = make(map[string]bool)

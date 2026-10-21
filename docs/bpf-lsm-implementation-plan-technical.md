@@ -459,7 +459,8 @@ below. `NOMATCH` is now keyed by `(bank, policy, operation, kind)`.
   denies plus every scope under a deny default), so structural ops deny with a
   counted reason (`label-pending` / `unlabelled`). The daemon learns the exe-only
   fast path only for non-interpreters without cmdline/env/tag fingerprints, so
-  distinct scripts under one interpreter never collapse onto one label.
+  distinct scripts under one interpreter never collapse onto one label. (Since
+  narrowed: see "Narrowed PENDING and the label wait" below.)
 - **Script-open path.** A minimal pre-decide hook in the fanotify open path
   (`DecisionPipeline.SetBeforeOpen`, invoked only for `OpOpen`) lets the labeller
   resolve a still-pending opener before the open is answered, so a script an
@@ -488,8 +489,9 @@ below. `NOMATCH` is now keyed by `(bank, policy, operation, kind)`.
   exe-only. Learned exec labels survive republishes and are dropped only when a
   fingerprint that could decide a learned path changes (a digest over prefix,
   regex, cmdline and env fingerprints plus the equals fingerprints naming learned
-  paths); exe-only learning stays off while any profile matches on cmdline or
-  env. Note that the daemon renames a profile to its fingerprint-derived ID.
+  paths); exe-only learning was off while any profile matched on cmdline or
+  env (narrowed since, below). Note that the daemon renames a profile to its
+  fingerprint-derived ID.
 - **Live evidence (real daemon, `cmds/bpflsm-live`).** The tool starts
   `filemaster-core`, creates profiles through the database websocket API,
   switches to enforce live, and checks unlinks by real processes in the watched
@@ -529,6 +531,133 @@ below. `NOMATCH` is now keyed by `(bank, policy, operation, kind)`.
   a fingerprint change event. argv-rewrite immunity comes from capturing argv at
   `sched_process_exec` before user code. The btrfs subvolume identity collision
   (risk 7) is deferred to M5; UI exposure of labels and the deny notice are M4.
+
+**As built in M3: narrowed PENDING and the label wait.**
+
+The measured M3 problem: any profile with a cmdline or env fingerprint turned
+exe-only learning off for every binary, so every native exec was pending and an
+immediate `rm`/`mv` in a watched scope was denied about half the time; without
+such profiles a never-seen binary's first execs were denied (0/50 above). Two
+changes fix it.
+
+- **Narrowed PENDING (`service/fileaccess/exec_learning.go`).** Exe-only learning
+  stays on for every native, non-interpreter executable that no fingerprint could
+  claim. For an untagged process, profile resolution depends only on its exe path
+  (fixed) and its command line and environment (variable), so: an **env**
+  fingerprint can match any process and turns learning off (diagnostics say so:
+  `Structural.Labelling.ExeLearning`); a **cmdline** fingerprint matches only
+  command lines starting with some argv[0] — the captured command line is argv
+  joined by single spaces, unquoted (`setCapture`, `splitNUL`) — so its literal
+  prefix is worked out (equals/prefix directly; regex via `regexp/syntax`: it must
+  be `\A`-anchored, literal runs, small classes, case folds and alternations
+  expand to at most 64 literals, and it counts as a whole command line only if
+  `$`-anchored). Every argv[0] up to a space in the literal is claimed exactly;
+  the rest as a prefix. A bare argv[0] claims executables of that base name, an
+  absolute one the file it resolves to, a relative one its base name; symlinks in
+  the standard command directories and the daemon's `PATH` that a claimed name
+  resolves through are followed (`vi` → `vim`). An unanchored or relative-path
+  prefix (e.g. `/a2\.py `, `.*foo`, `^\./r`) turns learning off. **Prefix and regex
+  path** fingerprints are evaluated directly on the exe path (exact, so no
+  literal-prefix approximation is needed) and keep matching paths pending, as do
+  the tag-claimable paths (interpreters, `/app/`, `/snap/`, `/tmp/.mount_*`).
+  Unknown executables stay pending in the kernel as before; the daemon simply
+  refuses to learn claimed ones. Exactness is checked by
+  `TestExecLearningDifferential`: 3,000 generated fingerprint sets × 8 exes
+  (with symlink aliases) × argv[0] forms (path, base name, `./name`, alias path
+  and name) × argument tails × environments; whenever learning is allowed,
+  `MatchFingerprints` resolution (highest score, first of equals) gives one
+  profile for every combination — 9,531 learnable / 14,469 refused pairs, about
+  1.09 M agreeing resolutions; it fails when the alias walk or the absolute-path
+  claim is removed. **Caveat (as upstream Portmaster):** argv[0] is caller-chosen,
+  so a disguised argv[0] (or a symlink outside the searched directories, or an
+  invocation through a relative directory whose name matches a cmdline prefix)
+  can make the daemon resolve a cmdline profile the exe's label does not follow;
+  for a learned exe the kernel label follows the exe. Likewise a caller-set
+  `APPIMAGE`/`APPDIR`/`SNAP` environment that tags an ordinary binary is not
+  anticipated.
+- **Bounded label wait (`label.rs` `wait_resolved`, `decide.rs` `with_wait`,
+  `bpflsm/wait.go`).** A structural hook first decides as before. If that denies
+  because the caller is pending (`label-pending`), it spins once in a `bpf_loop`
+  polling `PROCS`/`RESOLVED` with a `bpf_ktime_get_ns` deadline (`WAIT_CAP_NS` =
+  50 ms), then decides the **whole** operation again with the resolved label —
+  again, because the daemon may have flipped the active bank to publish the new
+  label's policy, which also invalidates the first walks. A timeout denies (fail
+  closed) under its own reason, `label-wait-timeout`. Rename and link wait at
+  most once. Audit mode waits too, so it previews exactly what enforce does. The
+  wait is skipped (immediate deny) when: the `WAIT` map's `enabled` is off; the
+  daemon's heartbeat (CLOCK_MONOTONIC, rewritten every second with the online-CPU
+  cap) is older than 3 s; or `WAITERS` (a global atomic count: add, read back,
+  read first and skip if full, else fetch-add and undo if the count before the
+  add was full — a spinner's add always saw fewer than the cap, so at most the
+  cap spin, while the count can pass it for the instant before an undo; no path
+  leaks a claim, verified back at 0 after every burst) already holds
+  `max_waiters` = online CPUs − 1 (0 on one CPU). (A compare-and-swap would keep
+  the count itself under the cap, but bpf-linker 0.11 cannot read the bitcode
+  rustc emits for `cmpxchg`: "Invalid br record".) Counters: `LABEL_COUNTERS`
+  slots 3–8 (waits, resolved, timed out, skipped stale, skipped busy, waited ns).
+  **Self-test, per generation:** the daemon makes itself a pending caller in a
+  private tmpfs, unlinks a pending-denied file on one thread and resolves its
+  label 5 ms later from a second thread pinned to the **same CPU**; only a
+  preemptible spinner lets the resolver run. Pass → wait enabled; a timed-out
+  wait → off with the diagnostics warning `bpf-lsm-label-wait-unavailable`
+  ("Label wait unavailable: kernel preemption mode does not allow it").
+  **Config:** `fileaccess/structuralLabelWait` (bool, default on), applied live
+  through the heartbeat; diagnostics show `Labelling.Wait.State`: `on`,
+  `off: disabled by configuration`, `off: kernel preemption mode does not allow
+  it`, `off: only one CPU is online`.
+- **Verifier budget.** Deciding twice in-line tripled `inode_link` to 814 k
+  instructions on 7.1. The matcher run is now a **global** BPF function
+  (`filemaster_evaluate`, BTF linkage global), which the verifier checks once per
+  program instead of once per call, so the doubled decisions cost less than M3:
+  Arch 7.1 — unlink 19 004, rmdir 18 700, mkdir 17 977, link 116 975, rename
+  79 302; Debian 6.12 — unlink 24 848, rmdir 24 331, mkdir 22 967, link 182 370,
+  rename 131 585 (labelling programs unchanged; stacks unchanged at 272 B for the
+  largest frame). Everything is far under the 1,000,000 limit.
+- **Measured (real daemon, `bpflsm-live` wait matrix, 50 runs each, 8 vCPUs).**
+  Arch 7.1 (preempt full), btrfs and tmpfs scopes: (a) no cmdline/env profile —
+  system `rm`/`mv` 50/50 allowed, 0 waits; fresh copies 47–50/50 allowed, wait
+  median 25–31 ms, p90 32–37 ms (a never-seen exe is a new profile whose label
+  publish recompiles the table); (b) an unrelated `^python3 -c` profile — system
+  `rm`/`mv` 50/50, **0 waits**; fresh copies 44–50/50 (timeouts at the 50 ms cap,
+  median 36–41 ms); (c) a cmdline profile for `rm` (`^rm --interactive=never `,
+  deny) beside the `rm` path profile (allow) — `rm -f` 50/50 allowed and
+  `rm --interactive=never` 0/50, every run waiting, median 3.4–4.9 ms, p90
+  5.0–6.9 ms, max ≤ 9.2 ms; `mv` unclaimed, 0 waits; (d) an env profile — all
+  pending, `rm`/`mv` 50/50 after waits (median 3–5 ms), `FM_LIVE_DENY=1 rm` 0/50;
+  a burst of 32 pending `rm` at once: peak waiters 7 = cap, 14–15 waited (2
+  resolved, the rest timed out: the single resolver goroutine with one free CPU
+  cannot label 32 processes in 50 ms), 17–18 skipped busy, all done in ~120 ms,
+  `WAITERS` back to 0; (e) wait off by config — (c)/(d) deny at once, 0 waits;
+  back on — 47–50/50 (up to 3 timeouts); (f) daemon SIGKILLed — for the first ~3 s each
+  pending `rm` waits out the cap and is denied; after the heartbeat goes stale
+  every one is denied at once (rm runs 2.6–3.0 ms median), counted as skipped
+  stale. The M3 PENDING-window case "first exec of a new native binary" went from
+  0/50 to 50/50 allowed. **Debian 6.12 default (`preempt=voluntary`):** the
+  self-test reports `off: kernel preemption mode does not allow it` and the
+  `bpf-lsm-label-wait-unavailable` warning is raised; narrowed PENDING still
+  helps — (a)/(b) system `rm`/`mv` 50/50 allowed with no wait, (c) `mv` 50/50 —
+  while every still-pending case denies as in M3 (fresh copies, (c) `rm`, (d)
+  0/50). With `preempt=full` set through `/sys/kernel/debug/sched/preempt`, a
+  new generation's self-test passes and the matrix matches Arch: (c) 50/50 and
+  0/50 with waits median 3.9 ms, (d) median 3–4 ms, burst peak 7 = cap, (e) and
+  (f) as on Arch. Both kernels pass the full regression set again: the exit
+  tests, map-full, lifecycle, handover, the differential (8 × 505, 0 mismatches),
+  live enforce/off and the M3 live test on btrfs and tmpfs.
+- **Known gaps.** The 50 ms cap can be outlasted by a never-seen executable's
+  first resolution (profile creation plus table publish) and by bursts larger
+  than the resolver's throughput; both fail closed. The spinner holds the
+  parent directory's `i_rwsem`; inferred from the lock order, not observed, a
+  daemon resolution that must look up a path in that same directory (e.g. a
+  fresh binary deleting next to itself) would block until the cap. Exe-only learning remains unsound against disguised argv[0]
+  (caveat above). **Pre-existing, found here:** the structural programs keep
+  walk/matcher state in per-CPU maps (`SCRATCH`, `EVAL`) on the assumption that
+  they are not preemptible, but LSM trampolines only `migrate_disable()` under
+  `rcu_read_lock()`, so with `PREEMPT_RCU` (Arch's default `preempt=full`, which
+  the wait self-test proves) a hook can be preempted mid-evaluation and another
+  task's hook on the same CPU can overwrite that state. The label wait does not
+  widen this (it holds no per-CPU state across the spin and re-walks afterwards),
+  but the race needs an ownership check (e.g. a per-CPU sequence verified after
+  each evaluation, deny or retry on change) — M5.
 
 ### 2.7 Events, feedback and status
 

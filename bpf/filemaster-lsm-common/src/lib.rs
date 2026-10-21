@@ -38,7 +38,7 @@ pub use decision_maps::{
 };
 pub use label_maps::{
     ExecFile, ExecLabelKey, PolicyListKey, ProcValue, RecordBuf, RecordHeader, Resolved, RuleList,
-    Settings,
+    Settings, WaitSettings,
 };
 pub use ids::{
     Bank, CgroupId, Decision, Dev, Ino, Nanos, Opens, Pid, Suppressed, SuppressedTotal, Uid,

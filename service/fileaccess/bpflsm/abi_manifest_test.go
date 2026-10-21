@@ -77,6 +77,7 @@ func TestABImanifestMatchesGoLayout(t *testing.T) {
 		{"Resolved", resolvedSize, map[string]int{"start": 0, "seq": 8, "label": 16}},
 		{"PolicyListKey", policyListKey, map[string]int{"bank": 0, "policy": 4, "context": 8}},
 		{"RuleList", ruleListSize, map[string]int{"rule_count": 0, "flags": 4, "rules": 8}},
+		{"WaitSettings", waitSettingsSize, map[string]int{"heartbeat": 0, "max_waiters": 8, "enabled": 12}},
 		{"RecordHeader", recordHeader, map[string]int{
 			"kind": 0, "tgid": 4, "start": 8, "seq": 16, "exe": 24, "script": 48, "parent_seq": 72,
 			"parent_tgid": 80, "flags": 84, "args_len": 88, "env_len": 92, "path_len": 96,
@@ -105,7 +106,7 @@ func TestABImanifestMatchesGoLayout(t *testing.T) {
 		"MAX_LABELS": maxLabels, "MAX_POLICIES": maxPolicies, "MAX_RULELISTS": maxRuleLists, "MAX_POLICY_LISTS": maxPolicyLists,
 		"MAX_PROCS": maxProcs, "MAX_EXEC_LABELS": maxExecLabels, "EXEC_SCRATCH_ENTRIES": execScratchSize,
 		"RECORDS_SIZE": recordsSize, "RECORD_BUF_SIZE": recordBufSize, "ARGS_MAX": argsMax, "ENV_MAX": envMax,
-		"LABEL_COUNTERS": labelCounters,
+		"LABEL_COUNTERS": labelCounters, "WAIT_CAP_NS": int(waitCap), "WAIT_STALE_NS": int(waitStale),
 	} {
 		if got, ok := manifest.Constants[name]; !ok || got != want {
 			t.Errorf("constant %s = %d (present %v), Go expects %d", name, got, ok, want)

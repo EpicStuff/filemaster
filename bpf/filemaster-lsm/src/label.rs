@@ -7,22 +7,24 @@
 //! disabled, so the per-CPU record buffer is never shared by two programs.
 
 use core::ffi::c_void;
+use core::intrinsics::{AtomicOrdering, atomic_xsub};
 
 use aya_ebpf::helpers::bpf_ktime_get_ns;
-use aya_ebpf::helpers::r#gen::{bpf_probe_read_kernel_str, bpf_probe_read_user};
+use aya_ebpf::helpers::r#gen::{bpf_loop, bpf_probe_read_kernel_str, bpf_probe_read_user};
 use filemaster_lsm_common::decision_maps::{REASON_PENDING, REASON_UNLABELLED, REASON_UNREADABLE};
 use filemaster_lsm_common::label_maps::{
 	ARGS_MASK, ARGS_MAX, ENV_MASK, ENV_MAX, PATH_MASK, PATH_MAX_RECORD, LABEL_COUNTER_FULL, LABEL_COUNTER_RECORD_DROP,
-	LABEL_COUNTER_UNREADABLE, LABEL_MASK, LABEL_PENDING, LABEL_UNIDENTIFIED, MAX_LABELS,
+	LABEL_COUNTER_UNREADABLE, LABEL_COUNTER_WAIT, LABEL_COUNTER_WAIT_BUSY, LABEL_COUNTER_WAIT_NS,
+	LABEL_COUNTER_WAIT_RESOLVED, LABEL_COUNTER_WAIT_STALE, LABEL_COUNTER_WAIT_TIMEOUT, LABEL_MASK, LABEL_PENDING, LABEL_UNIDENTIFIED, MAX_LABELS,
 	POLICY_PENDING, RECORD_ARGS_TRUNCATED, RECORD_ENV_TRUNCATED, RECORD_EXEC, RECORD_FORK,
-	RECORD_SIZE_MASK, SETTINGS_LABELLING,
+	RECORD_SIZE_MASK, SETTINGS_LABELLING, WAIT_CAP_NS, WAIT_LOOPS, WAIT_STALE_NS,
 };
 use filemaster_lsm_common::{ExecFile, ExecLabelKey, ProcValue, RecordHeader, Settings};
 
 use crate::kernel::{self, Binprm, Mm, Task};
 use crate::maps::{
 	EXEC_LABELS, EXEC_SCRATCH, LABEL_COUNTERS, LABEL_POLICY, PROCS, RECORDS, RECORD_BUF, RESOLVED,
-	SETTINGS,
+	SETTINGS, WAIT, WAITERS,
 };
 
 /// No labelling reason to count.
@@ -30,10 +32,20 @@ pub const NO_REASON: u32 = u32::MAX;
 const NO_FILE: ExecFile = ExecFile { dev: 0, ino: 0, generation: 0, _pad: 0 };
 const HEADER: u32 = core::mem::size_of::<RecordHeader>() as u32;
 
+/// A structural hook's caller: its policy in the active bank, the labelling
+/// reason to count if that policy denies, and its thread-group identity.
+#[derive(Clone, Copy)]
+pub struct Caller {
+	pub policy: u32,
+	pub reason: u32,
+	pub tgid: u32,
+	pub start: u64,
+}
+
 /// The caller's policy in `bank`, and the reason to count if it denies.
 /// `None` is the daemon's own bypass or an unreadable caller (fail open).
 #[inline(always)]
-pub fn caller_policy(settings: &Settings, bank: u32, hook: u32) -> Option<(u32, u32)> {
+pub fn caller_policy(settings: &Settings, bank: u32, hook: u32) -> Option<Caller> {
 	let task = Task::current();
 	let tgid = kernel::current_pid().0;
 	let Some(start) = task.group_leader().and_then(|leader| leader.start_boottime()) else {
@@ -50,7 +62,7 @@ pub fn caller_policy(settings: &Settings, bank: u32, hook: u32) -> Option<(u32, 
 			Some(None) => LABEL_UNIDENTIFIED,
 			Some(Some(_)) => match effective(tgid, start) {
 				Some((label, _)) => label,
-				None => return Some((POLICY_PENDING, REASON_UNLABELLED)),
+				None => return Some(Caller { policy: POLICY_PENDING, reason: REASON_UNLABELLED, tgid, start }),
 			},
 			None => {
 				crate::decide::count(REASON_UNREADABLE, hook);
@@ -58,16 +70,103 @@ pub fn caller_policy(settings: &Settings, bank: u32, hook: u32) -> Option<(u32, 
 			}
 		}
 	};
+	let (policy, reason) = label_policy(bank, label);
+	Some(Caller { policy, reason, tgid, start })
+}
+
+#[inline(always)]
+fn label_policy(bank: u32, label: u32) -> (u32, u32) {
 	if label == LABEL_PENDING {
-		return Some((POLICY_PENDING, REASON_PENDING));
+		return (POLICY_PENDING, REASON_PENDING);
 	}
 	if label > LABEL_MASK {
-		return Some((POLICY_PENDING, REASON_UNLABELLED));
+		return (POLICY_PENDING, REASON_UNLABELLED);
 	}
 	match LABEL_POLICY.get(bank * MAX_LABELS as u32 + (label & LABEL_MASK)).copied() {
-		Some(policy) if policy != POLICY_PENDING => Some((policy, NO_REASON)),
-		_ => Some((POLICY_PENDING, REASON_UNLABELLED)),
+		Some(policy) if policy != POLICY_PENDING => (policy, NO_REASON),
+		_ => (POLICY_PENDING, REASON_UNLABELLED),
 	}
+}
+
+#[repr(C)]
+struct Wait {
+	deadline: u64,
+	start: u64,
+	tgid: u32,
+	resolved: u32,
+}
+
+/// `wait_resolved` outcomes.
+pub const WAIT_SKIPPED: u32 = 0;
+pub const WAIT_RESOLVED: u32 = 1;
+pub const WAIT_TIMED_OUT: u32 = 2;
+
+/// Spins until the daemon resolves the pending caller `(tgid, start)` or
+/// `WAIT_CAP_NS` passes. It never waits while the wait is off, the daemon's
+/// heartbeat is stale, or `max_waiters` callers are already spinning.
+pub fn wait_resolved(tgid: u32, start: u64) -> u32 {
+	let Some(control) = WAIT.get(0).copied() else {
+		return WAIT_SKIPPED;
+	};
+	if control.enabled == 0 {
+		return WAIT_SKIPPED;
+	}
+	let begin = unsafe { bpf_ktime_get_ns() };
+	if begin.wrapping_sub(control.heartbeat) > WAIT_STALE_NS {
+		increment(LABEL_COUNTER_WAIT_STALE);
+		return WAIT_SKIPPED;
+	}
+	let Some(waiters) = WAITERS.get_ptr_mut(0) else {
+		return WAIT_SKIPPED;
+	};
+	// Claim a waiter slot: a full count skips at once; otherwise add, and
+	// undo if the count before the add was already full. A spinner's add
+	// always saw fewer than `max_waiters` claims, so at most that many spin;
+	// the count itself can pass the cap for the instant before an undo. The
+	// add is a wrapping subtract of u64::MAX: LLVM's generic BPF CPU rejects
+	// using an atomic add's result but lowers a subtract to a fetching add.
+	// SAFETY: an aligned u64 in a map value that outlives the program.
+	let full = unsafe {
+		core::ptr::read_volatile(waiters) >= control.max_waiters as u64
+			|| atomic_xsub::<u64, u64, { AtomicOrdering::SeqCst }>(waiters, u64::MAX) >= control.max_waiters as u64
+				&& {
+					atomic_xsub::<u64, u64, { AtomicOrdering::SeqCst }>(waiters, 1);
+					true
+				}
+	};
+	if full {
+		increment(LABEL_COUNTER_WAIT_BUSY);
+		return WAIT_SKIPPED;
+	}
+	increment(LABEL_COUNTER_WAIT);
+	let mut wait = Wait { deadline: begin + WAIT_CAP_NS, start, tgid, resolved: 0 };
+	// SAFETY: the callback only touches `wait`, which outlives the call.
+	unsafe {
+		bpf_loop(WAIT_LOOPS, wait_step as *mut c_void, &mut wait as *mut Wait as *mut c_void, 0);
+	}
+	// SAFETY: as above.
+	unsafe { atomic_xsub::<u64, u64, { AtomicOrdering::SeqCst }>(waiters, 1) };
+	add(LABEL_COUNTER_WAIT_NS, unsafe { bpf_ktime_get_ns() }.wrapping_sub(begin));
+	if wait.resolved != 0 {
+		increment(LABEL_COUNTER_WAIT_RESOLVED);
+		WAIT_RESOLVED
+	} else {
+		increment(LABEL_COUNTER_WAIT_TIMEOUT);
+		WAIT_TIMED_OUT
+	}
+}
+
+#[inline(never)]
+unsafe extern "C" fn wait_step(_index: u64, ctx: *mut c_void) -> i64 {
+	// SAFETY: `wait_resolved` passes its own stack state.
+	let wait = unsafe { &mut *(ctx as *mut Wait) };
+	if let Some((label, _)) = effective(wait.tgid, wait.start) {
+		if label != LABEL_PENDING {
+			wait.resolved = 1;
+			return 1;
+		}
+	}
+	if unsafe { bpf_ktime_get_ns() } >= wait.deadline { 1 } else { 0 }
 }
 
 /// The label of `tgid` whose leader started at `start`, with its record's
@@ -352,9 +451,14 @@ fn put_file(to: &mut ExecFile, from: ExecFile) {
 
 #[inline(always)]
 fn increment(index: u32) {
+	add(index, 1);
+}
+
+#[inline(always)]
+fn add(index: u32, value: u64) {
 	let Some(counter) = LABEL_COUNTERS.get_ptr_mut(index) else {
 		return;
 	};
 	// SAFETY: this CPU's slot of a per-CPU array.
-	unsafe { *counter = (*counter).wrapping_add(1) };
+	unsafe { *counter = (*counter).wrapping_add(value) };
 }

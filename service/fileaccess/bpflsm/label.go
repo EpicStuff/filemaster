@@ -87,6 +87,10 @@ type LabelStatus struct {
 	MapFull     uint64
 	RecordDrops uint64
 	Unreadable  uint64
+	Wait        LabelWait
+	// ExeLearning is the daemon's exe-only label learning state, set by the
+	// labeller: which executables are labelled by inode alone, or why none are.
+	ExeLearning string
 }
 
 type daemonIdentity struct {

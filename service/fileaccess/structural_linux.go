@@ -38,6 +38,7 @@ func (fa *FileAccess) startStructuralEnforcement() {
 	apply = func() {
 		structuralApplyMu.Lock()
 		defer structuralApplyMu.Unlock()
+		fa.structural.SetLabelWait(cfgOptionLabelWait())
 		mode := bpflsm.Mode(cfgOptionStructural())
 		if mode == bpflsm.ModeOff {
 			if err := fa.structural.SetMode(mode); err != nil {

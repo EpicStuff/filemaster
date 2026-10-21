@@ -13,7 +13,7 @@ use filemaster_lsm_common::label_maps::{
 };
 use filemaster_lsm_common::{
 	Arena, Chunk, Context, ExecFile, ExecLabelKey, ObjectKey, ObjectValue, Pattern, PolicyListKey,
-	ProcValue, Range, RecordBuf, Resolved, RuleList, Scratch, Settings, Token,
+	ProcValue, Range, RecordBuf, Resolved, RuleList, Scratch, Settings, Token, WaitSettings,
 };
 
 use crate::matcher::EvalState;
@@ -79,3 +79,9 @@ pub static RECORDS: RingBuf = RingBuf::with_byte_size(RECORDS_SIZE as u32, 0);
 pub static RECORD_BUF: PerCpuArray<RecordBuf> = PerCpuArray::with_max_entries(1, 0);
 #[map]
 pub static LABEL_COUNTERS: PerCpuArray<u64> = PerCpuArray::with_max_entries(LABEL_COUNTER_SLOTS as u32, 0);
+/// The daemon's label-wait switch, cap and heartbeat.
+#[map]
+pub static WAIT: Array<WaitSettings> = Array::with_max_entries(1, 0);
+/// Callers waiting for their label right now, across CPUs (atomic).
+#[map]
+pub static WAITERS: Array<u64> = Array::with_max_entries(1, 0);

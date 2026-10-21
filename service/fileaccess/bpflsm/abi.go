@@ -28,7 +28,7 @@ const (
 	maxString     = 4095
 	auditSlots    = 5
 	hookCount     = 5
-	reasonCount   = 8
+	reasonCount   = 9
 
 	maxLabels       = 16384
 	maxPolicies     = 1024
@@ -41,7 +41,7 @@ const (
 	recordBufSize   = 32768
 	argsMax         = 8191
 	envMax          = 16383
-	labelCounters   = 3
+	labelCounters   = 9
 	nomatchEntries  = numBanks * maxPolicies * 10
 
 	labelUnidentified = 0
@@ -56,26 +56,27 @@ const (
 	recordArgsTruncated = 1
 	recordEnvTruncated  = 2
 
-	settingsSize    = 32
-	objectKeySize   = 24
-	objectValueSize = 8
-	scopeRefSize    = 12
-	ruleRefSize     = 4
-	contextSize     = 24 + contextScopes*scopeRefSize
-	ruleListSize    = 8 + contextRules*ruleRefSize
-	policyListKey   = 12
-	execFileSize    = 24
-	execLabelKey    = 2 * execFileSize
-	procValueSize   = 24
-	resolvedSize    = 24
-	recordHeader    = 104
-	patternSize     = 20
-	chunkSize       = 12
-	tokenSize       = 12
-	rangeSize       = 8
-	arenaValueSize  = arenaSize + 4096
-	scratchSize     = 16384 + 4096
-	offsetsSize     = 112
+	settingsSize     = 32
+	waitSettingsSize = 16
+	objectKeySize    = 24
+	objectValueSize  = 8
+	scopeRefSize     = 12
+	ruleRefSize      = 4
+	contextSize      = 24 + contextScopes*scopeRefSize
+	ruleListSize     = 8 + contextRules*ruleRefSize
+	policyListKey    = 12
+	execFileSize     = 24
+	execLabelKey     = 2 * execFileSize
+	procValueSize    = 24
+	resolvedSize     = 24
+	recordHeader     = 104
+	patternSize      = 20
+	chunkSize        = 12
+	tokenSize        = 12
+	rangeSize        = 8
+	arenaValueSize   = arenaSize + 4096
+	scratchSize      = 16384 + 4096
+	offsetsSize      = 112
 
 	contextOverflow = 1
 	ruleAllow       = 1
@@ -88,7 +89,8 @@ const (
 
 var policyMaps = []string{
 	"SETTINGS", "OBJECTS", "CONTEXTS", "PATTERNS", "CHUNKS", "TOKENS", "RANGES", "ARENA", "NOMATCH", "AUDIT", "COUNTERS",
-	"POLICY_LISTS", "RULELISTS", "LABEL_POLICY", "PROCS", "RESOLVED", "EXEC_LABELS", "LABEL_COUNTERS",
+	"POLICY_LISTS", "RULELISTS", "LABEL_POLICY", "PROCS", "RESOLVED", "EXEC_LABELS", "LABEL_COUNTERS", "WAIT",
+	"WAITERS",
 }
 
 func checkMapLayout(spec *ebpf.CollectionSpec) error {
@@ -116,6 +118,8 @@ func checkMapLayout(spec *ebpf.CollectionSpec) error {
 		"RECORDS":        {0, 0, recordsSize},
 		"RECORD_BUF":     {4, recordBufSize, 1},
 		"LABEL_COUNTERS": {4, 8, labelCounters},
+		"WAIT":           {4, waitSettingsSize, 1},
+		"WAITERS":        {4, 8, 1},
 	} {
 		m, ok := spec.Maps[name]
 		if !ok {
@@ -185,6 +189,17 @@ func encodeSettings(s publishedSettings) []byte {
 	}
 	if s.labelling {
 		binary.LittleEndian.PutUint32(b[24:], settingsLabelling)
+	}
+	return b
+}
+
+// WaitSettings: heartbeat@0, max waiters@8, enabled@12.
+func encodeWaitSettings(heartbeat uint64, maxWaiters uint32, enabled bool) []byte {
+	b := make([]byte, waitSettingsSize)
+	binary.LittleEndian.PutUint64(b[0:], heartbeat)
+	binary.LittleEndian.PutUint32(b[8:], maxWaiters)
+	if enabled {
+		binary.LittleEndian.PutUint32(b[12:], 1)
 	}
 	return b
 }

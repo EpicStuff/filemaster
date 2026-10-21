@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -100,11 +101,12 @@ const (
 	ReasonBudget           = "evaluation-budget"
 	ReasonPending          = "label-pending"
 	ReasonUnlabelled       = "unlabelled"
+	ReasonWaitTimeout      = "label-wait-timeout"
 )
 
 var undecidedReasons = [reasonCount]string{
 	ReasonUnreadable, ReasonDepth, ReasonPathTooLong, ReasonUnregisteredRoot, ReasonContextOverflow, ReasonBudget,
-	ReasonPending, ReasonUnlabelled,
+	ReasonPending, ReasonUnlabelled, ReasonWaitTimeout,
 }
 
 // Enforcer owns the loaded BPF LSM object and its pinned generations.
@@ -128,6 +130,10 @@ type Enforcer struct {
 	status            Status
 	settings          publishedSettings
 	table             Table
+	waitConfigured    atomic.Bool
+	waitKick          chan struct{}
+	heartbeatStop     chan struct{}
+	heartbeatDone     chan struct{}
 }
 
 type publishedSettings struct {
@@ -180,6 +186,8 @@ func NewEnforcerWithOptions(options Options) *Enforcer {
 	e.labelling = options.Labelling
 	e.maxProcs = options.MaxProcs
 	e.onRecord = options.OnRecord
+	e.waitConfigured.Store(true)
+	e.waitKick = make(chan struct{}, 1)
 	return e
 }
 
@@ -207,6 +215,13 @@ func (e *Enforcer) Status() Status {
 		status.Labelling.MapFull, status.Labelling.RecordDrops, status.Labelling.Unreadable = full, drops, unreadable
 	} else if e.collection != nil {
 		status.Error = joinStatusError(status.Error, "read labelling counters: "+err.Error())
+	}
+	wait := &status.Labelling.Wait
+	wait.Configured = e.waitConfigured.Load()
+	wait.MaxWaiters = maxWaiters()
+	wait.State = labelWaitState(wait.Configured, wait.SelfTest, wait.MaxWaiters)
+	if err := labelWaitCounters(e.collection, wait); err != nil {
+		status.Error = joinStatusError(status.Error, "read label-wait counters: "+err.Error())
 	}
 	return status
 }
@@ -313,6 +328,11 @@ func (e *Enforcer) Close() {
 }
 
 func (e *Enforcer) release() {
+	if e.heartbeatStop != nil {
+		close(e.heartbeatStop)
+		<-e.heartbeatDone
+		e.heartbeatStop, e.heartbeatDone = nil, nil
+	}
 	if e.records != nil {
 		_ = e.records.Close()
 		<-e.recordsDone
@@ -412,6 +432,7 @@ func (e *Enforcer) start(mode Mode, table Table) Status {
 		if err := labelSelfTest(collection); err != nil {
 			return fail("BPF LSM labelling self-test failed, so the new programs were detached: %v", err)
 		}
+		status.Labelling.Wait.SelfTest = labelWaitSelfTest(collection, e.selfTestDir)
 	}
 
 	// The daemon's own structural operations bypass enforcement. The record
@@ -463,6 +484,10 @@ func (e *Enforcer) start(mode Mode, table Table) Status {
 			e.recordsDone = make(chan struct{})
 			go readRecords(reader, e.onRecord, e.recordsDone)
 		}
+	}
+	if e.labelling {
+		e.heartbeatStop, e.heartbeatDone = make(chan struct{}), make(chan struct{})
+		go e.heartbeat(collection.Maps["WAIT"], status.Labelling.Wait.SelfTest, e.heartbeatStop, e.heartbeatDone)
 	}
 	status.State = StateActive
 	return status

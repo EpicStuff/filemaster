@@ -18,6 +18,8 @@ pub const MAP_POLICY_LISTS: &str = "POLICY_LISTS";
 pub const MAP_RULELISTS: &str = "RULELISTS";
 pub const MAP_RECORDS: &str = "RECORDS";
 pub const MAP_LABEL_COUNTERS: &str = "LABEL_COUNTERS";
+pub const MAP_WAIT: &str = "WAIT";
+pub const MAP_WAITERS: &str = "WAITERS";
 
 /// Labels per daemon lifetime; label 0 is the unidentified profile.
 pub const MAX_LABELS: usize = 16384;
@@ -68,7 +70,24 @@ pub const RECORD_SIZE_MASK: u32 = 0x7FFF;
 pub const LABEL_COUNTER_FULL: u32 = 0;
 pub const LABEL_COUNTER_RECORD_DROP: u32 = 1;
 pub const LABEL_COUNTER_UNREADABLE: u32 = 2;
-pub const LABEL_COUNTERS: usize = 3;
+/// Label waits started, and how each ended: resolved, timed out.
+pub const LABEL_COUNTER_WAIT: u32 = 3;
+pub const LABEL_COUNTER_WAIT_RESOLVED: u32 = 4;
+pub const LABEL_COUNTER_WAIT_TIMEOUT: u32 = 5;
+/// Waits skipped because the daemon's heartbeat is stale, or because
+/// `max_waiters` callers were already waiting.
+pub const LABEL_COUNTER_WAIT_STALE: u32 = 6;
+pub const LABEL_COUNTER_WAIT_BUSY: u32 = 7;
+/// Nanoseconds spent waiting, summed.
+pub const LABEL_COUNTER_WAIT_NS: u32 = 8;
+pub const LABEL_COUNTERS: usize = 9;
+
+/// A pending caller in a covered scope waits at most this long for its label.
+pub const WAIT_CAP_NS: u64 = 50_000_000;
+/// A heartbeat older than this means the daemon is gone, so nothing waits.
+pub const WAIT_STALE_NS: u64 = 3_000_000_000;
+/// The wait loop's iteration bound; the deadline ends it far sooner.
+pub const WAIT_LOOPS: u32 = 1 << 23;
 
 pub const NOMATCH_ENTRIES: usize = NUM_BANKS * MAX_POLICIES * 10;
 
@@ -86,6 +105,18 @@ pub struct Settings {
 	pub audit: u32,
 	pub flags: u32,
 	pub _pad: u32,
+}
+
+/// The label-wait control record. `heartbeat` is the daemon's last
+/// `CLOCK_MONOTONIC` refresh (`bpf_ktime_get_ns`'s clock); `max_waiters` bounds
+/// the callers spinning at once; `enabled` is the configured and self-tested
+/// switch.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct WaitSettings {
+	pub heartbeat: u64,
+	pub max_waiters: u32,
+	pub enabled: u32,
 }
 
 /// A file identity with the inode generation, so a recycled inode number does
@@ -184,6 +215,7 @@ mod user {
 
 	// SAFETY: repr(C) integer aggregates with explicit padding.
 	unsafe impl aya::Pod for Settings {}
+	unsafe impl aya::Pod for WaitSettings {}
 	unsafe impl aya::Pod for ExecFile {}
 	unsafe impl aya::Pod for ExecLabelKey {}
 	unsafe impl aya::Pod for ProcValue {}

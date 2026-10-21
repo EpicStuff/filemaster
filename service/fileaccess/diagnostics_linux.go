@@ -114,6 +114,9 @@ func (fa *FileAccess) Diagnostics() FileAccessDiagnostics {
 	}
 	if fa.structural != nil {
 		diagnostics.Structural = fa.structural.Status()
+		if fa.labeller != nil {
+			diagnostics.Structural.Labelling.ExeLearning = fa.labeller.exeLearningState()
+		}
 	}
 	diagnostics.LifecycleState = diagnostics.Shutdown.State.String()
 	diagnostics.Warnings = diagnosticsWarnings(diagnostics)
@@ -284,9 +287,21 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 		bpflsm.ReasonBudget:           "The structural BPF LSM denied operations whose rule evaluation exceeded its step budget.",
 		bpflsm.ReasonPending:          "The structural BPF LSM denied operations by processes whose profile it had not resolved yet.",
 		bpflsm.ReasonUnlabelled:       "The structural BPF LSM denied operations by processes it could not label (the label map may be full).",
+		bpflsm.ReasonWaitTimeout:      "The structural BPF LSM denied operations by processes whose profile was not resolved within the label wait.",
 	} {
 		if counts := undecided[reason]; len(counts) > 0 {
 			appendWarning("bpf-lsm-undecided-"+reason, "warning", message, counts...)
+		}
+	}
+	if wait := structural.Labelling.Wait; structural.Labelling.Enabled {
+		cause := map[string]string{
+			bpflsm.WaitOffSelfTest:    "kernel preemption mode does not allow it",
+			bpflsm.WaitOffUnavailable: "its self-test could not run",
+		}[wait.State]
+		if cause != "" {
+			appendWarning("bpf-lsm-label-wait-unavailable", "warning",
+				"Label wait unavailable: "+cause+", so structural operations by processes whose profile is still being resolved are denied at once.",
+				"self-test="+wait.SelfTest)
 		}
 	}
 	if structural.Labelling.MapFull > 0 {

@@ -43,6 +43,7 @@ var (
 	dataDir   = flag.String("data", "/tmp/fm-live", "daemon data directory (created fresh)")
 	runs      = flag.Int("runs", 50, "PENDING-window samples per placement")
 	debug     = flag.Bool("debug", false, "print the daemon's process record for each case")
+	waitOnly  = flag.Bool("wait-only", false, "run only the label-wait matrix")
 	failures  int
 	daemon    *exec.Cmd
 	wsConn    *websocket.Conn
@@ -53,6 +54,11 @@ func main() {
 	flag.Parse()
 	defer cleanup()
 	must(setup())
+	if *waitOnly {
+		waitMatrix()
+		finish()
+		return
+	}
 
 	python := realPath(lookPath("python3"))
 	bash := realPath(lookPath("bash"))
@@ -163,6 +169,11 @@ func main() {
 			fmt.Printf("  undecided %s %s=%d\n", u.Reason, u.Hook, u.Count)
 		}
 	}
+	waitMatrix()
+	finish()
+}
+
+func finish() {
 	if failures > 0 {
 		fmt.Printf("FAIL: %d check(s) failed\n", failures)
 		cleanup()
@@ -402,12 +413,25 @@ func closeMaps(maps ...*ebpf.Map) {
 type diagnostics struct {
 	Structural struct {
 		State     string
-		Labelling struct{ Enabled bool }
+		Labelling struct {
+			Enabled     bool
+			ExeLearning string
+			Wait        struct {
+				State      string
+				SelfTest   string
+				MaxWaiters uint32
+			}
+		}
 		Undecided []struct {
 			Reason string
 			Hook   string
 			Count  uint64
 		}
+	}
+	Warnings []struct {
+		ID      string
+		Message string
+		Details string
 	}
 }
 

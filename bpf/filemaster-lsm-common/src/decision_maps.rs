@@ -80,7 +80,7 @@ pub const HOOK_RENAME: u32 = 4;
 
 /// Cases the kernel cannot decide exactly, and labelling denials. Each is
 /// counted per hook.
-pub const REASONS: usize = 8;
+pub const REASONS: usize = 9;
 /// A kernel value could not be read; the operation was allowed.
 pub const REASON_UNREADABLE: u32 = 0;
 /// The target is more than [`WALK_LIMIT`] levels below its object; denied.
@@ -97,6 +97,8 @@ pub const REASON_BUDGET: u32 = 5;
 pub const REASON_PENDING: u32 = 6;
 /// The caller had no label (label map full) or an unpublished one; denied.
 pub const REASON_UNLABELLED: u32 = 7;
+/// The caller was pending and its label wait ran out; the pending policy denied.
+pub const REASON_WAIT_TIMEOUT: u32 = 8;
 pub const COUNTERS: usize = REASONS * HOOKS;
 
 /// Rule lists. A rule reference carries the list its rule came from.
@@ -413,6 +415,15 @@ mod tests {
 				&[("rule_count", offset_of!(RuleList, rule_count)), ("flags", offset_of!(RuleList, flags)), ("rules", offset_of!(RuleList, rules))],
 			),
 			(
+				"WaitSettings",
+				size_of::<WaitSettings>(),
+				&[
+					("heartbeat", offset_of!(WaitSettings, heartbeat)),
+					("max_waiters", offset_of!(WaitSettings, max_waiters)),
+					("enabled", offset_of!(WaitSettings, enabled)),
+				],
+			),
+			(
 				"RecordHeader",
 				size_of::<RecordHeader>(),
 				&[
@@ -468,6 +479,8 @@ mod tests {
 			("ARGS_MAX", ARGS_MAX as usize),
 			("ENV_MAX", ENV_MAX as usize),
 			("LABEL_COUNTERS", LABEL_COUNTERS),
+			("WAIT_CAP_NS", WAIT_CAP_NS as usize),
+			("WAIT_STALE_NS", WAIT_STALE_NS as usize),
 		];
 		manifest.push_str(",\n  \"constants\": {");
 		for (index, (name, value)) in counts.iter().enumerate() {

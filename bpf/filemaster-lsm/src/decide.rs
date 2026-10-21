@@ -13,7 +13,7 @@ use aya_ebpf::helpers::r#gen::{bpf_loop, bpf_probe_read_kernel};
 use filemaster_lsm_common::decision_maps::{
 	EVAL_BUDGET, HOOKS, LIST_EXECUTE, LIST_READ, LIST_WRITE, MAX_REL, REASON_BUDGET,
 	REASON_CONTEXT_OVERFLOW, REASON_DEPTH, REASON_PATH_TOO_LONG, REASON_UNREADABLE,
-	REASON_UNREGISTERED_ROOT, REL_END, SCRATCH_MASK, WALK_LIMIT,
+	REASON_PENDING, REASON_UNREGISTERED_ROOT, REASON_WAIT_TIMEOUT, REL_END, SCRATCH_MASK, WALK_LIMIT,
 };
 use filemaster_lsm_common::label_maps::MAX_POLICIES;
 use filemaster_lsm_common::{Bank, DecisionOp, FileId, ObjectKey, TargetKind, Verdict};
@@ -61,6 +61,8 @@ pub struct DecisionResult {
 	/// The labelling reason to count when this result denies.
 	reason: u32,
 	hook: u32,
+	tgid: u32,
+	start: u64,
 }
 
 /// Lower a result to a verifier-bounded LSM return. `None` means an unreadable
@@ -89,32 +91,74 @@ pub fn clamped(result: Option<DecisionResult>) -> i32 {
 
 /// `inode_unlink` and `inode_rmdir`: Filemaster's `DecisionDelete`.
 pub fn remove(dentry: kernel::Dentry, folder: bool, hook: u32) -> Option<DecisionResult> {
-	let (bank, policy, reason, audit) = live_settings(hook)?;
-	let kind = if folder { TargetKind::FOLDER } else { positive_kind(dentry, hook)? };
-	let target = walk(bank, policy, 0, dentry, hook)?;
-	let mut decision = Decision::new(bank, policy, audit, reason, hook);
-	decision.side(&target, DecisionOp::DELETE, kind, hook);
-	Some(decision.finish())
+	with_wait(remove_once(dentry, folder, hook), || remove_once(dentry, folder, hook))
 }
 
 /// `inode_mkdir`: Filemaster's `DecisionCreate` on a negative dentry.
 pub fn mkdir(dentry: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	let (bank, policy, reason, audit) = live_settings(hook)?;
-	let target = walk(bank, policy, 0, dentry, hook)?;
-	let mut decision = Decision::new(bank, policy, audit, reason, hook);
-	decision.side(&target, DecisionOp::CREATE, TargetKind::FOLDER, hook);
-	Some(decision.finish())
+	with_wait(mkdir_once(dentry, hook), || mkdir_once(dentry, hook))
 }
 
 /// `inode_link`: `DecisionSnapshot.DecideHardLink`'s source read/write/execute
 /// order, then the destination delete/create order.
 pub fn hard_link(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	let (bank, policy, reason, audit) = live_settings(hook)?;
+	with_wait(hard_link_once(source, destination, hook), || hard_link_once(source, destination, hook))
+}
+
+/// `inode_rename`: `DecisionSnapshot.DecideRename`. `security_inode_rename`
+/// calls the hook a second time with the sides swapped for `RENAME_EXCHANGE`,
+/// so each call is one directed rename onto an existing destination.
+pub fn rename(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
+	with_wait(rename_once(source, destination, hook), || rename_once(source, destination, hook))
+}
+
+/// A pending caller's denial waits once for the daemon's label. After a
+/// resolved wait the whole operation is decided again, because the daemon may
+/// have flipped the active bank to publish the new label's policy; a timed-out
+/// wait keeps the denial under its own reason.
+#[inline(always)]
+fn with_wait(
+	first: Option<DecisionResult>,
+	again: impl FnOnce() -> Option<DecisionResult>,
+) -> Option<DecisionResult> {
+	let first = first?;
+	if first.verdict.allows() || first.reason != REASON_PENDING {
+		return Some(first);
+	}
+	match label::wait_resolved(first.tgid, first.start) {
+		label::WAIT_RESOLVED => again(),
+		label::WAIT_TIMED_OUT => Some(DecisionResult { reason: REASON_WAIT_TIMEOUT, ..first }),
+		_ => Some(first),
+	}
+}
+
+#[inline(always)]
+fn remove_once(dentry: kernel::Dentry, folder: bool, hook: u32) -> Option<DecisionResult> {
+	let (bank, caller, audit) = live_settings(hook)?;
+	let kind = if folder { TargetKind::FOLDER } else { positive_kind(dentry, hook)? };
+	let target = walk(bank, caller.policy, 0, dentry, hook)?;
+	let mut decision = Decision::new(bank, caller, audit, hook);
+	decision.side(&target, DecisionOp::DELETE, kind, hook);
+	Some(decision.finish())
+}
+
+#[inline(always)]
+fn mkdir_once(dentry: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
+	let (bank, caller, audit) = live_settings(hook)?;
+	let target = walk(bank, caller.policy, 0, dentry, hook)?;
+	let mut decision = Decision::new(bank, caller, audit, hook);
+	decision.side(&target, DecisionOp::CREATE, TargetKind::FOLDER, hook);
+	Some(decision.finish())
+}
+
+#[inline(always)]
+fn hard_link_once(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
+	let (bank, caller, audit) = live_settings(hook)?;
 	let kind = positive_kind(source, hook)?;
 	let destination_exists = exists(destination, hook)?;
-	let source_walk = walk(bank, policy, 0, source, hook)?;
-	let destination_walk = walk(bank, policy, 1, destination, hook)?;
-	let mut decision = Decision::new(bank, policy, audit, reason, hook);
+	let source_walk = walk(bank, caller.policy, 0, source, hook)?;
+	let destination_walk = walk(bank, caller.policy, 1, destination, hook)?;
+	let mut decision = Decision::new(bank, caller, audit, hook);
 	for operation in [DecisionOp::READ, DecisionOp::WRITE, DecisionOp::EXECUTE] {
 		if decision.side(&source_walk, operation, kind, hook) {
 			return Some(decision.finish());
@@ -127,17 +171,15 @@ pub fn hard_link(source: kernel::Dentry, destination: kernel::Dentry, hook: u32)
 	Some(decision.finish())
 }
 
-/// `inode_rename`: `DecisionSnapshot.DecideRename`. `security_inode_rename`
-/// calls the hook a second time with the sides swapped for `RENAME_EXCHANGE`,
-/// so each call is one directed rename onto an existing destination.
-pub fn rename(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	let (bank, policy, reason, audit) = live_settings(hook)?;
+#[inline(always)]
+fn rename_once(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
+	let (bank, caller, audit) = live_settings(hook)?;
 	let source_kind = positive_kind(source, hook)?;
 	let destination_exists = exists(destination, hook)?;
 	let destination_kind = if destination_exists { positive_kind(destination, hook)? } else { source_kind };
-	let source_walk = walk(bank, policy, 0, source, hook)?;
-	let destination_walk = walk(bank, policy, 1, destination, hook)?;
-	let mut decision = Decision::new(bank, policy, audit, reason, hook);
+	let source_walk = walk(bank, caller.policy, 0, source, hook)?;
+	let destination_walk = walk(bank, caller.policy, 1, destination, hook)?;
+	let mut decision = Decision::new(bank, caller, audit, hook);
 	if decision.side(&source_walk, DecisionOp::DELETE, source_kind, hook) {
 		return Some(decision.finish());
 	}
@@ -157,9 +199,8 @@ pub fn rename(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) ->
 /// evaluation takes the profile default, and the first deny decides.
 struct Decision {
 	bank: u32,
-	policy: u32,
+	caller: label::Caller,
 	audit: bool,
-	reason: u32,
 	hook: u32,
 	covered: bool,
 	deny: Option<DecisionOp>,
@@ -168,8 +209,8 @@ struct Decision {
 
 impl Decision {
 	#[inline(always)]
-	fn new(bank: u32, policy: u32, audit: bool, reason: u32, hook: u32) -> Decision {
-		Decision { bank, policy, audit, reason, hook, covered: false, deny: None, covered_deny: false }
+	fn new(bank: u32, caller: label::Caller, audit: bool, hook: u32) -> Decision {
+		Decision { bank, caller, audit, hook, covered: false, deny: None, covered_deny: false }
 	}
 
 	/// Adds one evaluation. Returns true once the verdict cannot change.
@@ -177,7 +218,7 @@ impl Decision {
 	fn side(&mut self, target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -> bool {
 		let side = evaluate(target, operation, kind, hook);
 		let denies = match side {
-			SIDE_NOT_COVERED => !nomatch(self.bank, self.policy, operation, kind),
+			SIDE_NOT_COVERED => !nomatch(self.bank, self.caller.policy, operation, kind),
 			SIDE_ALLOW => {
 				self.covered = true;
 				false
@@ -196,29 +237,30 @@ impl Decision {
 
 	#[inline(always)]
 	fn finish(&self) -> DecisionResult {
-		match self.deny {
-			Some(operation) if self.covered => {
-				DecisionResult { verdict: Verdict::DENY, operation, audit: self.audit, reason: self.reason, hook: self.hook }
-			}
-			_ => DecisionResult {
-				verdict: Verdict::ALLOW,
-				operation: DecisionOp::READ,
-				audit: self.audit,
-				reason: self.reason,
-				hook: self.hook,
-			},
+		let (verdict, operation) = match self.deny {
+			Some(operation) if self.covered => (Verdict::DENY, operation),
+			_ => (Verdict::ALLOW, DecisionOp::READ),
+		};
+		DecisionResult {
+			verdict,
+			operation,
+			audit: self.audit,
+			reason: self.caller.reason,
+			hook: self.hook,
+			tgid: self.caller.tgid,
+			start: self.caller.start,
 		}
 	}
 }
 
-/// The active bank, the caller's policy and labelling reason, and audit mode.
-/// `None` is the daemon's own bypass or an unreadable caller.
+/// The active bank, the caller, and audit mode. `None` is the daemon's own
+/// bypass or an unreadable caller.
 #[inline(always)]
-fn live_settings(hook: u32) -> Option<(u32, u32, u32, bool)> {
+fn live_settings(hook: u32) -> Option<(u32, label::Caller, bool)> {
 	let settings = SETTINGS.get(0).copied()?;
 	let bank = Bank(settings.active_bank).masked().0;
-	let (policy, reason) = label::caller_policy(&settings, bank, hook)?;
-	Some((bank, policy, reason, settings.audit != 0))
+	let caller = label::caller_policy(&settings, bank, hook)?;
+	Some((bank, caller, settings.audit != 0))
 }
 
 #[inline(always)]
@@ -408,6 +450,16 @@ fn evaluate(target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -
 	e.kind = kind.0;
 	e.entry = entry as u32;
 	e.nomatch_allows = nomatch(target.bank, target.policy, operation, kind) as u32;
+	filemaster_evaluate(hook)
+}
+
+/// Runs the matcher over the evaluation `evaluate` loaded into `EVAL`. A
+/// global function, so the verifier checks it, and its `bpf_loop` callback,
+/// once per program rather than once per call: the hooks evaluate up to five
+/// times per decision and decide twice after a label wait.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn filemaster_evaluate(hook: u32) -> u32 {
 	// SAFETY: the callback reads the EVAL map value, which outlives the call.
 	unsafe {
 		bpf_loop(EVAL_BUDGET, matcher::eval_step as *mut c_void, core::ptr::null_mut(), 0);
@@ -416,7 +468,7 @@ fn evaluate(target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -
 		count(REASON_UNREADABLE, hook);
 		return SIDE_DENY;
 	};
-	// SAFETY: as above.
+	// SAFETY: this CPU's slot of a per-CPU array.
 	let e = unsafe { &mut *state };
 	if e.phase != matcher::E_DONE_PUB {
 		count(REASON_BUDGET, hook);

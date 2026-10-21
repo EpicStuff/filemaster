@@ -16,6 +16,10 @@ const CfgOptionWatchPathsKey = "fileaccess/watchPaths"
 // delete, folder create, hard link and rename operations.
 const CfgOptionStructuralEnforcementKey = "fileaccess/structuralEnforcement"
 
+// CfgOptionStructuralLabelWaitKey selects whether a structural operation by a
+// process whose profile is still being resolved waits briefly for it.
+const CfgOptionStructuralLabelWaitKey = "fileaccess/structuralLabelWait"
+
 // Pipeline limits intentionally require restart. The queue and worker count
 // own goroutines and buffered ownership; replacing either live would make the
 // configured value disagree with the active enforcement limits.
@@ -33,6 +37,7 @@ const (
 	cfgOptionOutstandingOrder     = 40
 	cfgOptionProfileAskOrder      = 50
 	cfgOptionStructuralOrder      = 60
+	cfgOptionLabelWaitOrder       = 70
 )
 
 var (
@@ -42,6 +47,7 @@ var (
 	cfgOptionOutstanding     config.IntOption
 	cfgOptionProfileAsk      config.IntOption
 	cfgOptionStructural      config.StringOption
+	cfgOptionLabelWait       config.BoolOption
 )
 
 const (
@@ -136,6 +142,22 @@ func registerConfig() error {
 		return err
 	}
 	cfgOptionStructural = config.Concurrent.GetAsString(CfgOptionStructuralEnforcementKey, "audit")
+
+	err = config.Register(&config.Option{
+		Name:         "Structural Label Wait",
+		Key:          CfgOptionStructuralLabelWaitKey,
+		Description:  "Whether a delete, folder create, hard link or rename by a process whose profile Filemaster is still identifying waits up to 50 ms for it instead of being blocked at once. The wait is used only where the kernel can preempt it; otherwise such operations are blocked.",
+		OptType:      config.OptTypeBool,
+		DefaultValue: true,
+		Annotations: config.Annotations{
+			config.DisplayOrderAnnotation: cfgOptionLabelWaitOrder,
+			config.CategoryAnnotation:     "File Access",
+		},
+	})
+	if err != nil {
+		return err
+	}
+	cfgOptionLabelWait = config.Concurrent.GetAsBool(CfgOptionStructuralLabelWaitKey, true)
 
 	defaults := DefaultDecisionPipelineConfig()
 	for _, option := range []struct {
