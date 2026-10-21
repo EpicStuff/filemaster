@@ -15,7 +15,9 @@ import (
 // TestLabelWait checks the bounded label wait: an rm that deletes at once,
 // before the resolver has labelled it, waits and is decided with its real
 // label; with no resolver it waits out the cap and is denied under its own
-// reason; with the wait turned off it is denied at once as pending.
+// reason; with the wait turned off it is denied at once as pending. In audit
+// mode a pending rm never waits: it is allowed at once and its would-deny is
+// recorded as pending.
 func TestLabelWait(t *testing.T) {
 	requireBPFLSM(t)
 	rm, err := exec.LookPath("rm")
@@ -119,5 +121,33 @@ func TestLabelWait(t *testing.T) {
 	}
 	if got := enf.Status().Labelling.Wait.Waits; got != waits || undecided(ReasonPending) != pending+1 {
 		t.Errorf("wait off: waits %d (was %d), %s count %d (was %d)", got, waits, ReasonPending, undecided(ReasonPending), pending)
+	}
+
+	enf.SetLabelWait(true)
+	deadline = time.Now().Add(5 * time.Second)
+	for enf.Status().Labelling.Wait.State != WaitOn && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := enf.SetMode(ModeAudit); err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	waits = enf.Status().Labelling.Wait.Waits
+	pending = undecided(ReasonPending)
+	wouldDeny := enf.Status().WouldDeny[operationName(OperationDelete)]
+	for i := 0; i < 5; i++ {
+		allowed, took := remove()
+		if !allowed {
+			t.Fatalf("audit run %d: pending rm was denied", i)
+		}
+		if took >= waitCap {
+			t.Errorf("audit run %d: pending rm took %v, as long as the %v wait cap", i, took, waitCap)
+		}
+	}
+	status := enf.Status()
+	if status.Labelling.Wait.Waits != waits || undecided(ReasonPending) != pending+5 || status.WouldDeny[operationName(OperationDelete)] != wouldDeny+5 {
+		t.Errorf("audit: waits %d (was %d), %s count %d (was %d), would-deny delete %d (was %d)",
+			status.Labelling.Wait.Waits, waits, ReasonPending, undecided(ReasonPending), pending,
+			status.WouldDeny[operationName(OperationDelete)], wouldDeny)
 	}
 }

@@ -28,7 +28,7 @@ const (
 	maxString     = 4095
 	auditSlots    = 5
 	hookCount     = 5
-	reasonCount   = 9
+	reasonCount   = 10
 
 	maxLabels       = 16384
 	maxPolicies     = 1024
@@ -108,6 +108,8 @@ func checkMapLayout(spec *ebpf.CollectionSpec) error {
 		"COUNTERS": {4, 8, hookCount * reasonCount},
 		"SCRATCH":  {4, scratchSize, 2},
 
+		"STATE_SEQUENCE": {4, 8, 1},
+
 		"POLICY_LISTS":   {policyListKey, 4, maxPolicyLists},
 		"RULELISTS":      {4, ruleListSize, numBanks * maxRuleLists},
 		"LABEL_POLICY":   {4, 4, numBanks * maxLabels},
@@ -116,7 +118,7 @@ func checkMapLayout(spec *ebpf.CollectionSpec) error {
 		"EXEC_LABELS":    {execLabelKey, 4, maxExecLabels},
 		"EXEC_SCRATCH":   {8, execFileSize, execScratchSize},
 		"RECORDS":        {0, 0, recordsSize},
-		"RECORD_BUF":     {4, recordBufSize, 1},
+		"RECORD_BUF":     {4, recordBufSize, 2},
 		"LABEL_COUNTERS": {4, 8, labelCounters},
 		"WAIT":           {4, waitSettingsSize, 1},
 		"WAITERS":        {4, 8, 1},

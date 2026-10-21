@@ -196,7 +196,10 @@ through the 1,000,000-instruction limit. Nested `bpf_loop` is not viable (it
 explodes the verifier even for a trivial callback), so the matcher is one flat
 loop. `memset`/`memcpy` from the linker are rejected by the verifier, so state
 is zeroed with volatile word stores and subprograms return packed `u64`s rather
-than multi-word tuples (which otherwise spill through an invalid `r11`).
+than multi-word tuples (which otherwise spill through an invalid `r11`). The
+per-CPU state is **not** private to one hook: hooks are preemptible, so every
+decision checks that it kept the state to itself (see "As built: the per-CPU
+state race" in §2.6).
 
 **Destinations with no object (owner decision).** "Not covered → allow" applies
 only when *every* object an operation touches is uncovered. A rename or hard
@@ -448,9 +451,10 @@ below. `NOMATCH` is now keyed by `(bank, policy, operation, kind)`.
   detected by `bprm->interp == bprm->filename`, and its file is the script when a
   later pass substitutes an interpreter. `bprm_committed_creds` runs inside
   `begin_new_exec`, *before* `load_elf_binary` sets `mm->arg_start`, so argv/envp
-  are **not** captured there; the recompute and the argv/envp `bpf_probe_read_user`
-  happen at `tp_btf/sched_process_exec`, which fires at the end of `exec_binprm`
-  after `load_binary` and before the new program runs. `sched_process_exit` is
+  are **not** captured there; the argv/envp `bpf_probe_read_user` happens at
+  `tp_btf/sched_process_exec`, which fires at the end of `exec_binprm` after
+  `load_binary` and before the new program runs. (The recompute itself moved to
+  `bprm_committed_creds` with the race fix, below.) `sched_process_exit` is
   `TP_PROTO(p)` on 6.12 and `TP_PROTO(p, group_dead)` on 7.1; only arg 0 is read,
   so one program fits both, and group death is read from `signal->live`.
 - **PENDING flow.** Recompute at exec: `EXE_LABELS{exe, 0}` (fast path, no gap) →
@@ -583,7 +587,9 @@ changes fix it.
   again, because the daemon may have flipped the active bank to publish the new
   label's policy, which also invalidates the first walks. A timeout denies (fail
   closed) under its own reason, `label-wait-timeout`. Rename and link wait at
-  most once. Audit mode waits too, so it previews exactly what enforce does. The
+  most once. Only enforce waits: audit never adds latency, so a pending caller's
+  would-deny is recorded at once as `label-pending` (owner decision; see "As
+  built: the per-CPU state race", below). The
   wait is skipped (immediate deny) when: the `WAIT` map's `enabled` is off; the
   daemon's heartbeat (CLOCK_MONOTONIC, rewritten every second with the online-CPU
   cap) is older than 3 s; or `WAITERS` (a global atomic count: add, read back,
@@ -649,15 +655,110 @@ changes fix it.
   parent directory's `i_rwsem`; inferred from the lock order, not observed, a
   daemon resolution that must look up a path in that same directory (e.g. a
   fresh binary deleting next to itself) would block until the cap. Exe-only learning remains unsound against disguised argv[0]
-  (caveat above). **Pre-existing, found here:** the structural programs keep
-  walk/matcher state in per-CPU maps (`SCRATCH`, `EVAL`) on the assumption that
-  they are not preemptible, but LSM trampolines only `migrate_disable()` under
-  `rcu_read_lock()`, so with `PREEMPT_RCU` (Arch's default `preempt=full`, which
-  the wait self-test proves) a hook can be preempted mid-evaluation and another
-  task's hook on the same CPU can overwrite that state. The label wait does not
-  widen this (it holds no per-CPU state across the spin and re-walks afterwards),
-  but the race needs an ownership check (e.g. a per-CPU sequence verified after
-  each evaluation, deny or retry on change) — M5.
+  (caveat above). The per-CPU state race found here is fixed in the next
+  section.
+
+**As built: the per-CPU state race.**
+
+The structural programs kept their walk and matcher state in per-CPU maps
+(`SCRATCH`, `EVAL`) on the assumption that they could not be preempted. That
+was wrong. Verified in the v6.12.107 and v7.1.9 sources: an LSM program enters
+through `__bpf_prog_enter`, which takes only `rcu_read_lock()` and
+`migrate_disable()` (`rcu_read_lock_dont_migrate()` on 7.1), and
+`bpf_prog_check_recur` is false for LSM programs, so there is no recursion guard
+either. With `PREEMPT_RCU` (both test kernels) and full or lazy preemption
+(Arch's default; Debian's with `preempt=full`), task A's hook can be preempted
+mid-evaluation, task B's hook runs on the same CPU and overwrites A's state, and
+A resumes with B's verdict.
+
+- **Reproduced before the fix** by `TestStructuralBPFContention`
+  (`service/fileaccess/structural_contention_linux_test.go`): 17 threads pinned
+  to CPU 0 — 10 `SCHED_OTHER` workers at mixed nice values, 4 `SCHED_FIFO`
+  threads that wake every 0.2–2 ms and mutate, 3 `sched_yield` loops — each
+  mutating its own allow or deny folder 40 levels deep, behind 100 non-matching
+  glob rules that share the whole path prefix (so one evaluation takes about a
+  millisecond), with unlink, mkdir/rmdir, rename and hard link checked against
+  `DecideOperation`/`DecideRename`/`DecideHardLink`. With the previous
+  object, 30 s each: Arch 7.1 — 8,422 operations, **311 allowed against a deny
+  reference, 375 denied against an allow reference**; Debian 6.12 with
+  `preempt=full` — 9,203 operations, **372 and 412**; Debian 6.12 default
+  (`preempt=voluntary`, no kernel preemption) — 8,639 operations, 0 and 0.
+- **The fix (`decide.rs`).** Each decision is a global BPF function
+  (`filemaster_remove`, `filemaster_mkdir`, `filemaster_hard_link`,
+  `filemaster_rename`) wrapped in `owned`: it takes a ticket by atomically
+  incrementing this CPU's `STATE_SEQUENCE` before its first walk, runs the whole
+  operation (walks plus every evaluation), packs the verdict into a returned
+  `u64`, and re-reads the sequence; a changed sequence means another hook used
+  the state, and the attempt reports contention. The hook retries up to 4 times,
+  then denies (fail closed; audit records it and allows) under a new counted
+  reason, `state-contention` (`REASON_STATE_CONTENTION`, diagnostics warning
+  `bpf-lsm-undecided-state-contention`). The increment must be atomic: with a
+  plain read-modify-write, two interleaved hooks could take the same ticket. It
+  covers all five hooks, every evaluation inside rename and link, and the
+  re-decision after a label wait (each is a fresh owned decision). Making the
+  decisions global functions keeps the retries cheap for the verifier, and a
+  global function only takes scalars, so hook arguments are now probe-read from
+  the context instead of loaded as BTF pointers. `bpf_preempt_disable` was not
+  an option: the 6.12 verifier rejects global function calls with preemption
+  disabled, and the label wait must stay preemptible.
+- **Counters.** `COUNTERS`, `AUDIT` and `LABEL_COUNTERS` were per-CPU plain
+  read-modify-writes, which lose counts when preempted between read and write;
+  they are now atomic adds.
+- **Labelling programs (found while checking every per-CPU buffer).** On 7.1,
+  tracepoints run under SRCU instead of with preemption disabled
+  (`__DECLARE_TRACE`: `guard(srcu_fast_notrace)`; 6.12 still calls
+  `preempt_disable_notrace()`), so the `tp_btf` programs are preemptible there,
+  and `__bpf_trace_run` skips a program that is already running on that CPU (a
+  per-CPU recursion counter; the skip only increments the program's
+  `recursion_misses`). Two consequences, both fixed:
+  1. `RECORD_BUF` was shared by the fork and exec programs; it now has one slot
+     per program, and the recursion guard keeps each program's own slot
+     unshared.
+  2. A skipped `sched_process_exec` left the child the label fork had copied
+     from its parent — **fail open**. `TestLabelExecUnderContention`
+     (`bpflsm/label_contention_linux_test.go`) shows it: an allow-labelled shell
+     on CPU 0 execs a never-seen `rm` copy 3,000 times next to 8 processes
+     exec'ing with 24 KiB of argv/envp; every delete must be denied as pending.
+     Before (Arch 7.1): **50 of 3,000 deletes allowed**, 3,359
+     `sched_process_exec` recursion misses. Debian 6.12 had 0 misses, voluntary
+     or full, as its tracepoints disable preemption. The relabel now happens in a new LSM program on
+     `bprm_committed_creds` (no recursion guard; runs after `de_thread`,
+     `set_mm_exe_file` and `exec_mmap`, verified in both `fs/exec.c` sources),
+     and `sched_process_exec` only emits the pending record. A skipped exec
+     program now leaves the process pending without a record, which denies.
+     After: 0 of 3,000 allowed (3,902 misses). A skipped fork program leaves the
+     child unlabelled (denied) and a skipped exit program leaks one `PROCS`
+     entry until its tgid is reused; both fail closed.
+- **Audit never waits (owner decision).** The label wait applies only in
+  enforce. In audit, a pending caller's would-deny is counted as `label-pending`
+  and the operation proceeds at once; `TestLabelWait` checks 5 pending audit
+  `rm`s: allowed, none waited, `label-pending` and would-deny delete +5 each (a
+  build that still waits in audit fails it at about 52 ms per `rm`).
+- **Results after the fix.** The contention test passes when nothing is
+  allowed against a deny reference and every denial against an allow reference
+  is covered by a counted `state-contention` denial. Arch 7.1: 7,947 operations,
+  0 allowed wrongly, 112 contention denials of allowed operations (261
+  `state-contention` in all, about 3% under this deliberately extreme load of
+  millisecond evaluations interrupted every 0.2–2 ms); Debian 6.12
+  `preempt=full`: 8,578 operations, 0, 104 (261); Debian voluntary: 8,575
+  operations, 0, 0 (0). The exec test: 0 of 3,000 deletes allowed on Arch and on
+  Debian (voluntary; 0 of 1,000 with `preempt=full`). `TestLabelWait` (with the
+  audit case) passes on Arch and on Debian `preempt=full` (on voluntary the
+  wait is off, as before). The full regression set passes on both kernels: the
+  `bpflsm` suite (exit tests, map-full, lifecycle, handover), the differential
+  (8 × 505, 0 mismatches), live enforce/off, and `bpflsm-live` on btrfs and
+  tmpfs (wait matrix as measured above).
+- **Verifier cost (verified instructions).** The decisions are now global
+  functions verified once per program, so the counts dropped: Arch 7.1 —
+  unlink 6 025, rmdir 6 054, mkdir 5 846, link 10 543, rename 13 252,
+  bprm_check 143, bprm_committed_creds 395, fork 232, exec 1 247, exit 205;
+  Debian 6.12 — unlink 6 114, rmdir 6 153, mkdir 5 854, link 11 820, rename
+  16 148, bprm_check 146, bprm_committed_creds 417, fork 273, exec 1 245, exit
+  188. The largest single frame is 264 B.
+- **Known limits.** Under sustained contention a decision can lose its state on
+  all 4 attempts and deny; that is a local denial-of-service of structural
+  operations on one CPU, never an allow. Events counted from a run that later
+  lost its state (budget, overflow) can be over-counted.
 
 ### 2.7 Events, feedback and status
 

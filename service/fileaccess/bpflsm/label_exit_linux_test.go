@@ -132,7 +132,7 @@ func TestLabellingExit(t *testing.T) {
 	if err := enf.SetModeWithTable(ModeEnforce, table); err != nil {
 		t.Fatalf("enforce: %v", err)
 	}
-	if status := enf.Status(); !status.Labelling.Enabled || len(status.Labelling.Programs) != 4 {
+	if status := enf.Status(); !status.Labelling.Enabled || len(status.Labelling.Programs) != len(labelPrograms) {
 		t.Fatalf("labelling status = %+v", status.Labelling)
 	}
 

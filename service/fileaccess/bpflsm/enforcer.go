@@ -102,11 +102,12 @@ const (
 	ReasonPending          = "label-pending"
 	ReasonUnlabelled       = "unlabelled"
 	ReasonWaitTimeout      = "label-wait-timeout"
+	ReasonStateContention  = "state-contention"
 )
 
 var undecidedReasons = [reasonCount]string{
 	ReasonUnreadable, ReasonDepth, ReasonPathTooLong, ReasonUnregisteredRoot, ReasonContextOverflow, ReasonBudget,
-	ReasonPending, ReasonUnlabelled, ReasonWaitTimeout,
+	ReasonPending, ReasonUnlabelled, ReasonWaitTimeout, ReasonStateContention,
 }
 
 // Enforcer owns the loaded BPF LSM object and its pinned generations.

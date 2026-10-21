@@ -8,19 +8,21 @@
 //! `bpf_loop` callbacks.
 
 use core::ffi::c_void;
+use core::intrinsics::{AtomicOrdering, atomic_xadd, atomic_xsub};
+use core::sync::atomic::{Ordering, compiler_fence};
 
 use aya_ebpf::helpers::r#gen::{bpf_loop, bpf_probe_read_kernel};
 use filemaster_lsm_common::decision_maps::{
-	EVAL_BUDGET, HOOKS, LIST_EXECUTE, LIST_READ, LIST_WRITE, MAX_REL, REASON_BUDGET,
+	EVAL_BUDGET, HOOKS, HOOK_LINK, HOOK_MKDIR, LIST_EXECUTE, LIST_READ, LIST_WRITE, MAX_REL, REASON_BUDGET,
 	REASON_CONTEXT_OVERFLOW, REASON_DEPTH, REASON_PATH_TOO_LONG, REASON_UNREADABLE,
-	REASON_PENDING, REASON_UNREGISTERED_ROOT, REASON_WAIT_TIMEOUT, REL_END, SCRATCH_MASK, WALK_LIMIT,
+	REASON_PENDING, REASON_STATE_CONTENTION, REASON_UNREGISTERED_ROOT, REASON_WAIT_TIMEOUT, REL_END, SCRATCH_MASK, WALK_LIMIT,
 };
 use filemaster_lsm_common::label_maps::MAX_POLICIES;
 use filemaster_lsm_common::{Bank, DecisionOp, FileId, ObjectKey, TargetKind, Verdict};
 
 use crate::kernel;
 use crate::label::{self, NO_REASON};
-use crate::maps::{AUDIT, COUNTERS, EVAL, NOMATCH, OBJECTS, SCRATCH, SETTINGS};
+use crate::maps::{AUDIT, COUNTERS, EVAL, NOMATCH, OBJECTS, SCRATCH, SETTINGS, STATE_SEQUENCE};
 use crate::matcher::{self, SIDE_ALLOW, SIDE_DENY, SIDE_NOT_COVERED};
 
 const WALK_RUNNING: u32 = 0;
@@ -61,8 +63,6 @@ pub struct DecisionResult {
 	/// The labelling reason to count when this result denies.
 	reason: u32,
 	hook: u32,
-	tgid: u32,
-	start: u64,
 }
 
 /// Lower a result to a verifier-bounded LSM return. `None` means an unreadable
@@ -91,45 +91,144 @@ pub fn clamped(result: Option<DecisionResult>) -> i32 {
 
 /// `inode_unlink` and `inode_rmdir`: Filemaster's `DecisionDelete`.
 pub fn remove(dentry: kernel::Dentry, folder: bool, hook: u32) -> Option<DecisionResult> {
-	with_wait(remove_once(dentry, folder, hook), || remove_once(dentry, folder, hook))
+	with_wait(hook, || filemaster_remove(dentry.raw(), folder as u32, hook))
 }
 
 /// `inode_mkdir`: Filemaster's `DecisionCreate` on a negative dentry.
 pub fn mkdir(dentry: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	with_wait(mkdir_once(dentry, hook), || mkdir_once(dentry, hook))
+	with_wait(hook, || filemaster_mkdir(dentry.raw(), hook))
 }
 
 /// `inode_link`: `DecisionSnapshot.DecideHardLink`'s source read/write/execute
 /// order, then the destination delete/create order.
 pub fn hard_link(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	with_wait(hard_link_once(source, destination, hook), || hard_link_once(source, destination, hook))
+	with_wait(hook, || filemaster_hard_link(source.raw(), destination.raw(), hook))
 }
 
 /// `inode_rename`: `DecisionSnapshot.DecideRename`. `security_inode_rename`
 /// calls the hook a second time with the sides swapped for `RENAME_EXCHANGE`,
 /// so each call is one directed rename onto an existing destination.
 pub fn rename(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	with_wait(rename_once(source, destination, hook), || rename_once(source, destination, hook))
+	with_wait(hook, || filemaster_rename(source.raw(), destination.raw(), hook))
 }
 
-/// A pending caller's denial waits once for the daemon's label. After a
-/// resolved wait the whole operation is decided again, because the daemon may
-/// have flipped the active bank to publish the new label's policy; a timed-out
-/// wait keeps the denial under its own reason.
+/// In enforce mode, a pending caller's denial waits once for the daemon's
+/// label. After a resolved wait the whole operation is decided again, because
+/// the daemon may have flipped the active bank to publish the new label's
+/// policy; a timed-out wait keeps the denial under its own reason. Audit never
+/// waits: it records the pending would-deny and allows at once.
 #[inline(always)]
-fn with_wait(
-	first: Option<DecisionResult>,
-	again: impl FnOnce() -> Option<DecisionResult>,
-) -> Option<DecisionResult> {
-	let first = first?;
-	if first.verdict.allows() || first.reason != REASON_PENDING {
+fn with_wait(hook: u32, decide: impl Fn() -> u64) -> Option<DecisionResult> {
+	let first = exclusive(hook, &decide)?;
+	if first.verdict.allows() || first.reason != REASON_PENDING || first.audit {
 		return Some(first);
 	}
-	match label::wait_resolved(first.tgid, first.start) {
-		label::WAIT_RESOLVED => again(),
+	let Some(start) = kernel::Task::current().group_leader().and_then(|leader| leader.start_boottime()) else {
+		return Some(first);
+	};
+	match label::wait_resolved(kernel::current_pid().0, start) {
+		label::WAIT_RESOLVED => exclusive(hook, &decide),
 		label::WAIT_TIMED_OUT => Some(DecisionResult { reason: REASON_WAIT_TIMEOUT, ..first }),
 		_ => Some(first),
 	}
+}
+
+/// Decisions per hook call before per-CPU state contention denies.
+const STATE_ATTEMPTS: u32 = 4;
+
+/// A decision packed into the `u64` a global BPF function can return: decided
+/// (else fail open), deny, audit, and contended flags, the operation in bits
+/// 8..16 and the reason in bits 32..64.
+const PACKED_DECIDED: u64 = 1;
+const PACKED_DENY: u64 = 1 << 1;
+const PACKED_AUDIT: u64 = 1 << 2;
+const PACKED_CONTENDED: u64 = 1 << 3;
+
+/// Decides until one attempt kept this CPU's evaluation state to itself. LSM
+/// programs run under `rcu_read_lock` and `migrate_disable` only, so with a
+/// preemptible RCU a hook can be preempted mid-evaluation and another task's
+/// hook on this CPU can overwrite the per-CPU `SCRATCH` and `EVAL` state.
+#[inline(always)]
+fn exclusive(hook: u32, decide: &impl Fn() -> u64) -> Option<DecisionResult> {
+	for _ in 0..STATE_ATTEMPTS {
+		let packed = decide();
+		if packed & PACKED_CONTENDED == 0 {
+			if packed & PACKED_DECIDED == 0 {
+				return None;
+			}
+			return Some(DecisionResult {
+				verdict: if packed & PACKED_DENY != 0 { Verdict::DENY } else { Verdict::ALLOW },
+				operation: DecisionOp((packed >> 8) as u32 & 0xFF),
+				audit: packed & PACKED_AUDIT != 0,
+				reason: (packed >> 32) as u32,
+				hook,
+			});
+		}
+	}
+	Some(DecisionResult {
+		verdict: Verdict::DENY,
+		operation: if hook == HOOK_MKDIR || hook == HOOK_LINK { DecisionOp::CREATE } else { DecisionOp::DELETE },
+		audit: SETTINGS.get(0).is_some_and(|settings| settings.audit != 0),
+		reason: REASON_STATE_CONTENTION,
+		hook,
+	})
+}
+
+/// Runs one decision as the owner of this CPU's evaluation state: it takes a
+/// fresh per-CPU sequence number first and reports contention if the number
+/// changed by the time the verdict is out of the shared state. The add is
+/// atomic, so two interleaved hooks never take the same number.
+#[inline(always)]
+fn owned(once: impl FnOnce() -> Option<DecisionResult>) -> u64 {
+	let Some(sequence) = STATE_SEQUENCE.get_ptr_mut(0) else {
+		return PACKED_CONTENDED;
+	};
+	// A wrapping subtract of u64::MAX is a fetching add (see `label::wait_resolved`).
+	// SAFETY: an aligned u64 in this CPU's slot of a per-CPU array.
+	let ticket = unsafe { atomic_xsub::<u64, u64, { AtomicOrdering::SeqCst }>(sequence, u64::MAX) }.wrapping_add(1);
+	let packed = match once() {
+		None => 0,
+		Some(result) => {
+			PACKED_DECIDED
+				| if result.verdict.allows() { 0 } else { PACKED_DENY }
+				| if result.audit { PACKED_AUDIT } else { 0 }
+				| ((result.operation.0 & 0xFF) as u64) << 8
+				| (result.reason as u64) << 32
+		}
+	};
+	compiler_fence(Ordering::SeqCst);
+	// SAFETY: as above.
+	if unsafe { core::ptr::read_volatile(sequence) } != ticket {
+		return PACKED_CONTENDED;
+	}
+	packed
+}
+
+// The decisions are global BPF functions, verified once per program however
+// many attempts and waits call them.
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn filemaster_remove(dentry: u64, folder: u32, hook: u32) -> u64 {
+	owned(|| remove_once(kernel::Dentry::from_raw(dentry), folder != 0, hook))
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn filemaster_mkdir(dentry: u64, hook: u32) -> u64 {
+	owned(|| mkdir_once(kernel::Dentry::from_raw(dentry), hook))
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn filemaster_hard_link(source: u64, destination: u64, hook: u32) -> u64 {
+	owned(|| hard_link_once(kernel::Dentry::from_raw(source), kernel::Dentry::from_raw(destination), hook))
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn filemaster_rename(source: u64, destination: u64, hook: u32) -> u64 {
+	owned(|| rename_once(kernel::Dentry::from_raw(source), kernel::Dentry::from_raw(destination), hook))
 }
 
 #[inline(always)]
@@ -247,8 +346,6 @@ impl Decision {
 			audit: self.audit,
 			reason: self.caller.reason,
 			hook: self.hook,
-			tgid: self.caller.tgid,
-			start: self.caller.start,
 		}
 	}
 }
@@ -436,7 +533,7 @@ fn evaluate(target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -
 		count(REASON_UNREADABLE, hook);
 		return SIDE_DENY;
 	};
-	// SAFETY: this CPU's slot; the program is non-preemptible while using it.
+	// SAFETY: this CPU's slot; `owned` detects another hook using it meanwhile.
 	let e = unsafe { &mut *state };
 	e.reset();
 	e.bank = target.bank;
@@ -502,6 +599,7 @@ fn increment(map: &aya_ebpf::maps::PerCpuArray<u64>, index: u32) {
 	let Some(counter) = map.get_ptr_mut(index) else {
 		return;
 	};
+	// Atomic: a preempted read-modify-write would lose another hook's count.
 	// SAFETY: this CPU's slot of a per-CPU array.
-	unsafe { *counter = (*counter).wrapping_add(1) };
+	unsafe { atomic_xadd::<u64, u64, { AtomicOrdering::Relaxed }>(counter, 1) };
 }

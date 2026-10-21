@@ -80,7 +80,7 @@ pub const HOOK_RENAME: u32 = 4;
 
 /// Cases the kernel cannot decide exactly, and labelling denials. Each is
 /// counted per hook.
-pub const REASONS: usize = 9;
+pub const REASONS: usize = 10;
 /// A kernel value could not be read; the operation was allowed.
 pub const REASON_UNREADABLE: u32 = 0;
 /// The target is more than [`WALK_LIMIT`] levels below its object; denied.
@@ -99,6 +99,9 @@ pub const REASON_PENDING: u32 = 6;
 pub const REASON_UNLABELLED: u32 = 7;
 /// The caller was pending and its label wait ran out; the pending policy denied.
 pub const REASON_WAIT_TIMEOUT: u32 = 8;
+/// Every attempt's per-CPU evaluation state was used by another hook on the
+/// same CPU before the verdict was read; denied.
+pub const REASON_STATE_CONTENTION: u32 = 9;
 pub const COUNTERS: usize = REASONS * HOOKS;
 
 /// Rule lists. A rule reference carries the list its rule came from.

@@ -288,6 +288,7 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 		bpflsm.ReasonPending:          "The structural BPF LSM denied operations by processes whose profile it had not resolved yet.",
 		bpflsm.ReasonUnlabelled:       "The structural BPF LSM denied operations by processes it could not label (the label map may be full).",
 		bpflsm.ReasonWaitTimeout:      "The structural BPF LSM denied operations by processes whose profile was not resolved within the label wait.",
+		bpflsm.ReasonStateContention:  "The structural BPF LSM denied operations whose evaluation was repeatedly interrupted by other operations on the same CPU.",
 	} {
 		if counts := undecided[reason]; len(counts) > 0 {
 			appendWarning("bpf-lsm-undecided-"+reason, "warning", message, counts...)

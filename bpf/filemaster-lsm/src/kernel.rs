@@ -4,7 +4,7 @@
 // fix-up removed the scalar-argument reader and added raw dentry handles, a
 // negative-versus-unreadable inode read and the `d_name` reader for the path walk.
 // M3 replaces `caller_exe` with the task, mm, binprm and inode-generation
-// readers for labelling.
+// readers for labelling. The race fix reads hook arguments as plain integers.
 //! The unsafe boundary: every read of kernel memory lives here, behind safe typed
 //! handles, so the decision flow in `main.rs` is `unsafe`-free.
 //!
@@ -90,8 +90,12 @@ impl Dentry {
     /// `inode *` argument as a dentry yields a plausible-but-wrong pointer whose field
     /// reads fail, which fails *open*. The daemon's self-test exercises every hook for
     /// exactly this reason.
+    ///
+    /// Read with a probe rather than a context load: the verifier types a context
+    /// load as a BTF pointer, which a global BPF function cannot take as a `u64`.
     pub fn from_arg(ctx: &aya_ebpf::programs::LsmContext, n: usize) -> Dentry {
-        Dentry(unsafe { ctx.arg(n) })
+        let slot = (aya_ebpf::EbpfContext::as_ptr(ctx) as *const u64).wrapping_add(n);
+        Dentry(unsafe { bpf_probe_read_kernel(slot) }.unwrap_or(0) as *const u8)
     }
     /// The dentry's inode, or `None` when the dentry is **negative** — `d_inode` is NULL,
     /// i.e. the name does not exist yet.

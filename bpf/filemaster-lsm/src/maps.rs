@@ -48,8 +48,14 @@ pub static SCRATCH: PerCpuArray<Scratch> = PerCpuArray::with_max_entries(SCRATCH
 /// The whole evaluation state lives here, not on the stack: the verifier does
 /// not track map-value contents precisely, so the `bpf_loop` callback's state
 /// converges in a few passes instead of exploding past the instruction limit.
+/// Hooks are preemptible, so `SCRATCH` and `EVAL` are shared by every hook
+/// interleaved on a CPU; `STATE_SEQUENCE` tells a decision it lost them.
 #[map]
 pub static EVAL: PerCpuArray<EvalState> = PerCpuArray::with_max_entries(1, 0);
+/// Bumped (atomically) by every structural decision as it starts using this
+/// CPU's `SCRATCH` and `EVAL`.
+#[map]
+pub static STATE_SEQUENCE: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 /// The one-element control record (daemon identity, active bank, audit mode).
 #[map]
 pub static SETTINGS: Array<Settings> = Array::with_max_entries(1, 0);
@@ -75,8 +81,9 @@ pub static EXEC_LABELS: HashMap<ExecLabelKey, u32> = HashMap::with_max_entries(M
 pub static EXEC_SCRATCH: LruHashMap<u64, ExecFile> = LruHashMap::with_max_entries(EXEC_SCRATCH_ENTRIES as u32, 0);
 #[map]
 pub static RECORDS: RingBuf = RingBuf::with_byte_size(RECORDS_SIZE as u32, 0);
+/// One record buffer per writing program (`RECORD_SLOT_FORK`, `RECORD_SLOT_EXEC`).
 #[map]
-pub static RECORD_BUF: PerCpuArray<RecordBuf> = PerCpuArray::with_max_entries(1, 0);
+pub static RECORD_BUF: PerCpuArray<RecordBuf> = PerCpuArray::with_max_entries(2, 0);
 #[map]
 pub static LABEL_COUNTERS: PerCpuArray<u64> = PerCpuArray::with_max_entries(LABEL_COUNTER_SLOTS as u32, 0);
 /// The daemon's label-wait switch, cap and heartbeat.

@@ -1,13 +1,16 @@
 //! Process labelling (M3). Fork copies the parent's label, exec recomputes it
-//! from `EXEC_LABELS` or leaves the process pending and records its argv and
-//! envp for the daemon, and the last thread's exit deletes it. The structural
+//! from `EXEC_LABELS` or leaves the process pending (`bprm_committed_creds`)
+//! and records its argv and envp for the daemon (`sched_process_exec`), and
+//! the last thread's exit deletes it. The structural
 //! hooks turn the caller's label into a policy with `caller_policy`.
 //!
-//! The record path runs only in `tp_btf` programs, which run with preemption
-//! disabled, so the per-CPU record buffer is never shared by two programs.
+//! Records are assembled by the fork and exec `tp_btf` programs. Those are
+//! preemptible where tracepoints run under SRCU (7.1; 6.12 disables preemption
+//! around tracepoints), but the kernel's per-CPU recursion guard never runs one
+//! program twice at once on a CPU, so each program has its own buffer slot.
 
 use core::ffi::c_void;
-use core::intrinsics::{AtomicOrdering, atomic_xsub};
+use core::intrinsics::{AtomicOrdering, atomic_xadd, atomic_xsub};
 
 use aya_ebpf::helpers::bpf_ktime_get_ns;
 use aya_ebpf::helpers::r#gen::{bpf_loop, bpf_probe_read_kernel_str, bpf_probe_read_user};
@@ -31,15 +34,15 @@ use crate::maps::{
 pub const NO_REASON: u32 = u32::MAX;
 const NO_FILE: ExecFile = ExecFile { dev: 0, ino: 0, generation: 0, _pad: 0 };
 const HEADER: u32 = core::mem::size_of::<RecordHeader>() as u32;
+const RECORD_SLOT_FORK: u32 = 0;
+const RECORD_SLOT_EXEC: u32 = 1;
 
-/// A structural hook's caller: its policy in the active bank, the labelling
-/// reason to count if that policy denies, and its thread-group identity.
+/// A structural hook's caller: its policy in the active bank and the labelling
+/// reason to count if that policy denies.
 #[derive(Clone, Copy)]
 pub struct Caller {
 	pub policy: u32,
 	pub reason: u32,
-	pub tgid: u32,
-	pub start: u64,
 }
 
 /// The caller's policy in `bank`, and the reason to count if it denies.
@@ -62,7 +65,7 @@ pub fn caller_policy(settings: &Settings, bank: u32, hook: u32) -> Option<Caller
 			Some(None) => LABEL_UNIDENTIFIED,
 			Some(Some(_)) => match effective(tgid, start) {
 				Some((label, _)) => label,
-				None => return Some(Caller { policy: POLICY_PENDING, reason: REASON_UNLABELLED, tgid, start }),
+				None => return Some(Caller { policy: POLICY_PENDING, reason: REASON_UNLABELLED }),
 			},
 			None => {
 				crate::decide::count(REASON_UNREADABLE, hook);
@@ -71,7 +74,7 @@ pub fn caller_policy(settings: &Settings, bank: u32, hook: u32) -> Option<Caller
 		}
 	};
 	let (policy, reason) = label_policy(bank, label);
-	Some(Caller { policy, reason, tgid, start })
+	Some(Caller { policy, reason })
 }
 
 #[inline(always)]
@@ -229,7 +232,7 @@ pub fn fork(parent: Task, child: Task) {
 		return;
 	}
 	if label == LABEL_PENDING {
-		emit(RECORD_FORK, child_tgid, child_start, seq, NO_FILE, NO_FILE, parent_tgid, parent_seq, None, None);
+		emit(RECORD_SLOT_FORK, RECORD_FORK, child_tgid, child_start, seq, NO_FILE, NO_FILE, parent_tgid, parent_seq, None, None);
 	}
 }
 
@@ -249,41 +252,69 @@ pub fn bprm_check(bprm: Binprm) {
 	let _ = EXEC_SCRATCH.insert(&bprm.raw(), &file, 0);
 }
 
-/// `sched_process_exec`: the new image's label, before any of its code runs.
+/// `bprm_committed_creds`: the new image's label, before any of its code runs.
+/// This is an LSM program, which nothing skips: the kernel's per-CPU recursion
+/// guard skips a `tp_btf` program while another run of it is preempted on that
+/// CPU, and a skipped relabel would leave the child its parent's label.
+pub fn committed(task: Task, bprm: Binprm) {
+	if !labelling() {
+		return;
+	}
+	let Some((tgid, start, _, exe, script)) = image(task, bprm) else {
+		return;
+	};
+	let value = ProcValue { start, seq: unsafe { bpf_ktime_get_ns() }, span: 0, label: exec_label(exe, script) };
+	if PROCS.insert(&tgid, &value, 0).is_err() {
+		increment(LABEL_COUNTER_FULL);
+	}
+}
+
+/// `sched_process_exec`: a pending image's record, once `load_binary` has set
+/// its argv and envp. A skipped run leaves the process pending with no record,
+/// so it stays denied.
 pub fn exec(task: Task, bprm: Binprm) {
 	let key = bprm.raw();
+	if !labelling() {
+		let _ = EXEC_SCRATCH.remove(&key);
+		return;
+	}
+	let image = image(task, bprm);
+	let _ = EXEC_SCRATCH.remove(&key);
+	let Some((tgid, start, mm, exe, script)) = image else {
+		return;
+	};
+	// SAFETY: copied immediately.
+	let Some(proc) = unsafe { PROCS.get(&tgid) }.copied() else {
+		return;
+	};
+	if proc.label == LABEL_PENDING && start.wrapping_sub(proc.start) <= proc.span as u64 {
+		emit(RECORD_SLOT_EXEC, RECORD_EXEC, tgid, start, proc.seq, exe, script, 0, 0, Some(mm), bprm.interp());
+	}
+}
+
+/// The exec'ing thread group, its new mm, exe and (when a later binfmt pass
+/// substituted an interpreter) script. `None` is counted as unreadable.
+#[inline(always)]
+fn image(task: Task, bprm: Binprm) -> Option<(u32, u64, Mm, ExecFile, ExecFile)> {
 	// Stored field by field: an `Option<ExecFile>` leaves its payload registers
 	// undefined on `None`, and the verifier rejects spilling them.
 	let mut first = NO_FILE;
 	// SAFETY: copied immediately.
-	if let Some(file) = unsafe { EXEC_SCRATCH.get(&key) } {
+	if let Some(file) = unsafe { EXEC_SCRATCH.get(&bprm.raw()) } {
 		put_file(&mut first, *file);
-	}
-	let _ = EXEC_SCRATCH.remove(&key);
-	if !labelling() {
-		return;
 	}
 	let (Some(tgid), Some(start), Some(Some(mm))) =
 		(task.tgid(), task.group_leader().and_then(|leader| leader.start_boottime()), task.mm())
 	else {
 		increment(LABEL_COUNTER_UNREADABLE);
-		return;
+		return None;
 	};
 	let Some(exe) = mm.exe_file().and_then(|file| file.exec_file()) else {
 		increment(LABEL_COUNTER_UNREADABLE);
-		return;
+		return None;
 	};
 	let script = if first != exe { first } else { NO_FILE };
-	let label = exec_label(exe, script);
-	let seq = unsafe { bpf_ktime_get_ns() };
-	let value = ProcValue { start, seq, span: 0, label };
-	if PROCS.insert(&tgid, &value, 0).is_err() {
-		increment(LABEL_COUNTER_FULL);
-		return;
-	}
-	if label == LABEL_PENDING {
-		emit(RECORD_EXEC, tgid, start, seq, exe, script, 0, 0, Some(mm), bprm.interp());
-	}
+	Some((tgid, start, mm, exe, script))
 }
 
 #[inline(always)]
@@ -332,6 +363,7 @@ pub fn exit(task: Task) {
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn emit(
+	slot: u32,
 	kind: u32,
 	tgid: u32,
 	start: u64,
@@ -343,7 +375,7 @@ fn emit(
 	mm: Option<Mm>,
 	path: Option<*const u8>,
 ) {
-	let Some(buffer) = RECORD_BUF.get_ptr_mut(0) else {
+	let Some(buffer) = RECORD_BUF.get_ptr_mut(slot) else {
 		increment(LABEL_COUNTER_RECORD_DROP);
 		return;
 	};
@@ -459,6 +491,7 @@ fn add(index: u32, value: u64) {
 	let Some(counter) = LABEL_COUNTERS.get_ptr_mut(index) else {
 		return;
 	};
+	// Atomic: a preempted read-modify-write would lose another program's count.
 	// SAFETY: this CPU's slot of a per-CPU array.
-	unsafe { *counter = (*counter).wrapping_add(value) };
+	unsafe { atomic_xadd::<u64, u64, { AtomicOrdering::Relaxed }>(counter, value) };
 }

@@ -43,7 +43,7 @@ fn run(_ctx: *mut c_void) -> i32 {
 	let (Some(req), Some(e)) = (REQUEST.get_ptr_mut(0), maps::EVAL.get_ptr_mut(0)) else {
 		return 0;
 	};
-	// SAFETY: this CPU's slots; the program is non-preemptible here.
+	// SAFETY: this CPU's slots; the harness runs one request at a time.
 	let req = unsafe { &mut *req };
 	let e = unsafe { &mut *e };
 	e.reset();

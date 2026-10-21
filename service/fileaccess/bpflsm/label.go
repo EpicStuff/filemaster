@@ -35,7 +35,7 @@ const (
 const clockTick = 10_000_000
 
 // labelPrograms are the observe-only labelling programs, in attach order.
-var labelPrograms = []string{"bprm_check_security", "sched_process_fork", "sched_process_exec", "sched_process_exit"}
+var labelPrograms = []string{"bprm_check_security", "bprm_committed_creds", "sched_process_fork", "sched_process_exec", "sched_process_exit"}
 
 // ExecFile is an executable or script identity: superblock device, inode and
 // inode generation.

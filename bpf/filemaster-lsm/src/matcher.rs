@@ -153,7 +153,8 @@ pub unsafe extern "C" fn eval_step(_index: u64, _ctx: *mut c_void) -> i64 {
 	let Some(e) = crate::maps::EVAL.get_ptr_mut(0) else {
 		return 1;
 	};
-	// SAFETY: this CPU's slot; the BPF program is non-preemptible here.
+	// SAFETY: this CPU's slot; the caller's `decide::owned` detects another hook
+	// using it meanwhile.
 	let e = unsafe { &mut *e };
 	let (Some(arena), Some(scratch)) = (ARENA.get_ptr(e.bank), SCRATCH.get_ptr(e.slot)) else {
 		e.denied = 1;

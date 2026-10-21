@@ -2,7 +2,8 @@
 // `PROTECTED`, `RULES`, and `RULE_COUNT` maps and delegates all Filemaster
 // policy evaluation to the custom `decide` module; the M2 fix-up drops the
 // nonexistent `inode_rename` flags argument and passes each hook's counter index.
-// M3 adds the observe-only labelling programs, which delegate to `label`.
+// M3 adds the observe-only labelling programs, which delegate to `label`; the
+// race fix moves the exec relabel to `bprm_committed_creds`.
 //! Filemaster's eBPF LSM hook boundary for structural mutations.
 
 #![no_std]
@@ -63,6 +64,13 @@ pub fn inode_mkdir(ctx: LsmContext) -> i32 {
 #[lsm(hook = "bprm_check_security")]
 pub fn bprm_check_security(ctx: LsmContext) -> i32 {
     label::bprm_check(kernel::Binprm::from_raw(unsafe { ctx.arg(0) }));
+    0
+}
+
+/// `bprm_committed_creds(const struct linux_binprm *bprm)`. Observes only.
+#[lsm(hook = "bprm_committed_creds")]
+pub fn bprm_committed_creds(ctx: LsmContext) -> i32 {
+    label::committed(kernel::Task::current(), kernel::Binprm::from_raw(unsafe { ctx.arg(0) }));
     0
 }
 
