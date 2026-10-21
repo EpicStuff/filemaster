@@ -232,6 +232,10 @@ impl Binprm {
     pub fn file(self) -> Option<File> {
         Some(File(ptr_at(self.0, offset!(binprm_file))?))
     }
+    /// The `interp` string: the path of the binary the final binfmt pass loads.
+    pub fn interp(self) -> Option<*const u8> {
+        ptr_at(self.0, offset!(binprm_interp))
+    }
     /// True on the first binfmt pass: no handler has replaced `interp` yet.
     pub fn first_pass(self) -> Option<bool> {
         Some(ptr_at(self.0, offset!(binprm_filename))? == ptr_at(self.0, offset!(binprm_interp))?)

@@ -51,6 +51,7 @@ read/write access instead of network connections.
 - `service/core/api.go` — dropped `compat`/`resolver`/`captain` imports + their `AddToDebugInfo` calls.
 - `service/process/find.go` — rewritten: kept `GetProcessWithProfile`, stubbed `GetProcessByRequestOrigin`; removed `GetPidOfConnection`, `GetNetworkHost`, and the network/{packet,reference,state,netutils,socket} imports.
 - `service/process/special.go` — removed `service/network/socket` import + the init-time PID-constant sanity check that compared to it.
+- Process tag handlers (`service/process/tags`) were only registered by a blank import in the deleted `service/network/connection.go`, so no process was ever tagged (interpreter scripts, AppImage, Flatpak, Snap). Restored by `service/fileaccess/process_tags.go` (M3 follow-up).
 
 ## Design decisions kept across sessions
 

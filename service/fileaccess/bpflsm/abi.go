@@ -68,7 +68,7 @@ const (
 	execLabelKey    = 2 * execFileSize
 	procValueSize   = 24
 	resolvedSize    = 24
-	recordHeader    = 96
+	recordHeader    = 104
 	patternSize     = 20
 	chunkSize       = 12
 	tokenSize       = 12
@@ -330,11 +330,14 @@ func decodeRecord(b []byte) (Record, error) {
 	r.EnvTruncated = flags&recordEnvTruncated != 0
 	argsLen := int(binary.LittleEndian.Uint32(b[88:]))
 	envLen := int(binary.LittleEndian.Uint32(b[92:]))
-	if recordHeader+argsLen+envLen > len(b) {
-		return Record{}, fmt.Errorf("record strings (%d+%d bytes) exceed its %d bytes", argsLen, envLen, len(b))
+	pathLen := int(binary.LittleEndian.Uint32(b[96:]))
+	if recordHeader+argsLen+envLen+pathLen > len(b) {
+		return Record{}, fmt.Errorf("record strings (%d+%d+%d bytes) exceed its %d bytes", argsLen, envLen, pathLen, len(b))
 	}
 	r.Args = splitNUL(b[recordHeader : recordHeader+argsLen])
 	r.Env = splitNUL(b[recordHeader+argsLen : recordHeader+argsLen+envLen])
+	path := b[recordHeader+argsLen+envLen : recordHeader+argsLen+envLen+pathLen]
+	r.Path = strings.TrimRight(string(path), "\x00")
 	return r, nil
 }
 

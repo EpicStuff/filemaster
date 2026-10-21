@@ -471,24 +471,64 @@ below. `NOMATCH` is now keyed by `(bank, policy, operation, kind)`.
   the new `service/process/identity_capture.go`) and
   `service/fileaccess/decision_pipeline.go` (the `beforeOpen` open hook). Both are
   the two boundaries §2.6 names; the ported `loadProcess` logic is unchanged and
-  falls back to `/proc` when no capture is registered.
+  falls back to `/proc` when no capture is registered. The live follow-up added
+  `service/fileaccess/process_tags.go`, a blank import restoring the process tag
+  handlers (see FORK_NOTES): upstream registers them from the deleted
+  `service/network/connection.go`, so filemaster had never tagged an interpreter
+  script, AppImage, Flatpak or Snap process.
+- **Daemon labeller (as fixed by the live run).** A record's process is
+  resolved through `GetProcessWithProfile` with the captured argv/envp; one that
+  already exited is identified from the record alone (the kernel now records the
+  loaded binary's path, `bprm->interp`, checked against the recorded inode), so
+  a short-lived binary is still learned. A label's policy is published before
+  the label is written (`ensurePublished`), and `/proc` seeding resolves all
+  processes, then publishes once. Seeding runs for every new generation,
+  including a live off → enforce switch. Interpreters are detected with the
+  ported interpreter tag handler on a probe file, so `python -c` is never learned
+  exe-only. Learned exec labels survive republishes and are dropped only when a
+  fingerprint that could decide a learned path changes (a digest over prefix,
+  regex, cmdline and env fingerprints plus the equals fingerprints naming learned
+  paths); exe-only learning stays off while any profile matches on cmdline or
+  env. Note that the daemon renames a profile to its fingerprint-derived ID.
+- **Live evidence (real daemon, `cmds/bpflsm-live`).** The tool starts
+  `filemaster-core`, creates profiles through the database websocket API,
+  switches to enforce live, and checks unlinks by real processes in the watched
+  scope. Passed on Arch 7.1 and Debian 6.12, with the scope on btrfs and on tmpfs:
+  `python3 a.py` (allow profile) vs `python3 b.py` (deny); `./x.py`
+  (`#!/usr/bin/python3`), `./s.pl` and `./s.sh` scripts; `python3 -c` → the
+  interpreter profile; a deny-profile script's child `rm` deletes under `rm`'s own
+  allow profile; editing `b.py`'s rules through the API flips its verdict for the
+  next run in about 50–90 ms without a restart; with cmdline profiles, bare
+  `python3 a2.py`/`b2.py`, an env-shebang `./x2.py` and `python3 -m fmmod` resolve
+  to their own profiles.
+- **PENDING window (enforce, allow profile, unlink as the first action, 50 runs
+  each).** A Python script outside every watched mount: 50/50 allowed on both
+  kernels and filesystems, with no pending denials — interpreter start-up outlasts
+  resolution. The same script inside the watched scope: 50/50 (one run of 300 was
+  denied as pending on 7.1 tmpfs). Spawn → label latency: median about 9–11 ms,
+  p90 10–13 ms, max 11–24 ms. The worst case is the first exec of a never-seen
+  native binary (a fresh `rm` copy outside watched mounts): 0/50 allowed, all 50
+  counted as `label-pending`; its next exec is labelled at once from the learned
+  label.
 - **Verifier cost (verified instructions / largest single stack frame).**
   Arch 7.1 — unlink 31 565 / 24+200+64+40+72, rmdir 31 315, mkdir 15 645 /
   176+64+40+72, link 254 796 / 240+…, rename 149 609 / 240+…, bprm_check 145 / 40,
-  fork 240 / 64, exec 909 / 168, exit 187 / 16. Debian 6.12 — unlink 43 667,
+  fork 243 / 64, exec 1 295 / 184, exit 187 / 16. Debian 6.12 — unlink 43 667,
   rmdir 43 409, mkdir 14 623, link 95 874, rename 97 535, bprm_check 148, fork
-  258, exec 959, exit 189. All well under the 1,000,000-instruction limit.
+  261, exec 1 311, exit 189. All well under the 1,000,000-instruction limit.
   (The structural counts shifted from the M2 fix-up because rules moved behind a
   per-context `POLICY_LISTS` lookup; both kernels still verify.)
 - **Known gaps.** An interpreter invocation (`python a.py`, `-m`, `-c`,
-  env-shebang) is never learned as an exe-only fast path, so every such exec
-  emits a record and has a brief pending window the open hook closes for watched
-  mounts; a short-lived interpreter that mutates before resolution and outside a
-  watched mount denies (the documented PENDING fallback). argv-rewrite immunity
-  comes from capturing argv at `sched_process_exec` before user code; a later
-  `prctl(PR_SET_MM_*)` cannot retrigger it. The btrfs subvolume identity
-  collision (risk 7) is still deferred to M5. UI exposure of labels and the deny
-  notice are M4.
+  env-shebang) is never learned exe-only, so every such exec emits a record and
+  is pending for about 10 ms; the first exec of any new native binary that
+  mutates at once is denied (measured above). The ported interpreter tag handler
+  tags a script only when argv[0] is the interpreter's absolute path, so a bare
+  `python3 a.py` or an env shebang is told apart only by cmdline fingerprints, and
+  any cmdline/env profile turns exe-only learning off for every binary. Exec
+  labels learned before a newly *created* (not yet active) profile are kept until
+  a fingerprint change event. argv-rewrite immunity comes from capturing argv at
+  `sched_process_exec` before user code. The btrfs subvolume identity collision
+  (risk 7) is deferred to M5; UI exposure of labels and the deny notice are M4.
 
 ### 2.7 Events, feedback and status
 
@@ -538,7 +578,7 @@ The load, lifecycle and startup daemon checks also passed on Debian 6.12
 | M0 | Vendor the crates with port headers and the licence; apply the gate patch; strip blessing/open/exec; Makefile `bpf` target, `go:embed`, `test-fake` stub | `make core` embeds the object; a Go test loads every program through the verifier on both kernels | 0.5 |
 | M1 ✅ | Loader, probe, `.rodata` offsets, attach, pin generations, handover, self-test, teardown, mode option, degraded warnings | Enable → 5 hooks attached and shown in diagnostics; SIGKILL → enforcement persists; restart → generation swap with no gap; `off` → detached and reported unprotected | 1.5 |
 | M2 ✅ (fixed up) | Full-path kernel matcher (`matcher.rs`, faithful `filepath.Match` port over a Go-tokenized program, all state in a per-CPU `EVAL` map) + Go compiler with mount-root objects and per-path contexts + banked publish + ABI manifest test; single label `UNIDENTIFIED` | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: Gate B matched ≥11 k generated `(pattern, path)` pairs against `filepath.Match` with zero mismatches; the generated-rule differential (8 seeds × 505 ops, ~60% expected denies) agrees with `DecideOperation`/`DecideRename`/`DecideHardLink` across the operation matrix — folder renames, `DestExists`, `RENAME_EXCHANGE`/`RENAME_NOREPLACE`, `*at()` callers, >100-deep paths, post-publish creations, and a tmpfs mounted inside a scope with re-publish — with zero mismatches; self-test, lifecycle, handover and live-daemon (enforce/SIGKILL-persist/restart/off) all pass | 2–2.5 |
-| M3 ✅ | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny, `(tgid, start_time)` self-bypass, `/proc` seeding, per-label kernel rule lookup | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: `python a.py` (allow) vs `python b.py` (deny) get distinct verdicts; `./x.py`, `./s.sh`, `./s.js`, `./s.pl` env-shebang scripts labelled by their script arg; `python -m fmmod` resolves to the module profile and `python -c` to the interpreter profile; a child `rm` spawned by a deny-profile script gets `rm`'s allow label; an unresolved process stays `PENDING` and denies; a fork storm against an 8-entry label map denies and increments the map-full counter; argv rewrite after start does not change the label. No regressions: self-test, lifecycle, handover, the Gate B/differential (8×505, 0 mismatches) and live-daemon enforce/off all pass on both kernels and filesystems | 2–2.5 |
+| M3 ✅ | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny, `(tgid, start_time)` self-bypass, `/proc` seeding, per-label kernel rule lookup | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: `python a.py` (allow) vs `python b.py` (deny) get distinct verdicts; `./x.py`, `./s.sh`, `./s.js`, `./s.pl` env-shebang scripts labelled by their script arg; `python -m fmmod` resolves to the module profile and `python -c` to the interpreter profile; a child `rm` spawned by a deny-profile script gets `rm`'s allow label; an unresolved process stays `PENDING` and denies; a fork storm against an 8-entry label map denies and increments the map-full counter; argv rewrite after start does not change the label. The real daemon (`cmds/bpflsm-live`: profiles via the database API, real processes) reproduces the distinct verdicts, scripts, `-m`/`-c`, child `rm` and a live rule edit, and the PENDING window is measured (see As built in M3). No regressions: self-test, lifecycle, handover, the Gate B/differential (8×505, 0 mismatches) and live-daemon enforce/off all pass on both kernels and filesystems | 2–2.5 |
 | M4 | Events → filequery, deny notification with Allow-and-retry, Write list active in rule model and UI | Monitor shows delete/rename/link records; the notification appears; Allow → retry succeeds; screenshots of dashboard/monitor/settings checked per CLAUDE.md | 1.5–2 |
 | M5 | Hardening matrix (§4) and fixes; **btrfs subvolume/snapshot identity** (risk 7) — key objects by a subvolume-aware id, not just `(s_dev, ino)` | §4 matrix green; coverage warnings correct for every injected failure; multi-subvolume btrfs no longer collides objects | 1–1.5 |
 | | **Total** | | **8.5–11.5** |

@@ -16,7 +16,7 @@
   "Resolved": {"size": 24, "offsets": {"start": 0, "seq": 8, "label": 16}},
   "PolicyListKey": {"size": 12, "offsets": {"bank": 0, "policy": 4, "context": 8}},
   "RuleList": {"size": 1032, "offsets": {"rule_count": 0, "flags": 4, "rules": 8}},
-  "RecordHeader": {"size": 96, "offsets": {"kind": 0, "tgid": 4, "start": 8, "seq": 16, "exe": 24, "script": 48, "parent_seq": 72, "parent_tgid": 80, "flags": 84, "args_len": 88, "env_len": 92}},
+  "RecordHeader": {"size": 104, "offsets": {"kind": 0, "tgid": 4, "start": 8, "seq": 16, "exe": 24, "script": 48, "parent_seq": 72, "parent_tgid": 80, "flags": 84, "args_len": 88, "env_len": 92, "path_len": 96}},
   "Arena": {"size": 1052672},
   "Scratch": {"size": 20480},
   "Offsets": {"size": 112},

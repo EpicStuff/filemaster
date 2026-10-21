@@ -79,7 +79,7 @@ func TestABImanifestMatchesGoLayout(t *testing.T) {
 		{"RuleList", ruleListSize, map[string]int{"rule_count": 0, "flags": 4, "rules": 8}},
 		{"RecordHeader", recordHeader, map[string]int{
 			"kind": 0, "tgid": 4, "start": 8, "seq": 16, "exe": 24, "script": 48, "parent_seq": 72,
-			"parent_tgid": 80, "flags": 84, "args_len": 88, "env_len": 92,
+			"parent_tgid": 80, "flags": 84, "args_len": 88, "env_len": 92, "path_len": 96,
 		}},
 		{"Pattern", patternSize, map[string]int{"off": 0, "len": 4, "recursive": 8, "chunk_off": 12, "chunk_len": 16}},
 		{"Chunk", chunkSize, map[string]int{"star": 0, "token_off": 4, "token_len": 8}},

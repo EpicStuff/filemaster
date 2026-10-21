@@ -9,10 +9,10 @@
 use core::ffi::c_void;
 
 use aya_ebpf::helpers::bpf_ktime_get_ns;
-use aya_ebpf::helpers::r#gen::bpf_probe_read_user;
+use aya_ebpf::helpers::r#gen::{bpf_probe_read_kernel_str, bpf_probe_read_user};
 use filemaster_lsm_common::decision_maps::{REASON_PENDING, REASON_UNLABELLED, REASON_UNREADABLE};
 use filemaster_lsm_common::label_maps::{
-	ARGS_MASK, ARGS_MAX, ENV_MASK, ENV_MAX, LABEL_COUNTER_FULL, LABEL_COUNTER_RECORD_DROP,
+	ARGS_MASK, ARGS_MAX, ENV_MASK, ENV_MAX, PATH_MASK, PATH_MAX_RECORD, LABEL_COUNTER_FULL, LABEL_COUNTER_RECORD_DROP,
 	LABEL_COUNTER_UNREADABLE, LABEL_MASK, LABEL_PENDING, LABEL_UNIDENTIFIED, MAX_LABELS,
 	POLICY_PENDING, RECORD_ARGS_TRUNCATED, RECORD_ENV_TRUNCATED, RECORD_EXEC, RECORD_FORK,
 	RECORD_SIZE_MASK, SETTINGS_LABELLING,
@@ -130,7 +130,7 @@ pub fn fork(parent: Task, child: Task) {
 		return;
 	}
 	if label == LABEL_PENDING {
-		emit(RECORD_FORK, child_tgid, child_start, seq, NO_FILE, NO_FILE, parent_tgid, parent_seq, None);
+		emit(RECORD_FORK, child_tgid, child_start, seq, NO_FILE, NO_FILE, parent_tgid, parent_seq, None, None);
 	}
 }
 
@@ -183,7 +183,7 @@ pub fn exec(task: Task, bprm: Binprm) {
 		return;
 	}
 	if label == LABEL_PENDING {
-		emit(RECORD_EXEC, tgid, start, seq, exe, script, 0, 0, Some(mm));
+		emit(RECORD_EXEC, tgid, start, seq, exe, script, 0, 0, Some(mm), bprm.interp());
 	}
 }
 
@@ -242,6 +242,7 @@ fn emit(
 	parent_tgid: u32,
 	parent_seq: u64,
 	mm: Option<Mm>,
+	path: Option<*const u8>,
 ) {
 	let Some(buffer) = RECORD_BUF.get_ptr_mut(0) else {
 		increment(LABEL_COUNTER_RECORD_DROP);
@@ -301,10 +302,34 @@ fn emit(
 			}
 		}
 	}
-	header.flags = flags;
-	header.args_len = args_len & ARGS_MASK;
-	header.env_len = env_len & ENV_MASK;
-	let size = (HEADER + (args_len & ARGS_MASK) + (env_len & ENV_MASK)) & RECORD_SIZE_MASK;
+	let strings = (args_len & ARGS_MASK) + (env_len & ENV_MASK);
+	let mut path_len = 0u32;
+	if let Some(path) = path {
+		// SAFETY: a masked offset plus at most PATH_MAX_RECORD bytes stays
+		// inside the buffer.
+		let read = unsafe {
+			bpf_probe_read_kernel_str(
+				base.add((HEADER + strings) as usize) as *mut c_void,
+				PATH_MAX_RECORD,
+				path as *const c_void,
+			)
+		};
+		// The length includes the NUL; a failed read leaves the path empty.
+		if read > 0 {
+			path_len = read as u32 & PATH_MASK;
+		}
+	}
+	// Volatile, so the zero lengths of a fork record do not merge into a
+	// `memset` call.
+	// SAFETY: plain stores into a valid reference.
+	unsafe {
+		core::ptr::write_volatile(&mut header.flags, flags);
+		core::ptr::write_volatile(&mut header.args_len, args_len & ARGS_MASK);
+		core::ptr::write_volatile(&mut header.env_len, env_len & ENV_MASK);
+		core::ptr::write_volatile(&mut header.path_len, path_len);
+		core::ptr::write_volatile(&mut header._pad, 0);
+	}
+	let size = (HEADER + strings + path_len) & RECORD_SIZE_MASK;
 	// SAFETY: `size` is masked below the buffer's length.
 	let record = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
 	if RECORDS.output(record, 0).is_err() {

@@ -83,6 +83,9 @@ func (fa *FileAccess) registerStructuralProfilePublisher(apply func()) {
 		func(_ *mgr.WorkerCtx, _ string) (bool, error) {
 			if fa.lifecycle != nil && fa.lifecycle.IsRunning() {
 				apply()
+				if fa.labeller != nil {
+					fa.labeller.forgetIfFingerprintsChanged()
+				}
 			}
 			return false, nil
 		},

@@ -58,6 +58,9 @@ pub const ARGS_MAX: u32 = 8191;
 pub const ARGS_MASK: u32 = 0x1FFF;
 pub const ENV_MAX: u32 = 16383;
 pub const ENV_MASK: u32 = 0x3FFF;
+/// The exec path cap, including its NUL.
+pub const PATH_MAX_RECORD: u32 = 1024;
+pub const PATH_MASK: u32 = 0x3FF;
 pub const RECORD_BUF_SIZE: usize = 32768;
 pub const RECORD_SIZE_MASK: u32 = 0x7FFF;
 
@@ -148,7 +151,10 @@ pub struct RuleList {
 
 /// The fixed head of a ring-buffer record; `args_len` bytes of argv then
 /// `env_len` bytes of envp follow, each as the NUL-separated strings of the
-/// new image's stack. A fork record carries the parent and no strings.
+/// new image's stack, then `path_len` bytes of the path the kernel loaded the
+/// final binary from (`bprm->interp`), so the daemon can identify a process
+/// that exits before it is resolved. A fork record carries the parent and no
+/// strings.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct RecordHeader {
@@ -163,6 +169,8 @@ pub struct RecordHeader {
 	pub flags: u32,
 	pub args_len: u32,
 	pub env_len: u32,
+	pub path_len: u32,
+	pub _pad: u32,
 }
 
 /// The per-CPU record assembly buffer.

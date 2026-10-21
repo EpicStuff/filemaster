@@ -57,16 +57,19 @@ type ProcValue struct {
 // An exec carries the new image's argv and envp as read from its stack before
 // any of its code ran; a fork names the pending parent it inherits from.
 type Record struct {
-	Kind          uint32
-	TGID          uint32
-	Start         uint64
-	Seq           uint64
-	Exe           ExecFile
-	Script        ExecFile
-	ParentTGID    uint32
-	ParentSeq     uint64
-	Args          []string
-	Env           []string
+	Kind       uint32
+	TGID       uint32
+	Start      uint64
+	Seq        uint64
+	Exe        ExecFile
+	Script     ExecFile
+	ParentTGID uint32
+	ParentSeq  uint64
+	Args       []string
+	Env        []string
+	// Path is the path the kernel loaded the final binary from, as the exec
+	// named it; it can be relative and is unverified until SameFile checks it.
+	Path          string
 	ArgsTruncated bool
 	EnvTruncated  bool
 }
@@ -158,6 +161,13 @@ func attachLabelling(collection *ebpf.Collection) ([]link.Link, []HookStatus, er
 		statuses = append(statuses, status)
 	}
 	return links, statuses, errors.Join(errs...)
+}
+
+// SameFile reports whether path names the file a record identified, by
+// superblock device and inode.
+func SameFile(path string, file ExecFile) bool {
+	id, err := pathFileID(path)
+	return err == nil && id.dev == file.Dev && id.ino == file.Ino
 }
 
 // labelMap returns one of the active generation's maps.

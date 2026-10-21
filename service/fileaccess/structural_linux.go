@@ -54,6 +54,17 @@ func (fa *FileAccess) startStructuralEnforcement() {
 		}
 		if err := fa.structural.SetModeWithTable(mode, table); err != nil {
 			fa.mgr.Warn("fileaccess: structural enforcement is not active", "mode", mode, "err", err)
+			return
+		}
+		fa.labeller.markPublished()
+		// A new generation (startup or a live off -> on switch) has no records for
+		// processes that predate it; seed and resolve them from /proc.
+		if generation := fa.structural.Status().Generation; generation != "" && generation != fa.labeller.generation {
+			fa.labeller.generation = generation
+			fa.mgr.Go("file-access structural label seed", func(w *mgr.WorkerCtx) error {
+				fa.labeller.seedRunning(w.Ctx())
+				return nil
+			})
 		}
 	}
 	apply()
@@ -61,15 +72,6 @@ func (fa *FileAccess) startStructuralEnforcement() {
 		fa.labeller.run(w)
 		return nil
 	})
-	// Seed already-running processes once structural enforcement is live, so
-	// they are not stuck pending; a process that execs meanwhile gets its own
-	// record instead.
-	if fa.structural.Status().State == bpflsm.StateActive {
-		fa.mgr.Go("file-access structural label seed", func(w *mgr.WorkerCtx) error {
-			fa.labeller.seedRunning(w.Ctx())
-			return nil
-		})
-	}
 	fa.registerStructuralProfilePublisher(apply)
 	fa.mgr.Go("file-access structural mount watch", func(w *mgr.WorkerCtx) error {
 		fa.watchStructuralMounts(w, apply)

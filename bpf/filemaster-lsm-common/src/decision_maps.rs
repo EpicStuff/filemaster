@@ -427,6 +427,7 @@ mod tests {
 					("flags", offset_of!(RecordHeader, flags)),
 					("args_len", offset_of!(RecordHeader, args_len)),
 					("env_len", offset_of!(RecordHeader, env_len)),
+					("path_len", offset_of!(RecordHeader, path_len)),
 				],
 			),
 			("Arena", size_of::<Arena>(), &[]),
