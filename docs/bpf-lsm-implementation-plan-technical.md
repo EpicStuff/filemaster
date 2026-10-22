@@ -770,8 +770,8 @@ A resumes with B's verdict.
   and emits `filequery.FileAccessRecord` with `DestPath` for rename and link.
   Recent bank snapshots cover records queued across a rapid re-publish.
 - **Volume.** A bounded in-kernel suppressor admits the first 64 records per
-  `(tgid, operation, verdict)` in each one-second window. Further records
-  increment a per-CPU drop counter exposed in structural status.
+  `(label, operation, verdict)` — per app — in each one-second window. Further
+  records increment a per-CPU drop counter exposed in structural status.
 - **Deny notice.** A deduplicated informational notification shows the app,
   operation, path, and plain-language reason for an enforced denial. **Allow**
   appends literal `+ <path>` Write rules to that app's profile (both paths for
@@ -796,10 +796,12 @@ source and target object/context IDs, and up to 8,192 bytes of relative path
 for each side. Kernel hooks emit records for covered allow, deny, and audit
 would-deny decisions. Recording an allow makes Monitor useful for comparison;
 the same bounded suppressor keeps the added volume affordable. The first 64
-records per `(tgid, operation, verdict)` in a one-second window are emitted;
-later records increment a per-CPU drop counter. Failed ring reservations and
-path capture retries increment that counter too. The daemon exposes the sum as
-`DecisionDrops`.
+records per `(label, operation, verdict)` in a one-second window are emitted;
+later records increment a per-CPU drop counter, and the key's next emitted
+record carries the previous window's drop count (`suppressed`). Failed ring
+reservations and records discarded for state contention increment the counter
+too. The daemon exposes the sum as `DecisionDrops` and the reported
+`suppressed` total as `DecisionSuppressed`.
 
 The daemon validates object/context references before joining a context base
 with each relative path. It retains eight prior snapshots per bank to resolve
@@ -817,23 +819,70 @@ re-publishes the table. The user then retries. Audit would-denies never create
 a notice. For an unresolved kernel label, the daemon also tries the live
 process profile before deciding whether Allow can be offered.
 
-Verifier results (verified instructions, stock kernels) are:
+**As built in the M4 fix-up.** Two problems in the first M4 recording, and one
+check:
 
-| Hook | Arch 7.1.9 | Debian 6.12.107 |
-|---|---:|---:|
-| `inode_unlink` | 72,553 | 51,730 |
-| `inode_rmdir` | 72,688 | 51,739 |
-| `inode_mkdir` | 137,896 | 93,775 |
-| `inode_link` | 473,433 | 176,332 |
-| `inode_rename` | 480,294 | 186,689 |
-| `bprm_check_security` | 143 | 146 |
-| `bprm_committed_creds` | 395 | 417 |
-| `sched_process_fork` | 232 | 273 |
-| `sched_process_exec` | 1,247 | 1,245 |
-| `sched_process_exit` | 205 | 188 |
+- **Verifier cost.** The first M4 build recorded from each hook after the
+  decision, in `decide::record`: a static (not global) BPF function that walked
+  the source and target again inside a 4-attempt retry loop. A static function
+  is verified in its caller's context for every state that reaches it, so the
+  walks were re-verified per attempt, per call path and per hook, and every
+  recorded operation walked twice at runtime. Measured on Arch 7.1: the same
+  build with those two walks removed verified unlink in 10,318 instructions
+  instead of 72,553. Now a decision records itself from its own walks: the
+  global decision functions take a record request (the `DECISION_*` operation,
+  and whether the decision is final), and a covered decision that stands calls
+  the global `filemaster_record(decision, ticket)` with its label, reason,
+  verdict and bank packed into scalars. The walks moved from the stack to a
+  per-CPU `WALKS` map (two slots, beside `SCRATCH`): copying them through the
+  decision's return on the stack had doubled the decision's own verification
+  (about 12,000 for unlink), while map memory is tracked loosely, as `EVAL`
+  is. Both are shared per-CPU state, so the decision's sequence ticket guards
+  them: a decision that lost the state before recording runs again and records
+  then; a sequence change while the paths are copied discards the ring
+  reservation and counts a drop, so no record is ever submitted with another
+  hook's path. A submitted record confirms the decision. A pending caller's
+  enforced denial that will wait for its label records nothing; the decision
+  after the wait (resolved, timed out, or skipped) is final and records, with
+  the timed-out reason `label-wait-timeout`. With the wait off, the first
+  decision is final. A decision that loses its state on all 4 attempts denies
+  without a record and counts a drop.
+- **Suppressor key.** It was `(tgid, operation, verdict)`, so a burst spread
+  over many processes (`find … -exec rm {} \;`, `xargs -n1 rm`) gave every
+  process a fresh budget and was never suppressed. It is now
+  `(label, operation, verdict)`: one budget per app. Pending callers
+  (`LABEL_PENDING`) share one bucket and unidentified ones (label 0) another;
+  that bounds a flood of unresolved processes as a whole, at the cost that one
+  noisy unresolved app can use up the 64 records per second that another
+  unresolved app's denials would have had in the same window (drops are still
+  counted, and denials are still enforced).
+- **Profile-default denials (checked, no change).** `Decision::finish` denies
+  only when some evaluation is covered (a rule matched or the object is in a
+  watch scope), and every covered decision records, so no denial goes
+  unrecorded. An in-scope target with no matching rule under a block default
+  is denied with reason `default`, recorded, and noticed (the matrix's denied
+  app). An operation that touches only objects outside every scope is allowed
+  ("not covered → allow") and, correctly, records nothing. A rename by an app
+  whose Write rule allows the source, into a folder outside every scope under a
+  block default, is denied by the destination's `NOMATCH` default; the record
+  has both full paths and the denial raises a notice.
 
-All remain below the 1,000,000-instruction verifier budget. The largest
-structural program is rename on Arch, at 480,294 instructions.
+Verifier results (verified instructions, stock kernels):
+
+| Hook | Arch 7.1.9 | Debian 6.12.107 | Arch first M4 | Debian first M4 | Arch pre-M4 | Debian pre-M4 |
+|---|---:|---:|---:|---:|---:|---:|
+| `inode_unlink` | 6,587 | 6,224 | 72,553 | 51,730 | 6,025 | 6,114 |
+| `inode_rmdir` | 6,617 | 6,227 | 72,688 | 51,739 | 6,054 | 6,153 |
+| `inode_mkdir` | 6,344 | 5,989 | 137,896 | 93,775 | 5,846 | 5,854 |
+| `inode_link` | 10,507 | 10,344 | 473,433 | 176,332 | 10,543 | 11,820 |
+| `inode_rename` | 14,592 | 14,778 | 480,294 | 186,689 | 13,252 | 16,148 |
+| `bprm_check_security` | 143 | 146 | | | | |
+| `bprm_committed_creds` | 395 | 417 | | | | |
+| `sched_process_fork` | 232 | 273 | | | | |
+| `sched_process_exec` | 1,247 | 1,245 | | | | |
+| `sched_process_exit` | 205 | 188 | | | | |
+
+The largest structural frame is now 184 B (link; it was 264 B).
 
 On Arch 7.1.9, the full `bpflsm` and `fileaccess` suites passed; the 8 × 505
 generated-rule differential had zero mismatches, structural contention had
@@ -854,7 +903,21 @@ after 10,000 allowed deletes. The suppressor counted 9,872 drops on Arch and
 the app's file events, and its editable Write list; the Monitor screenshot
 also shows an expanded rename with both paths.
 
-Known limits: the suppressor deliberately omits records beyond its per-key
+After the fix-up the harness also deletes 10,000 files with
+one helper process each (four at a time), about 360 per second: 8,080–8,336
+of the 10,000 records were dropped per run (Arch btrfs 8,208, tmpfs 8,336;
+Debian 8,080 and 8,208), within one 64-record budget per started second, and
+the `suppressed` totals reported on later records equalled every counted drop
+(e.g. 18,080 of 18,080 on Arch btrfs, both bursts together); the daemon stayed
+healthy. The fix-up regression set passed on both kernels: the `bpflsm` suite,
+the differential (8 × 505, 0 mismatches), structural contention (Arch: 7,435
+operations, 0 fail-open, 129 fail-closed ≤ 251 `state-contention`; Debian
+voluntary: 8,484, 0, 0; Debian `preempt=full`: 8,405, 0, 106 ≤ 272), the exec
+labelling stress (3,000 execs, 0 deletes on each kernel), `TestLabelWait`
+(Arch, Debian `preempt=full`), live enforce/off, the M3/wait `bpflsm-live`
+matrix and the M4 matrix on btrfs and tmpfs.
+
+Known limits: the suppressor deliberately omits records beyond its per-app
 window while counting every omission. Records queued across more than eight
 reuses of a bank can outlive the retained path snapshots. A short-lived
 process that exits before its profile is resolved can leave a deny notice

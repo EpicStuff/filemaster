@@ -80,6 +80,9 @@ type Status struct {
 	Undecided []UndecidedCount
 	// DecisionDrops counts records suppressed or dropped before reaching the ring.
 	DecisionDrops uint64
+	// DecisionSuppressed sums the suppressed counts that emitted records
+	// carried for their key's previous window.
+	DecisionSuppressed uint64
 	// CompileWarnings describe rules the compiler left out or could not fit.
 	CompileWarnings []CompileWarning
 	// Labelling reports process labelling, when the generation runs it.
@@ -136,6 +139,7 @@ type Enforcer struct {
 	tables            [numBanks]Table
 	tableHistory      [numBanks][]Table
 	waitConfigured    atomic.Bool
+	suppressed        atomic.Uint64
 	waitKick          chan struct{}
 	heartbeatStop     chan struct{}
 	heartbeatDone     chan struct{}
@@ -220,6 +224,7 @@ func (e *Enforcer) Status() Status {
 	} else if e.collection != nil {
 		status.Error = joinStatusError(status.Error, "read decision drops: "+err.Error())
 	}
+	status.DecisionSuppressed = e.suppressed.Load()
 	status.Labelling.Programs = slices.Clone(status.Labelling.Programs)
 	if full, drops, unreadable, err := labelCounterTotals(e.collection); err == nil {
 		status.Labelling.MapFull, status.Labelling.RecordDrops, status.Labelling.Unreadable = full, drops, unreadable
@@ -500,7 +505,12 @@ func (e *Enforcer) start(mode Mode, table Table) Status {
 		} else {
 			e.records = reader
 			e.recordsDone = make(chan struct{})
-			go readRecords(reader, e.onRecord, e.recordsDone)
+			go readRecords(reader, func(record Record) {
+				if record.Decision != nil {
+					e.suppressed.Add(uint64(record.Decision.Suppressed))
+				}
+				e.onRecord(record)
+			}, e.recordsDone)
 		}
 	}
 	if e.labelling {

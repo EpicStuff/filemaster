@@ -18,7 +18,7 @@ use filemaster_lsm_common::decision_maps::{
 	REASON_PENDING, REASON_STATE_CONTENTION, REASON_UNREGISTERED_ROOT, REASON_WAIT_TIMEOUT, REL_END, SCRATCH_MASK, WALK_LIMIT,
 };
 use filemaster_lsm_common::label_maps::{
-	MAX_POLICIES, LABEL_PENDING, RECORD_DECISION, DECISION_REASON_DEFAULT, DECISION_REASON_NONE,
+	MAX_POLICIES, RECORD_DECISION, DECISION_DELETE, DECISION_CREATE, DECISION_RENAME, DECISION_LINK, DECISION_REASON_DEFAULT, DECISION_REASON_NONE,
 	DECISION_ALLOW, DECISION_DENY, DECISION_AUDIT, DECISION_SOURCE_VALID, DECISION_TARGET_VALID,
 	DECISION_PATH_MAX, DECISION_SUPPRESS_LIMIT, DECISION_SUPPRESS_WINDOW_NS, DecisionRecord,
 	DecisionSuppressKey, DecisionSuppressValue,
@@ -27,6 +27,8 @@ use filemaster_lsm_common::{Bank, DecisionOp, Dev, FileId, Ino, ObjectKey, Targe
 
 use crate::kernel;
 use crate::label::{self, NO_REASON};
+use aya_ebpf::macros::map;
+use aya_ebpf::maps::PerCpuArray;
 use crate::maps::{AUDIT, COUNTERS, DECISION_DROPS, DECISION_SUPPRESS, DECISION_ZERO, EVAL, NOMATCH, OBJECTS, RECORDS, SCRATCH, SETTINGS, STATE_SEQUENCE};
 use crate::matcher::{self, SIDE_ALLOW, SIDE_DENY, SIDE_NOT_COVERED};
 
@@ -71,6 +73,11 @@ pub struct DecisionResult {
 	/// The labelling reason to count when this result denies.
 	reason: u32,
 	hook: u32,
+	/// The caller's label and the table bank, for the decision's own record.
+	label: u32,
+	bank: u32,
+	/// Set once the record is submitted, which the sequence confirmed.
+	recorded: u32,
 }
 
 /// Lower a result to a verifier-bounded LSM return. `None` means an unreadable
@@ -99,46 +106,52 @@ pub fn clamped(result: Option<DecisionResult>) -> i32 {
 
 /// `inode_unlink` and `inode_rmdir`: Filemaster's `DecisionDelete`.
 pub fn remove(dentry: kernel::Dentry, folder: bool, hook: u32) -> Option<DecisionResult> {
-	with_wait(hook, || filemaster_remove(dentry.raw(), folder as u32, hook))
+	with_wait(hook, |flags| filemaster_remove(dentry.raw(), folder as u32, hook, DECISION_DELETE | flags))
 }
 
 /// `inode_mkdir`: Filemaster's `DecisionCreate` on a negative dentry.
 pub fn mkdir(dentry: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	with_wait(hook, || filemaster_mkdir(dentry.raw(), hook))
+	with_wait(hook, |flags| filemaster_mkdir(dentry.raw(), hook, DECISION_CREATE | flags))
 }
 
 /// `inode_link`: `DecisionSnapshot.DecideHardLink`'s source read/write/execute
 /// order, then the destination delete/create order.
 pub fn hard_link(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	with_wait(hook, || filemaster_hard_link(source.raw(), destination.raw(), hook))
+	with_wait(hook, |flags| filemaster_hard_link(source.raw(), destination.raw(), hook, DECISION_LINK | flags))
 }
 
 /// `inode_rename`: `DecisionSnapshot.DecideRename`. `security_inode_rename`
 /// calls the hook a second time with the sides swapped for `RENAME_EXCHANGE`,
 /// so each call is one directed rename onto an existing destination.
 pub fn rename(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	with_wait(hook, || filemaster_rename(source.raw(), destination.raw(), hook))
+	with_wait(hook, |flags| filemaster_rename(source.raw(), destination.raw(), hook, DECISION_RENAME | flags))
 }
 
 /// In enforce mode, a pending caller's denial waits once for the daemon's
-/// label. After a resolved wait the whole operation is decided again, because
-/// the daemon may have flipped the active bank to publish the new label's
-/// policy; a timed-out wait keeps the denial under its own reason. Audit never
-/// waits: it records the pending would-deny and allows at once.
+/// label, and then the whole operation is decided again, because the daemon
+/// may have flipped the active bank to publish the new label's policy; a caller
+/// still pending after a timed-out wait denies under its own reason. Audit
+/// never waits: it records the pending would-deny and allows at once. Only the
+/// decision that stands records itself.
 #[inline(always)]
-fn with_wait(hook: u32, decide: impl Fn() -> u64) -> Option<DecisionResult> {
-	let first = exclusive(hook, &decide)?;
-	if first.verdict.allows() || first.reason != REASON_PENDING || first.audit != 0 {
+fn with_wait(hook: u32, decide: impl Fn(u32) -> u64) -> Option<DecisionResult> {
+	let first_flags = if label::wait_enabled() { 0 } else { RECORD_FINAL };
+	let first = exclusive(hook, &|| decide(first_flags))?;
+	if first_flags != 0 || !may_wait(&first) {
 		return Some(first);
 	}
-	let Some(start) = kernel::Task::current().group_leader().and_then(|leader| leader.start_boottime()) else {
-		return Some(first);
+	let start = kernel::Task::current().group_leader().and_then(|leader| leader.start_boottime());
+	let flags = match start.map(|start| label::wait_resolved(kernel::current_pid().0, start)) {
+		Some(label::WAIT_TIMED_OUT) => RECORD_FINAL | RECORD_TIMED_OUT,
+		_ => RECORD_FINAL,
 	};
-	match label::wait_resolved(kernel::current_pid().0, start) {
-		label::WAIT_RESOLVED => exclusive(hook, &decide),
-		label::WAIT_TIMED_OUT => Some(DecisionResult { reason: REASON_WAIT_TIMEOUT, ..first }),
-		_ => Some(first),
-	}
+	exclusive(hook, &|| decide(flags))
+}
+
+/// A pending caller's enforced denial, which waits for the caller's label.
+#[inline(always)]
+fn may_wait(result: &DecisionResult) -> bool {
+	!result.verdict.allows() && result.reason == REASON_PENDING && result.audit == 0
 }
 
 /// Decisions per hook call before per-CPU state contention denies.
@@ -152,6 +165,13 @@ const PACKED_DENY: u64 = 1 << 1;
 const PACKED_AUDIT: u64 = 1 << 2;
 const PACKED_CONTENDED: u64 = 1 << 3;
 const PACKED_COVERED: u64 = 1 << 4;
+
+/// A decision's record request: the `DECISION_*` operation in the low byte;
+/// `RECORD_FINAL` when no label wait can follow, so even a pending denial
+/// records; `RECORD_TIMED_OUT` after a timed-out wait.
+const RECORD_OPERATION: u32 = 0xFF;
+const RECORD_FINAL: u32 = 1 << 8;
+const RECORD_TIMED_OUT: u32 = 1 << 9;
 
 /// Decides until one attempt kept this CPU's evaluation state to itself. LSM
 /// programs run under `rcu_read_lock` and `migrate_disable` only, so with a
@@ -172,9 +192,14 @@ fn exclusive(hook: u32, decide: &impl Fn() -> u64) -> Option<DecisionResult> {
 				covered: (packed & PACKED_COVERED != 0) as u32,
 				reason: (packed >> 32) as u32,
 				hook,
+				label: 0,
+				bank: 0,
+				recorded: 0,
 			});
 		}
 	}
+	// No attempt kept its walks, so there is no path to record.
+	increment(&DECISION_DROPS, 0);
 	Some(DecisionResult {
 		verdict: Verdict::DENY,
 		operation: if hook == HOOK_MKDIR || hook == HOOK_LINK { DecisionOp::CREATE } else { DecisionOp::DELETE },
@@ -182,6 +207,9 @@ fn exclusive(hook: u32, decide: &impl Fn() -> u64) -> Option<DecisionResult> {
 		covered: 1,
 		reason: REASON_STATE_CONTENTION,
 		hook,
+		label: 0,
+		bank: 0,
+		recorded: 0,
 	})
 }
 
@@ -190,16 +218,18 @@ fn exclusive(hook: u32, decide: &impl Fn() -> u64) -> Option<DecisionResult> {
 /// changed by the time the verdict is out of the shared state. The add is
 /// atomic, so two interleaved hooks never take the same number.
 #[inline(always)]
-fn owned(once: impl FnOnce() -> Option<DecisionResult>) -> u64 {
+fn owned(record: u32, once: impl FnOnce(&Owner) -> Option<DecisionResult>) -> u64 {
 	let Some(sequence) = STATE_SEQUENCE.get_ptr_mut(0) else {
 		return PACKED_CONTENDED;
 	};
 	// A wrapping subtract of u64::MAX is a fetching add (see `label::wait_resolved`).
 	// SAFETY: an aligned u64 in this CPU's slot of a per-CPU array.
 	let ticket = unsafe { atomic_xsub::<u64, u64, { AtomicOrdering::SeqCst }>(sequence, u64::MAX) }.wrapping_add(1);
-	let packed = match once() {
+	let mut recorded = 0;
+	let packed = match once(&Owner { ticket, record }) {
 		None => 0,
 		Some(result) => {
+			recorded = result.recorded;
 			PACKED_DECIDED
 				| if result.verdict.allows() { 0 } else { PACKED_DENY }
 				| if result.audit != 0 { PACKED_AUDIT } else { 0 }
@@ -210,10 +240,41 @@ fn owned(once: impl FnOnce() -> Option<DecisionResult>) -> u64 {
 	};
 	compiler_fence(Ordering::SeqCst);
 	// SAFETY: as above.
-	if unsafe { core::ptr::read_volatile(sequence) } != ticket {
+	if recorded == 0 && unsafe { core::ptr::read_volatile(sequence) } != ticket {
 		return PACKED_CONTENDED;
 	}
 	packed
+}
+
+/// A running decision's claim on this CPU's state and its record request.
+struct Owner {
+	ticket: u64,
+	record: u32,
+}
+
+impl Owner {
+	/// Settles a decision's reason and records it if it is covered and stands:
+	/// no label wait follows it.
+	#[inline(always)]
+	fn conclude(&self, mut result: DecisionResult, destination: bool) -> DecisionResult {
+		if self.record & RECORD_TIMED_OUT != 0 && may_wait(&result) {
+			result.reason = REASON_WAIT_TIMEOUT;
+		}
+		if result.covered == 0 || self.record & RECORD_FINAL == 0 && may_wait(&result) {
+			return result;
+		}
+		let verdict = if result.verdict.allows() { DECISION_ALLOW } else if result.audit != 0 { DECISION_AUDIT } else { DECISION_DENY };
+		result.recorded = filemaster_record(
+			result.label as u64
+				| ((result.reason & 0xFF) as u64) << 32
+				| ((self.record & RECORD_OPERATION) as u64) << 40
+				| (verdict as u64) << 48
+				| (destination as u64) << 52
+				| ((result.bank & 0xFF) as u64) << 56,
+			self.ticket,
+		) as u32;
+		result
+	}
 }
 
 // The decisions are global BPF functions, verified once per program however
@@ -221,69 +282,71 @@ fn owned(once: impl FnOnce() -> Option<DecisionResult>) -> u64 {
 
 #[unsafe(no_mangle)]
 #[inline(never)]
-pub extern "C" fn filemaster_remove(dentry: u64, folder: u32, hook: u32) -> u64 {
-	owned(|| remove_once(kernel::Dentry::from_raw(dentry), folder != 0, hook))
+pub extern "C" fn filemaster_remove(dentry: u64, folder: u32, hook: u32, record: u32) -> u64 {
+	owned(record, |owner| remove_once(owner, kernel::Dentry::from_raw(dentry), folder != 0, hook))
 }
 
 #[unsafe(no_mangle)]
 #[inline(never)]
-pub extern "C" fn filemaster_mkdir(dentry: u64, hook: u32) -> u64 {
-	owned(|| mkdir_once(kernel::Dentry::from_raw(dentry), hook))
+pub extern "C" fn filemaster_mkdir(dentry: u64, hook: u32, record: u32) -> u64 {
+	owned(record, |owner| mkdir_once(owner, kernel::Dentry::from_raw(dentry), hook))
 }
 
 #[unsafe(no_mangle)]
 #[inline(never)]
-pub extern "C" fn filemaster_hard_link(source: u64, destination: u64, hook: u32) -> u64 {
-	owned(|| hard_link_once(kernel::Dentry::from_raw(source), kernel::Dentry::from_raw(destination), hook))
+pub extern "C" fn filemaster_hard_link(source: u64, destination: u64, hook: u32, record: u32) -> u64 {
+	owned(record, |owner| hard_link_once(owner, kernel::Dentry::from_raw(source), kernel::Dentry::from_raw(destination), hook))
 }
 
 #[unsafe(no_mangle)]
 #[inline(never)]
-pub extern "C" fn filemaster_rename(source: u64, destination: u64, hook: u32) -> u64 {
-	owned(|| rename_once(kernel::Dentry::from_raw(source), kernel::Dentry::from_raw(destination), hook))
+pub extern "C" fn filemaster_rename(source: u64, destination: u64, hook: u32, record: u32) -> u64 {
+	owned(record, |owner| rename_once(owner, kernel::Dentry::from_raw(source), kernel::Dentry::from_raw(destination), hook))
 }
 
 #[inline(always)]
-fn remove_once(dentry: kernel::Dentry, folder: bool, hook: u32) -> Option<DecisionResult> {
+fn remove_once(owner: &Owner, dentry: kernel::Dentry, folder: bool, hook: u32) -> Option<DecisionResult> {
 	let (bank, caller, audit) = live_settings(hook)?;
 	let kind = if folder { TargetKind::FOLDER } else { positive_kind(dentry, hook)? };
 	let target = walk(bank, caller.policy, 0, dentry, hook)?;
 	let mut decision = Decision::new(bank, caller, audit, hook);
 	decision.side(&target, DecisionOp::DELETE, kind, hook);
-	Some(decision.finish())
+	Some(owner.conclude(decision.finish(), false))
 }
 
 #[inline(always)]
-fn mkdir_once(dentry: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
+fn mkdir_once(owner: &Owner, dentry: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
 	let (bank, caller, audit) = live_settings(hook)?;
 	let target = walk(bank, caller.policy, 0, dentry, hook)?;
 	let mut decision = Decision::new(bank, caller, audit, hook);
 	decision.side(&target, DecisionOp::CREATE, TargetKind::FOLDER, hook);
-	Some(decision.finish())
+	Some(owner.conclude(decision.finish(), false))
 }
 
 #[inline(always)]
-fn hard_link_once(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
+fn hard_link_once(owner: &Owner, source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
 	let (bank, caller, audit) = live_settings(hook)?;
 	let kind = positive_kind(source, hook)?;
 	let destination_exists = exists(destination, hook)?;
 	let source_walk = walk(bank, caller.policy, 0, source, hook)?;
 	let destination_walk = walk(bank, caller.policy, 1, destination, hook)?;
 	let mut decision = Decision::new(bank, caller, audit, hook);
-	for operation in [DecisionOp::READ, DecisionOp::WRITE, DecisionOp::EXECUTE] {
-		if decision.side(&source_walk, operation, kind, hook) {
-			return Some(decision.finish());
+	'decided: {
+		for operation in [DecisionOp::READ, DecisionOp::WRITE, DecisionOp::EXECUTE] {
+			if decision.side(&source_walk, operation, kind, hook) {
+				break 'decided;
+			}
 		}
+		if destination_exists && decision.side(&destination_walk, DecisionOp::DELETE, kind, hook) {
+			break 'decided;
+		}
+		decision.side(&destination_walk, DecisionOp::CREATE, kind, hook);
 	}
-	if destination_exists && decision.side(&destination_walk, DecisionOp::DELETE, kind, hook) {
-		return Some(decision.finish());
-	}
-	decision.side(&destination_walk, DecisionOp::CREATE, kind, hook);
-	Some(decision.finish())
+	Some(owner.conclude(decision.finish(), true))
 }
 
 #[inline(always)]
-fn rename_once(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
+fn rename_once(owner: &Owner, source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
 	let (bank, caller, audit) = live_settings(hook)?;
 	let source_kind = positive_kind(source, hook)?;
 	let destination_exists = exists(destination, hook)?;
@@ -291,18 +354,20 @@ fn rename_once(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -
 	let source_walk = walk(bank, caller.policy, 0, source, hook)?;
 	let destination_walk = walk(bank, caller.policy, 1, destination, hook)?;
 	let mut decision = Decision::new(bank, caller, audit, hook);
-	if decision.side(&source_walk, DecisionOp::DELETE, source_kind, hook) {
-		return Some(decision.finish());
+	'decided: {
+		if decision.side(&source_walk, DecisionOp::DELETE, source_kind, hook) {
+			break 'decided;
+		}
+		if !destination_exists {
+			decision.side(&destination_walk, DecisionOp::CREATE, destination_kind, hook);
+			break 'decided;
+		}
+		if decision.side(&destination_walk, DecisionOp::WRITE, destination_kind, hook) {
+			break 'decided;
+		}
+		decision.side(&destination_walk, DecisionOp::DELETE, destination_kind, hook);
 	}
-	if !destination_exists {
-		decision.side(&destination_walk, DecisionOp::CREATE, destination_kind, hook);
-		return Some(decision.finish());
-	}
-	if decision.side(&destination_walk, DecisionOp::WRITE, destination_kind, hook) {
-		return Some(decision.finish());
-	}
-	decision.side(&destination_walk, DecisionOp::DELETE, destination_kind, hook);
-	Some(decision.finish())
+	Some(owner.conclude(decision.finish(), true))
 }
 
 /// The engine-order combination of an operation's evaluations. An operation
@@ -361,6 +426,9 @@ impl Decision {
 			covered: self.covered as u32,
 			reason: if verdict.allows() { DECISION_REASON_NONE } else if self.deny_reason < REASON_PENDING { self.deny_reason } else if self.caller.reason != NO_REASON { self.caller.reason } else { self.deny_reason },
 			hook: self.hook,
+			label: self.caller.label,
+			bank: self.bank,
+			recorded: 0,
 		}
 	}
 }
@@ -408,19 +476,22 @@ fn is_dir(mode: u16) -> bool {
 /// Walks from `dentry` to its object. `None` (counted) means a kernel value
 /// was unreadable and the operation fails open.
 #[inline(always)]
-fn walk(bank: u32, policy: u32, slot: u32, dentry: kernel::Dentry, hook: u32) -> Option<Walk> {
-	let mut storage = core::mem::MaybeUninit::<Walk>::uninit();
-	// Volatile word stores, so LLVM emits no `memset` (the verifier rejects the
-	// linker's global one). Walk is all integers, size a multiple of 4.
-	let words = storage.as_mut_ptr() as *mut u32;
-	let mut i = 0;
-	while i < core::mem::size_of::<Walk>() / 4 {
-		// SAFETY: in bounds of `storage`.
-		unsafe { core::ptr::write_volatile(words.add(i), 0) };
-		i += 1;
+fn walk(bank: u32, policy: u32, slot: u32, dentry: kernel::Dentry, hook: u32) -> Option<&'static Walk> {
+	let Some(state) = WALKS.get_ptr_mut(slot) else {
+		count(REASON_UNREADABLE, hook);
+		return None;
+	};
+	// SAFETY: this CPU's slot; `owned` detects another hook using it meanwhile.
+	let state = unsafe { &mut *state };
+	// Volatile zero stores, so LLVM emits no `memset` (the verifier rejects the
+	// linker's global one).
+	// SAFETY: fields of this CPU's slot.
+	unsafe {
+		core::ptr::write_volatile(&mut state.object, FileId::new(Dev(0), Ino(0)));
+		core::ptr::write_volatile(&mut state.first_context, 0);
+		core::ptr::write_volatile(&mut state.context_count, 0);
+		core::ptr::write_volatile(&mut state.depth, 0);
 	}
-	// SAFETY: fully initialized above.
-	let state = unsafe { storage.assume_init_mut() };
 	state.dentry = dentry.raw();
 	state.bank = bank;
 	state.policy = policy;
@@ -428,9 +499,10 @@ fn walk(bank: u32, policy: u32, slot: u32, dentry: kernel::Dentry, hook: u32) ->
 	state.rel = REL_END;
 	state.leaf = NO_LEAF;
 	state.status = WALK_RUNNING;
-	// SAFETY: the callback only reads `state`, which outlives the call.
+	let mut slot = slot;
+	// SAFETY: the callback only reads `slot`, which outlives the call.
 	unsafe {
-		bpf_loop(WALK_LIMIT + 1, walk_step as *mut c_void, state as *mut Walk as *mut c_void, 0);
+		bpf_loop(WALK_LIMIT + 1, walk_step as *mut c_void, &mut slot as *mut u32 as *mut c_void, 0);
 	}
 	match state.status {
 		WALK_RUNNING => {
@@ -445,13 +517,16 @@ fn walk(bank: u32, policy: u32, slot: u32, dentry: kernel::Dentry, hook: u32) ->
 		}
 		_ => {}
 	}
-	Some(*state)
+	Some(state)
 }
 
 #[inline(never)]
 unsafe extern "C" fn walk_step(_index: u64, ctx: *mut c_void) -> i64 {
-	// SAFETY: `walk` passes its own stack state.
-	let w = unsafe { &mut *(ctx as *mut Walk) };
+	// SAFETY: `walk` passes its slot, and this CPU's `WALKS` value outlives the loop.
+	let Some(w) = WALKS.get_ptr_mut(unsafe { *(ctx as *const u32) }) else {
+		return 1;
+	};
+	let w = unsafe { &mut *w };
 	let dentry = kernel::Dentry::from_raw(w.dentry);
 	let Some(inode) = dentry.inode_or_negative() else {
 		w.status = WALK_UNREADABLE;
@@ -675,108 +750,122 @@ fn record_path(walk: &Walk, to: *mut u8) -> Option<(FileId, u32, u32)> {
 	Some((walk.object, walk.first_context, len))
 }
 
-/// Emits a covered structural operation after the verdict is fixed. The ring
-/// reservation is private, and a sequence change discards any path assembled
-/// from a per-CPU scratch slot interrupted by another hook.
+/// This CPU's walks, one per scratch slot. Like `SCRATCH` they are shared by
+/// every hook interleaved on the CPU, so `STATE_SEQUENCE` guards them; in map
+/// memory, the verifier tracks them loosely, as it does `EVAL`.
+#[map]
+static WALKS: PerCpuArray<Walk> = PerCpuArray::with_max_entries(2, 0);
+
+/// Emits a covered decision that stands, from the `WALKS` that decided it.
+/// `decision` packs the label (bits 0..32), reason (32..40), `DECISION_*`
+/// operation (40..48), record verdict (48..52), whether slot 1 holds a
+/// destination walk (52) and bank (56..64).
+/// A sequence change since `ticket` means another hook used this CPU's state:
+/// before the copy, the decision runs again and records then; during it, the
+/// record is discarded and counted as a drop. Returns 1 once a record is
+/// submitted, which also confirms the decision. A global function, so it is
+/// verified once per program rather than once per decision path.
+#[unsafe(no_mangle)]
 #[inline(never)]
-pub fn record(result: &DecisionResult, source: u64, target: u64, operation: u32) {
-	if result.covered == 0 {
-		return;
+pub extern "C" fn filemaster_record(decision: u64, ticket: u64) -> u64 {
+	let label = decision as u32;
+	let reason = (decision >> 32) as u32 & 0xFF;
+	let operation = (decision >> 40) as u32 & 0xFF;
+	let verdict = (decision >> 48) as u32 & 0xF;
+	let destination = decision & (1 << 52) != 0;
+	let bank = (decision >> 56) as u32;
+	let (Some(sequence), Some(source), Some(target)) =
+		(STATE_SEQUENCE.get_ptr_mut(0), WALKS.get_ptr(0), WALKS.get_ptr(1))
+	else {
+		increment(&DECISION_DROPS, 0);
+		return 0;
+	};
+	// A decision that already lost the state runs again and records then.
+	// SAFETY: this CPU's aligned sequence slot.
+	if unsafe { core::ptr::read_volatile(sequence) } != ticket {
+		return 0;
 	}
-	let verdict = if result.verdict.allows() { DECISION_ALLOW } else if result.audit != 0 { DECISION_AUDIT } else { DECISION_DENY };
-	let tgid = kernel::current_pid().0;
-	let start = kernel::Task::current().group_leader().and_then(|leader| leader.start_boottime()).unwrap_or(0);
-	let label = label::effective(tgid, start).map(|(label, _)| label).unwrap_or(LABEL_PENDING);
 	// SAFETY: helper returns CLOCK_MONOTONIC nanoseconds.
 	let now = unsafe { bpf_ktime_get_ns() };
-	let Some(suppressed) = suppress(DecisionSuppressKey { tgid, operation, verdict }, now) else { return; };
+	let Some(suppressed) = suppress(DecisionSuppressKey { label, operation, verdict }, now) else {
+		return 0;
+	};
 	let Some(zero) = DECISION_ZERO.get(0) else {
 		increment(&DECISION_DROPS, 0);
-		return;
+		return 0;
 	};
-	for _ in 0..STATE_ATTEMPTS {
-		let Some(sequence) = STATE_SEQUENCE.get_ptr_mut(0) else {
-			increment(&DECISION_DROPS, 0);
-			return;
-		};
-		// SAFETY: aligned per-CPU counter. The ticket invalidates interrupted
-		// decision walks on the same CPU.
-		let ticket = unsafe { atomic_xsub::<u64, u64, { AtomicOrdering::SeqCst }>(sequence, u64::MAX) }.wrapping_add(1);
-		let bank = SETTINGS.get(0).map(|settings| Bank(settings.active_bank).masked().0).unwrap_or(0);
-		let source_walk = walk(bank, 0, 0, kernel::Dentry::from_raw(source), result.hook);
-		let target_walk = if target == 0 { None } else { walk(bank, 0, 1, kernel::Dentry::from_raw(target), result.hook) };
-		let Some(mut entry) = RECORDS.reserve::<DecisionRecord>(0) else {
-			increment(&DECISION_DROPS, 0);
-			return;
-		};
-		let record = entry.as_mut_ptr();
-		// SAFETY: this is a private ring reservation of exactly DecisionRecord
-		// bytes. Every header field and both path arrays are initialized before
-		// it can be submitted.
-		unsafe {
-			(*record).kind = RECORD_DECISION;
-			(*record).operation = operation;
-			(*record).verdict = verdict;
-			(*record).reason = if verdict == DECISION_ALLOW { DECISION_REASON_NONE } else { result.reason };
-			(*record).tgid = tgid;
-			(*record).label = label;
-			(*record).bank = bank;
-			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).flags), 0);
-			(*record).start = start;
-			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source.dev), Dev(0));
-			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source.ino), Ino(0));
-			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target.dev), Dev(0));
-			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target.ino), Ino(0));
-			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source_context), 0);
-			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target_context), 0);
-			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source_len), 0);
-			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target_len), 0);
-			(*record).suppressed = suppressed;
-			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record)._pad), 0);
-		}
-		let source_bytes = unsafe { core::ptr::addr_of_mut!((*record).source_path) as *mut u8 };
-		let target_bytes = unsafe { core::ptr::addr_of_mut!((*record).target_path) as *mut u8 };
-		let zero_bytes = zero.0.as_ptr();
-		// SAFETY: the zero map value and each reserved path array have exactly
-		// DECISION_PATH_MAX bytes.
-		let (clear_source, clear_target) = unsafe {
-			(
-				bpf_probe_read_kernel(source_bytes as *mut c_void, DECISION_PATH_MAX as u32, zero_bytes as *const c_void),
-				bpf_probe_read_kernel(target_bytes as *mut c_void, DECISION_PATH_MAX as u32, zero_bytes as *const c_void),
-			)
-		};
-		if clear_source != 0 || clear_target != 0 {
-			entry.discard(0);
-			increment(&DECISION_DROPS, 0);
-			return;
-		}
-		if let Some(walk) = source_walk.as_ref() {
-			if let Some((id, context, len)) = record_path(walk, source_bytes) {
-				unsafe {
-					(*record).source = id;
-					(*record).source_context = context;
-					(*record).source_len = len;
-					(*record).flags |= DECISION_SOURCE_VALID;
-				}
-			}
-		}
-		if let Some(walk) = target_walk.as_ref() {
-			if let Some((id, context, len)) = record_path(walk, target_bytes) {
-				unsafe {
-					(*record).target = id;
-					(*record).target_context = context;
-					(*record).target_len = len;
-					(*record).flags |= DECISION_TARGET_VALID;
-				}
-			}
-		}
-		compiler_fence(Ordering::SeqCst);
-		if unsafe { core::ptr::read_volatile(sequence) } != ticket {
-			entry.discard(0);
-			continue;
-		}
-		entry.submit(0);
-		return;
+	let Some(mut entry) = RECORDS.reserve::<DecisionRecord>(0) else {
+		increment(&DECISION_DROPS, 0);
+		return 0;
+	};
+	let tgid = kernel::current_pid().0;
+	let start = kernel::Task::current().group_leader().and_then(|leader| leader.start_boottime()).unwrap_or(0);
+	let record = entry.as_mut_ptr();
+	// SAFETY: this is a private ring reservation of exactly DecisionRecord
+	// bytes. Every header field and both path arrays are initialized before
+	// it can be submitted.
+	unsafe {
+		(*record).kind = RECORD_DECISION;
+		(*record).operation = operation;
+		(*record).verdict = verdict;
+		(*record).reason = if verdict == DECISION_ALLOW { DECISION_REASON_NONE } else { reason };
+		(*record).tgid = tgid;
+		(*record).label = label;
+		(*record).bank = bank;
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).flags), 0);
+		(*record).start = start;
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source.dev), Dev(0));
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source.ino), Ino(0));
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target.dev), Dev(0));
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target.ino), Ino(0));
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source_context), 0);
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target_context), 0);
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source_len), 0);
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target_len), 0);
+		(*record).suppressed = suppressed;
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record)._pad), 0);
 	}
-	increment(&DECISION_DROPS, 0);
+	let source_bytes = unsafe { core::ptr::addr_of_mut!((*record).source_path) as *mut u8 };
+	let target_bytes = unsafe { core::ptr::addr_of_mut!((*record).target_path) as *mut u8 };
+	let zero_bytes = zero.0.as_ptr();
+	// SAFETY: the zero map value and each reserved path array have exactly
+	// DECISION_PATH_MAX bytes.
+	let (clear_source, clear_target) = unsafe {
+		(
+			bpf_probe_read_kernel(source_bytes as *mut c_void, DECISION_PATH_MAX as u32, zero_bytes as *const c_void),
+			bpf_probe_read_kernel(target_bytes as *mut c_void, DECISION_PATH_MAX as u32, zero_bytes as *const c_void),
+		)
+	};
+	if clear_source != 0 || clear_target != 0 {
+		entry.discard(0);
+		increment(&DECISION_DROPS, 0);
+		return 0;
+	}
+	// SAFETY: this CPU's walk slots, checked against the sequence below.
+	let (source, target) = unsafe { (&*source, &*target) };
+	if let Some((id, context, len)) = record_path(source, source_bytes) {
+		unsafe {
+			(*record).source = id;
+			(*record).source_context = context;
+			(*record).source_len = len;
+			(*record).flags |= DECISION_SOURCE_VALID;
+		}
+	}
+	if let Some((id, context, len)) = if destination { record_path(target, target_bytes) } else { None } {
+		unsafe {
+			(*record).target = id;
+			(*record).target_context = context;
+			(*record).target_len = len;
+			(*record).flags |= DECISION_TARGET_VALID;
+		}
+	}
+	compiler_fence(Ordering::SeqCst);
+	// SAFETY: this CPU's aligned sequence slot.
+	if unsafe { core::ptr::read_volatile(sequence) } != ticket {
+		entry.discard(0);
+		increment(&DECISION_DROPS, 0);
+		return 0;
+	}
+	entry.submit(0);
+	1
 }

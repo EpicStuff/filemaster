@@ -426,10 +426,11 @@ func closeMaps(maps ...*ebpf.Map) {
 type diagnostics struct {
 	LifecycleState string
 	Structural     struct {
-		Mode          string
-		State         string
-		DecisionDrops uint64
-		Labelling     struct {
+		Mode               string
+		State              string
+		DecisionDrops      uint64
+		DecisionSuppressed uint64
+		Labelling          struct {
 			Enabled     bool
 			ExeLearning string
 			Wait        struct {

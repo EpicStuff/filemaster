@@ -254,10 +254,13 @@ pub struct DecisionRecord {
 	pub target_path: [u8; DECISION_PATH_MAX],
 }
 
+/// The suppressor's budget is per app: the caller's label, so a burst spread
+/// over many processes of one app shares it. Pending callers share the
+/// `LABEL_PENDING` budget and unidentified ones the `LABEL_UNIDENTIFIED` one.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct DecisionSuppressKey {
-	pub tgid: u32,
+	pub label: u32,
 	pub operation: u32,
 	pub verdict: u32,
 }

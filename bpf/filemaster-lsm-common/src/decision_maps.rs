@@ -468,7 +468,7 @@ mod tests {
 					("target_path", offset_of!(DecisionRecord, target_path)),
 				],
 			),
-			("DecisionSuppressKey", size_of::<DecisionSuppressKey>(), &[("tgid", offset_of!(DecisionSuppressKey, tgid)), ("operation", offset_of!(DecisionSuppressKey, operation)), ("verdict", offset_of!(DecisionSuppressKey, verdict))]),
+			("DecisionSuppressKey", size_of::<DecisionSuppressKey>(), &[("label", offset_of!(DecisionSuppressKey, label)), ("operation", offset_of!(DecisionSuppressKey, operation)), ("verdict", offset_of!(DecisionSuppressKey, verdict))]),
 			("DecisionSuppressValue", size_of::<DecisionSuppressValue>(), &[("window_start", offset_of!(DecisionSuppressValue, window_start)), ("emitted", offset_of!(DecisionSuppressValue, emitted)), ("dropped", offset_of!(DecisionSuppressValue, dropped))]),
 			("Arena", size_of::<Arena>(), &[]),
 			("Scratch", size_of::<Scratch>(), &[]),

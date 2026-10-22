@@ -81,7 +81,8 @@ func m4Matrix() {
 	must(err)
 	allowExe := filepath.Join(*outside, "m4-allow-helper")
 	denyExe := filepath.Join(*outside, "m4-deny-helper")
-	for _, target := range []string{allowExe, denyExe} {
+	scopedExe := filepath.Join(*outside, "m4-scoped-helper")
+	for _, target := range []string{allowExe, denyExe, scopedExe} {
 		in, err := os.Open(self)
 		must(err)
 		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
@@ -97,9 +98,16 @@ func m4Matrix() {
 	denyFP := []map[string]string{{"Type": "path", "Operation": "equals", "Value": denyExe}}
 	putProfile(allowName, allowFP, map[string]any{"fileaccess": map[string]any{"writeRules": []string{"+ " + *scope + "/**"}}})
 	putProfile(denyName, denyFP, map[string]any{"filter": map[string]any{"defaultAction": "block"}})
+	scopedName := "M4 scoped app"
+	scopedFP := []map[string]string{{"Type": "path", "Operation": "equals", "Value": scopedExe}}
+	putProfile(scopedName, scopedFP, map[string]any{
+		"filter":     map[string]any{"defaultAction": "block"},
+		"fileaccess": map[string]any{"writeRules": []string{"+ " + *scope + "/**"}},
+	})
 	must(setMode("enforce"))
 	report(m4Run(allowExe, "noop"), "allow helper learned")
 	report(m4Run(denyExe, "noop"), "deny helper learned")
+	report(m4Run(scopedExe, "noop"), "scoped helper learned")
 
 	for _, tc := range []struct {
 		op   string
@@ -139,6 +147,36 @@ func m4Matrix() {
 		}
 	}
 
+	// Profile-default (NOMATCH) denials on objects outside every scope. The
+	// unscoped folder shares the scope's mount, so a rename reaches the hook.
+	unscoped := filepath.Join(filepath.Dir(*scope), "m4-unscoped")
+	must(os.RemoveAll(unscoped))
+	must(os.MkdirAll(unscoped, 0o755))
+	outsideDelete := filepath.Join(unscoped, "default-delete")
+	must(os.WriteFile(outsideDelete, []byte("m4"), 0o644))
+	report(m4Run(scopedExe, "delete", outsideDelete), "delete outside every scope allowed (not covered)")
+	renameSource := filepath.Join(base, "default-rename-source")
+	must(os.WriteFile(renameSource, []byte("m4"), 0o644))
+	renameDest := filepath.Join(unscoped, "default-rename-destination")
+	report(!m4Run(scopedExe, "rename", renameSource, renameDest), "rename to outside every scope denied by the profile default")
+	row, err := m4WaitAny("rename", "deny", renameSource, scopedName)
+	report(err == nil, fmt.Sprintf("Monitor records the default-denied rename (dest %q): %v", row.DestPath, err))
+	time.Sleep(500 * time.Millisecond)
+	rows, err := m4Records()
+	must(err)
+	recorded := false
+	for _, row := range rows {
+		recorded = recorded || row.Path == outsideDelete
+	}
+	report(!recorded, "uncovered delete outside every scope has no Monitor record")
+	notices, err := m4Notices()
+	must(err)
+	noticed := false
+	for _, notice := range notices {
+		noticed = noticed || notice.Type == 0 && strings.Contains(notice.Message, renameSource)
+	}
+	report(noticed, "default-denied rename raises a deny notice")
+
 	must(setMode("audit"))
 	auditPath := filepath.Join(base, "audit-delete-source")
 	must(os.WriteFile(auditPath, []byte("m4"), 0o644))
@@ -146,7 +184,7 @@ func m4Matrix() {
 	_, err = m4WaitRecord("delete", "would-deny", auditPath, "", denyName)
 	report(err == nil, fmt.Sprintf("Monitor audit would-deny: %v", err))
 	time.Sleep(time.Second)
-	notices, err := m4Notices()
+	notices, err = m4Notices()
 	report(err == nil, fmt.Sprintf("query notices after audit: %v", err))
 	if err == nil {
 		found := false
@@ -177,6 +215,67 @@ func m4Matrix() {
 	report(drops > 0, fmt.Sprintf("suppressor counted %d dropped records", drops))
 	d, err := getDiagnostics()
 	report(err == nil && d.Structural.State == "active", "daemon healthy after burst")
+
+	// The same app's deletes spread over one process each, as `find -exec rm`
+	// or `xargs -n1 rm` would: the budget is the app's, so most are dropped.
+	const spread = 10000
+	for i := 0; i < spread; i++ {
+		must(os.WriteFile(filepath.Join(base, fmt.Sprintf("spread-%05d", i)), nil, 0o644))
+	}
+	mid, err := getDiagnostics()
+	must(err)
+	started := time.Now()
+	failed := m4Spread(allowExe, base, spread)
+	elapsed := time.Since(started)
+	report(failed == 0, fmt.Sprintf("%d deletes by %d processes allowed in %s (%d failed)", spread, spread, elapsed.Round(time.Millisecond), failed))
+	// At most one window's budget per started second, plus the window open at the start.
+	budget := uint64(64 * (int(elapsed/time.Second) + 2))
+	time.Sleep(500 * time.Millisecond)
+	d, err = getDiagnostics()
+	must(err)
+	spreadDrops := d.Structural.DecisionDrops - mid.Structural.DecisionDrops
+	report(spreadDrops+budget >= spread, fmt.Sprintf("multi-process burst: %d of %d records dropped (at most %d emitted)", spreadDrops, spread, budget))
+	// A window's drop count rides on the key's first record of the next window.
+	time.Sleep(1100 * time.Millisecond)
+	flush := filepath.Join(base, "spread-flush")
+	must(os.WriteFile(flush, nil, 0o644))
+	report(m4Run(allowExe, "delete", flush), "delete after the burst windows allowed")
+	_, err = m4WaitRecord("delete", "allow", flush, "", allowName)
+	report(err == nil, fmt.Sprintf("Monitor records the delete after the bursts: %v", err))
+	d, err = getDiagnostics()
+	must(err)
+	allDrops := d.Structural.DecisionDrops - before.Structural.DecisionDrops
+	suppressed := d.Structural.DecisionSuppressed - before.Structural.DecisionSuppressed
+	report(suppressed > 0 && suppressed <= allDrops, fmt.Sprintf("records reported %d suppressed of %d dropped", suppressed, allDrops))
+	report(d.Structural.State == "active", "daemon healthy after multi-process burst")
+}
+
+// m4Spread deletes `spread-%05d` files in dir with one helper process each,
+// four at a time, and returns how many failed.
+func m4Spread(exe, dir string, count int) int {
+	jobs := make(chan int)
+	failures := make(chan int, 4)
+	for w := 0; w < 4; w++ {
+		go func() {
+			failed := 0
+			for i := range jobs {
+				path := filepath.Join(dir, fmt.Sprintf("spread-%05d", i))
+				if err := exec.Command(exe, "--m4-helper", "delete", path).Run(); err != nil {
+					failed++
+				}
+			}
+			failures <- failed
+		}()
+	}
+	for i := 0; i < count; i++ {
+		jobs <- i
+	}
+	close(jobs)
+	failed := 0
+	for w := 0; w < 4; w++ {
+		failed += <-failures
+	}
+	return failed
 }
 
 func m4Run(exe string, args ...string) bool {
@@ -223,6 +322,24 @@ func m4WaitRecord(op, verdict, path, dest, app string) (m4Record, error) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	return m4Record{}, fmt.Errorf("missing op=%s verdict=%s path=%s dest=%s app=%s in %d recent records", op, verdict, path, dest, app, len(rows))
+}
+
+// m4WaitAny waits for a record of op, verdict, source path and app, whatever
+// its destination.
+func m4WaitAny(op, verdict, path, app string) (m4Record, error) {
+	for i := 0; i < 40; i++ {
+		rows, err := m4Records()
+		if err != nil {
+			return m4Record{}, err
+		}
+		for _, row := range rows {
+			if row.Op == op && row.Path == path && row.Verdict == verdict && row.AppName == app {
+				return row, nil
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return m4Record{}, fmt.Errorf("missing op=%s verdict=%s path=%s app=%s", op, verdict, path, app)
 }
 
 func m4Notices() ([]m4Notice, error) {

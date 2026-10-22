@@ -37,10 +37,11 @@ const HEADER: u32 = core::mem::size_of::<RecordHeader>() as u32;
 const RECORD_SLOT_FORK: u32 = 0;
 const RECORD_SLOT_EXEC: u32 = 1;
 
-/// A structural hook's caller: its policy in the active bank and the labelling
-/// reason to count if that policy denies.
+/// A structural hook's caller: its label, its policy in the active bank and the
+/// labelling reason to count if that policy denies.
 #[derive(Clone, Copy)]
 pub struct Caller {
+	pub label: u32,
 	pub policy: u32,
 	pub reason: u32,
 }
@@ -65,7 +66,7 @@ pub fn caller_policy(settings: &Settings, bank: u32, hook: u32) -> Option<Caller
 			Some(None) => LABEL_UNIDENTIFIED,
 			Some(Some(_)) => match effective(tgid, start) {
 				Some((label, _)) => label,
-				None => return Some(Caller { policy: POLICY_PENDING, reason: REASON_UNLABELLED }),
+				None => return Some(Caller { label: LABEL_PENDING, policy: POLICY_PENDING, reason: REASON_UNLABELLED }),
 			},
 			None => {
 				crate::decide::count(REASON_UNREADABLE, hook);
@@ -74,7 +75,7 @@ pub fn caller_policy(settings: &Settings, bank: u32, hook: u32) -> Option<Caller
 		}
 	};
 	let (policy, reason) = label_policy(bank, label);
-	Some(Caller { policy, reason })
+	Some(Caller { label, policy, reason })
 }
 
 #[inline(always)]
@@ -103,6 +104,12 @@ struct Wait {
 pub const WAIT_SKIPPED: u32 = 0;
 pub const WAIT_RESOLVED: u32 = 1;
 pub const WAIT_TIMED_OUT: u32 = 2;
+
+/// Whether the daemon has the label wait switched on.
+#[inline(always)]
+pub fn wait_enabled() -> bool {
+	WAIT.get(0).is_some_and(|control| control.enabled != 0)
+}
 
 /// Spins until the daemon resolves the pending caller `(tgid, start)` or
 /// `WAIT_CAP_NS` passes. It never waits while the wait is off, the daemon's
@@ -176,7 +183,7 @@ unsafe extern "C" fn wait_step(_index: u64, ctx: *mut c_void) -> i64 {
 /// sequence; a pending record resolved by the daemon for the same sequence
 /// yields the resolved label. `None` when the process has no record.
 #[inline(always)]
-pub(crate) fn effective(tgid: u32, start: u64) -> Option<(u32, u64)> {
+fn effective(tgid: u32, start: u64) -> Option<(u32, u64)> {
 	// SAFETY: copied immediately.
 	let proc = unsafe { PROCS.get(&tgid) }.copied()?;
 	if start.wrapping_sub(proc.start) > proc.span as u64 {

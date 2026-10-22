@@ -19,7 +19,7 @@
   "WaitSettings": {"size": 16, "offsets": {"heartbeat": 0, "max_waiters": 8, "enabled": 12}},
   "RecordHeader": {"size": 104, "offsets": {"kind": 0, "tgid": 4, "start": 8, "seq": 16, "exe": 24, "script": 48, "parent_seq": 72, "parent_tgid": 80, "flags": 84, "args_len": 88, "env_len": 92, "path_len": 96}},
   "DecisionRecord": {"size": 16480, "offsets": {"kind": 0, "operation": 4, "verdict": 8, "reason": 12, "tgid": 16, "label": 20, "bank": 24, "flags": 28, "start": 32, "source": 40, "target": 56, "source_context": 72, "target_context": 76, "source_len": 80, "target_len": 84, "suppressed": 88, "source_path": 96, "target_path": 8288}},
-  "DecisionSuppressKey": {"size": 12, "offsets": {"tgid": 0, "operation": 4, "verdict": 8}},
+  "DecisionSuppressKey": {"size": 12, "offsets": {"label": 0, "operation": 4, "verdict": 8}},
   "DecisionSuppressValue": {"size": 24, "offsets": {"window_start": 0, "emitted": 8, "dropped": 16}},
   "Arena": {"size": 1052672},
   "Scratch": {"size": 20480},
