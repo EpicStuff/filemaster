@@ -82,6 +82,11 @@ func TestABImanifestMatchesGoLayout(t *testing.T) {
 			"kind": 0, "tgid": 4, "start": 8, "seq": 16, "exe": 24, "script": 48, "parent_seq": 72,
 			"parent_tgid": 80, "flags": 84, "args_len": 88, "env_len": 92, "path_len": 96,
 		}},
+		{"DecisionRecord", decisionRecordSize, map[string]int{
+			"kind": 0, "operation": 4, "verdict": 8, "reason": 12, "tgid": 16, "label": 20, "bank": 24, "flags": 28,
+			"start": 32, "source": 40, "target": 56, "source_context": 72, "target_context": 76,
+			"source_len": 80, "target_len": 84, "suppressed": 88, "source_path": 96, "target_path": 8288,
+		}},
 		{"Pattern", patternSize, map[string]int{"off": 0, "len": 4, "recursive": 8, "chunk_off": 12, "chunk_len": 16}},
 		{"Chunk", chunkSize, map[string]int{"star": 0, "token_off": 4, "token_len": 8}},
 		{"Token", tokenSize, map[string]int{"kind": 0, "byte": 1, "negated": 2, "range_off": 4, "range_len": 8}},
@@ -105,7 +110,9 @@ func TestABImanifestMatchesGoLayout(t *testing.T) {
 		"AUDIT_COUNTERS": auditSlots, "NOMATCH_ENTRIES": nomatchEntries, "HOOKS": hookCount, "REASONS": reasonCount,
 		"MAX_LABELS": maxLabels, "MAX_POLICIES": maxPolicies, "MAX_RULELISTS": maxRuleLists, "MAX_POLICY_LISTS": maxPolicyLists,
 		"MAX_PROCS": maxProcs, "MAX_EXEC_LABELS": maxExecLabels, "EXEC_SCRATCH_ENTRIES": execScratchSize,
-		"RECORDS_SIZE": recordsSize, "RECORD_BUF_SIZE": recordBufSize, "ARGS_MAX": argsMax, "ENV_MAX": envMax,
+		"RECORDS_SIZE": recordsSize, "RECORD_BUF_SIZE": recordBufSize, "DECISION_RECORD_SIZE": decisionRecordSize,
+		"DECISION_PATH_MAX": decisionPathMax, "DECISION_SUPPRESS_ENTRIES": decisionSuppressEntries,
+		"DECISION_SUPPRESS_LIMIT": decisionSuppressLimit, "ARGS_MAX": argsMax, "ENV_MAX": envMax,
 		"LABEL_COUNTERS": labelCounters, "WAIT_CAP_NS": int(waitCap), "WAIT_STALE_NS": int(waitStale),
 	} {
 		if got, ok := manifest.Constants[name]; !ok || got != want {

@@ -9,7 +9,8 @@ use filemaster_lsm_common::decision_maps::{
 };
 use filemaster_lsm_common::label_maps::{
 	EXEC_SCRATCH_ENTRIES, LABEL_COUNTERS as LABEL_COUNTER_SLOTS, MAX_EXEC_LABELS, MAX_LABELS,
-	MAX_POLICY_LISTS, MAX_PROCS, MAX_RULELISTS, NOMATCH_ENTRIES, RECORDS_SIZE,
+	MAX_POLICY_LISTS, MAX_PROCS, MAX_RULELISTS, NOMATCH_ENTRIES, RECORDS_SIZE, DECISION_SUPPRESS_ENTRIES,
+	DecisionSuppressKey, DecisionSuppressValue, DecisionPath,
 };
 use filemaster_lsm_common::{
 	Arena, Chunk, Context, ExecFile, ExecLabelKey, ObjectKey, ObjectValue, Pattern, PolicyListKey,
@@ -84,6 +85,13 @@ pub static RECORDS: RingBuf = RingBuf::with_byte_size(RECORDS_SIZE as u32, 0);
 /// One record buffer per writing program (`RECORD_SLOT_FORK`, `RECORD_SLOT_EXEC`).
 #[map]
 pub static RECORD_BUF: PerCpuArray<RecordBuf> = PerCpuArray::with_max_entries(2, 0);
+#[map]
+pub static DECISION_SUPPRESS: LruHashMap<DecisionSuppressKey, DecisionSuppressValue> =
+	LruHashMap::with_max_entries(DECISION_SUPPRESS_ENTRIES, 0);
+#[map]
+pub static DECISION_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+#[map]
+pub static DECISION_ZERO: Array<DecisionPath> = Array::with_max_entries(1, 0);
 #[map]
 pub static LABEL_COUNTERS: PerCpuArray<u64> = PerCpuArray::with_max_entries(LABEL_COUNTER_SLOTS as u32, 0);
 /// The daemon's label-wait switch, cap and heartbeat.

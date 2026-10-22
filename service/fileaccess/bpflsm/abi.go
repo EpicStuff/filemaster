@@ -53,30 +53,35 @@ const (
 
 	recordExec          = 1
 	recordFork          = 2
+	recordDecision      = 3
 	recordArgsTruncated = 1
 	recordEnvTruncated  = 2
 
-	settingsSize     = 32
-	waitSettingsSize = 16
-	objectKeySize    = 24
-	objectValueSize  = 8
-	scopeRefSize     = 12
-	ruleRefSize      = 4
-	contextSize      = 24 + contextScopes*scopeRefSize
-	ruleListSize     = 8 + contextRules*ruleRefSize
-	policyListKey    = 12
-	execFileSize     = 24
-	execLabelKey     = 2 * execFileSize
-	procValueSize    = 24
-	resolvedSize     = 24
-	recordHeader     = 104
-	patternSize      = 20
-	chunkSize        = 12
-	tokenSize        = 12
-	rangeSize        = 8
-	arenaValueSize   = arenaSize + 4096
-	scratchSize      = 16384 + 4096
-	offsetsSize      = 112
+	settingsSize            = 32
+	waitSettingsSize        = 16
+	objectKeySize           = 24
+	objectValueSize         = 8
+	scopeRefSize            = 12
+	ruleRefSize             = 4
+	contextSize             = 24 + contextScopes*scopeRefSize
+	ruleListSize            = 8 + contextRules*ruleRefSize
+	policyListKey           = 12
+	execFileSize            = 24
+	execLabelKey            = 2 * execFileSize
+	procValueSize           = 24
+	resolvedSize            = 24
+	recordHeader            = 104
+	decisionRecordSize      = 16480
+	decisionPathMax         = 8192
+	decisionSuppressEntries = 4096
+	decisionSuppressLimit   = 64
+	patternSize             = 20
+	chunkSize               = 12
+	tokenSize               = 12
+	rangeSize               = 8
+	arenaValueSize          = arenaSize + 4096
+	scratchSize             = 16384 + 4096
+	offsetsSize             = 112
 
 	contextOverflow = 1
 	ruleAllow       = 1
@@ -110,18 +115,20 @@ func checkMapLayout(spec *ebpf.CollectionSpec) error {
 
 		"STATE_SEQUENCE": {4, 8, 1},
 
-		"POLICY_LISTS":   {policyListKey, 4, maxPolicyLists},
-		"RULELISTS":      {4, ruleListSize, numBanks * maxRuleLists},
-		"LABEL_POLICY":   {4, 4, numBanks * maxLabels},
-		"PROCS":          {4, procValueSize, maxProcs},
-		"RESOLVED":       {4, resolvedSize, maxProcs},
-		"EXEC_LABELS":    {execLabelKey, 4, maxExecLabels},
-		"EXEC_SCRATCH":   {8, execFileSize, execScratchSize},
-		"RECORDS":        {0, 0, recordsSize},
-		"RECORD_BUF":     {4, recordBufSize, 2},
-		"LABEL_COUNTERS": {4, 8, labelCounters},
-		"WAIT":           {4, waitSettingsSize, 1},
-		"WAITERS":        {4, 8, 1},
+		"POLICY_LISTS":      {policyListKey, 4, maxPolicyLists},
+		"RULELISTS":         {4, ruleListSize, numBanks * maxRuleLists},
+		"LABEL_POLICY":      {4, 4, numBanks * maxLabels},
+		"PROCS":             {4, procValueSize, maxProcs},
+		"RESOLVED":          {4, resolvedSize, maxProcs},
+		"EXEC_LABELS":       {execLabelKey, 4, maxExecLabels},
+		"EXEC_SCRATCH":      {8, execFileSize, execScratchSize},
+		"RECORDS":           {0, 0, recordsSize},
+		"RECORD_BUF":        {4, recordBufSize, 2},
+		"DECISION_SUPPRESS": {12, 24, decisionSuppressEntries},
+		"DECISION_DROPS":    {4, 8, 1},
+		"LABEL_COUNTERS":    {4, 8, labelCounters},
+		"WAIT":              {4, waitSettingsSize, 1},
+		"WAITERS":           {4, 8, 1},
 	} {
 		m, ok := spec.Maps[name]
 		if !ok {
@@ -329,6 +336,37 @@ func encodeResolved(start, seq uint64, label uint32) []byte {
 // decodeRecord parses one ring-buffer record: the RecordHeader, then argv and
 // envp as NUL-separated strings.
 func decodeRecord(b []byte) (Record, error) {
+	if len(b) < 4 {
+		return Record{}, fmt.Errorf("record of %d bytes has no kind", len(b))
+	}
+	if binary.LittleEndian.Uint32(b[0:]) == recordDecision {
+		if len(b) < decisionRecordSize {
+			return Record{}, fmt.Errorf("decision record of %d bytes is shorter than %d", len(b), decisionRecordSize)
+		}
+		sourceLen := int(binary.LittleEndian.Uint32(b[80:]))
+		targetLen := int(binary.LittleEndian.Uint32(b[84:]))
+		if sourceLen > decisionPathMax || targetLen > decisionPathMax {
+			return Record{}, fmt.Errorf("decision path lengths %d and %d exceed %d", sourceLen, targetLen, decisionPathMax)
+		}
+		flags := binary.LittleEndian.Uint32(b[28:])
+		decision := &DecisionRecord{
+			Operation:     binary.LittleEndian.Uint32(b[4:]),
+			Verdict:       binary.LittleEndian.Uint32(b[8:]),
+			Reason:        binary.LittleEndian.Uint32(b[12:]),
+			Label:         binary.LittleEndian.Uint32(b[20:]),
+			Bank:          binary.LittleEndian.Uint32(b[24:]),
+			SourceValid:   flags&1 != 0,
+			TargetValid:   flags&2 != 0,
+			Source:        fileID{dev: binary.LittleEndian.Uint64(b[40:]), ino: binary.LittleEndian.Uint64(b[48:])},
+			Target:        fileID{dev: binary.LittleEndian.Uint64(b[56:]), ino: binary.LittleEndian.Uint64(b[64:])},
+			SourceContext: binary.LittleEndian.Uint32(b[72:]),
+			TargetContext: binary.LittleEndian.Uint32(b[76:]),
+			SourcePath:    string(b[96 : 96+sourceLen]),
+			TargetPath:    string(b[8288 : 8288+targetLen]),
+			Suppressed:    binary.LittleEndian.Uint32(b[88:]),
+		}
+		return Record{Kind: recordDecision, TGID: binary.LittleEndian.Uint32(b[16:]), Start: binary.LittleEndian.Uint64(b[32:]), Decision: decision}, nil
+	}
 	if len(b) < recordHeader {
 		return Record{}, fmt.Errorf("record of %d bytes is shorter than its %d-byte header", len(b), recordHeader)
 	}

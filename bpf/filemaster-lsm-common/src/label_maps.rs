@@ -209,6 +209,71 @@ pub struct RecordHeader {
 #[derive(Clone, Copy)]
 pub struct RecordBuf(pub [u8; RECORD_BUF_SIZE]);
 
+pub const RECORD_DECISION: u32 = 3;
+pub const DECISION_DELETE: u32 = 1;
+pub const DECISION_CREATE: u32 = 2;
+pub const DECISION_RENAME: u32 = 3;
+pub const DECISION_LINK: u32 = 4;
+pub const DECISION_ALLOW: u32 = 0;
+pub const DECISION_DENY: u32 = 1;
+pub const DECISION_AUDIT: u32 = 2;
+pub const DECISION_REASON_RULE: u32 = 10;
+pub const DECISION_REASON_DEFAULT: u32 = 11;
+pub const DECISION_REASON_NONE: u32 = 12;
+pub const DECISION_SOURCE_VALID: u32 = 1;
+pub const DECISION_TARGET_VALID: u32 = 2;
+pub const DECISION_PATH_MAX: usize = crate::decision_maps::MAX_REL as usize;
+pub const DECISION_RECORD_SIZE: usize = core::mem::size_of::<DecisionRecord>();
+pub const MAP_DECISION_DROPS: &str = "DECISION_DROPS";
+pub const MAP_DECISION_SUPPRESS: &str = "DECISION_SUPPRESS";
+pub const DECISION_SUPPRESS_ENTRIES: u32 = 4096;
+pub const DECISION_SUPPRESS_LIMIT: u32 = 64;
+pub const DECISION_SUPPRESS_WINDOW_NS: u64 = 1_000_000_000;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DecisionRecord {
+	pub kind: u32,
+	pub operation: u32,
+	pub verdict: u32,
+	pub reason: u32,
+	pub tgid: u32,
+	pub label: u32,
+	pub bank: u32,
+	pub flags: u32,
+	pub start: u64,
+	pub source: crate::FileId,
+	pub target: crate::FileId,
+	pub source_context: u32,
+	pub target_context: u32,
+	pub source_len: u32,
+	pub target_len: u32,
+	pub suppressed: u32,
+	pub _pad: u32,
+	pub source_path: [u8; DECISION_PATH_MAX],
+	pub target_path: [u8; DECISION_PATH_MAX],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DecisionSuppressKey {
+	pub tgid: u32,
+	pub operation: u32,
+	pub verdict: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DecisionSuppressValue {
+	pub window_start: u64,
+	pub emitted: u64,
+	pub dropped: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DecisionPath(pub [u8; DECISION_PATH_MAX]);
+
 #[cfg(feature = "user")]
 mod user {
 	use super::*;
@@ -222,4 +287,6 @@ mod user {
 	unsafe impl aya::Pod for Resolved {}
 	unsafe impl aya::Pod for PolicyListKey {}
 	unsafe impl aya::Pod for RuleList {}
+	unsafe impl aya::Pod for DecisionSuppressKey {}
+	unsafe impl aya::Pod for DecisionSuppressValue {}
 }

@@ -20,44 +20,64 @@ mod matcher;
 use aya_ebpf::macros::{btf_tracepoint, lsm};
 use aya_ebpf::programs::{BtfTracePointContext, LsmContext};
 use filemaster_lsm_common::decision_maps::{HOOK_LINK, HOOK_MKDIR, HOOK_RENAME, HOOK_RMDIR, HOOK_UNLINK};
+use filemaster_lsm_common::label_maps::{DECISION_CREATE, DECISION_DELETE, DECISION_LINK, DECISION_RENAME};
 
 /// `inode_link(struct dentry *old_dentry, struct inode *dir, struct dentry *new_dentry)`.
 #[lsm(hook = "inode_link")]
 pub fn inode_link(ctx: LsmContext) -> i32 {
-    decide::clamped(decide::hard_link(
-        kernel::Dentry::from_arg(&ctx, 0),
-        kernel::Dentry::from_arg(&ctx, 2),
-        HOOK_LINK,
-    ))
+	let source = kernel::Dentry::from_arg(&ctx, 0);
+	let target = kernel::Dentry::from_arg(&ctx, 2);
+	let result = decide::hard_link(source, target, HOOK_LINK);
+	if let Some(result) = result.as_ref() {
+		decide::record(result, source.raw(), target.raw(), DECISION_LINK);
+	}
+	decide::clamped(result)
 }
 
 /// `inode_rename(struct inode *old_dir, struct dentry *old_dentry,
 /// struct inode *new_dir, struct dentry *new_dentry)`.
 #[lsm(hook = "inode_rename")]
 pub fn inode_rename(ctx: LsmContext) -> i32 {
-    decide::clamped(decide::rename(
-        kernel::Dentry::from_arg(&ctx, 1),
-        kernel::Dentry::from_arg(&ctx, 3),
-        HOOK_RENAME,
-    ))
+	let source = kernel::Dentry::from_arg(&ctx, 1);
+	let target = kernel::Dentry::from_arg(&ctx, 3);
+	let result = decide::rename(source, target, HOOK_RENAME);
+	if let Some(result) = result.as_ref() {
+		decide::record(result, source.raw(), target.raw(), DECISION_RENAME);
+	}
+	decide::clamped(result)
 }
 
 /// `inode_unlink(struct inode *dir, struct dentry *dentry)`.
 #[lsm(hook = "inode_unlink")]
 pub fn inode_unlink(ctx: LsmContext) -> i32 {
-    decide::clamped(decide::remove(kernel::Dentry::from_arg(&ctx, 1), false, HOOK_UNLINK))
+	let source = kernel::Dentry::from_arg(&ctx, 1);
+	let result = decide::remove(source, false, HOOK_UNLINK);
+	if let Some(result) = result.as_ref() {
+		decide::record(result, source.raw(), 0, DECISION_DELETE);
+	}
+	decide::clamped(result)
 }
 
 /// `inode_rmdir(struct inode *dir, struct dentry *dentry)`.
 #[lsm(hook = "inode_rmdir")]
 pub fn inode_rmdir(ctx: LsmContext) -> i32 {
-    decide::clamped(decide::remove(kernel::Dentry::from_arg(&ctx, 1), true, HOOK_RMDIR))
+	let source = kernel::Dentry::from_arg(&ctx, 1);
+	let result = decide::remove(source, true, HOOK_RMDIR);
+	if let Some(result) = result.as_ref() {
+		decide::record(result, source.raw(), 0, DECISION_DELETE);
+	}
+	decide::clamped(result)
 }
 
 /// `inode_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)`.
 #[lsm(hook = "inode_mkdir")]
 pub fn inode_mkdir(ctx: LsmContext) -> i32 {
-    decide::clamped(decide::mkdir(kernel::Dentry::from_arg(&ctx, 1), HOOK_MKDIR))
+	let source = kernel::Dentry::from_arg(&ctx, 1);
+	let result = decide::mkdir(source, HOOK_MKDIR);
+	if let Some(result) = result.as_ref() {
+		decide::record(result, source.raw(), 0, DECISION_CREATE);
+	}
+	decide::clamped(result)
 }
 
 /// `bprm_check_security(struct linux_binprm *bprm)`. Observes only.

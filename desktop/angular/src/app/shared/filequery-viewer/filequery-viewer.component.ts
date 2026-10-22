@@ -47,6 +47,7 @@ interface FileActivityChartPoint {
 	timestamp: number;
 	allowed: number;
 	blocked: number;
+	wouldDeny: number;
 }
 
 const fileActivityChartConfig: ChartConfig<FileActivityChartPoint> = {
@@ -59,9 +60,13 @@ const fileActivityChartConfig: ChartConfig<FileActivityChartPoint> = {
 			lineColor: 'text-red-200',
 			areaColor: 'text-red-100 text-opacity-25',
 		},
+		wouldDeny: {
+			lineColor: 'text-yellow-200',
+			areaColor: 'text-yellow-100 text-opacity-25',
+		},
 	},
 	time: { from: -10 * 60 },
-	tooltipFormat: point => `Allowed: ${point.allowed}\nBlocked: ${point.blocked}`,
+	tooltipFormat: point => `Allowed: ${point.allowed}\nBlocked: ${point.blocked}\nWould block (audit): ${point.wouldDeny}`,
 	showDataPoints: true,
 	fillEmptyTicks: { interval: 60 },
 };
@@ -185,9 +190,11 @@ export class FilequeryViewerComponent implements OnInit {
 				(results.chart || []).forEach(result => {
 					const event = result as unknown as FileAccessRecord;
 					const timestamp = Math.floor(new Date(event.at).getTime() / 60_000) * 60;
-					const point = points.get(timestamp) || { timestamp, allowed: 0, blocked: 0 };
+					const point = points.get(timestamp) || { timestamp, allowed: 0, blocked: 0, wouldDeny: 0 };
 					if (event.verdict === 'allow') {
 						point.allowed += 1;
+					} else if (event.verdict === 'would-deny') {
+						point.wouldDeny += 1;
 					} else {
 						point.blocked += 1;
 					}

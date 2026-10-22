@@ -122,6 +122,7 @@ pub struct EvalState {
 	pub denied: u32,
 	pub covered: u32,
 	pub overflow: u32,
+	pub deny_reason: u32,
 }
 
 impl EvalState {
@@ -596,6 +597,7 @@ fn finish(e: &mut EvalState, matched: bool) {
 						e.covered = 1;
 					} else {
 						e.denied = 1;
+						e.deny_reason = filemaster_lsm_common::label_maps::DECISION_REASON_DEFAULT;
 					}
 				}
 				// Either way, the first containing scope decides this context.
@@ -633,6 +635,7 @@ fn rule_applies(e: &mut EvalState) {
 		e.covered = 1;
 	} else {
 		e.denied = 1;
+		e.deny_reason = filemaster_lsm_common::label_maps::DECISION_REASON_RULE;
 	}
 	e.context += 1;
 	e.phase = E_CONTEXT;

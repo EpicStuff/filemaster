@@ -11,18 +11,23 @@ use core::ffi::c_void;
 use core::intrinsics::{AtomicOrdering, atomic_xadd, atomic_xsub};
 use core::sync::atomic::{Ordering, compiler_fence};
 
-use aya_ebpf::helpers::r#gen::{bpf_loop, bpf_probe_read_kernel};
+use aya_ebpf::helpers::r#gen::{bpf_ktime_get_ns, bpf_loop, bpf_probe_read_kernel};
 use filemaster_lsm_common::decision_maps::{
 	EVAL_BUDGET, HOOKS, HOOK_LINK, HOOK_MKDIR, LIST_EXECUTE, LIST_READ, LIST_WRITE, MAX_REL, REASON_BUDGET,
 	REASON_CONTEXT_OVERFLOW, REASON_DEPTH, REASON_PATH_TOO_LONG, REASON_UNREADABLE,
 	REASON_PENDING, REASON_STATE_CONTENTION, REASON_UNREGISTERED_ROOT, REASON_WAIT_TIMEOUT, REL_END, SCRATCH_MASK, WALK_LIMIT,
 };
-use filemaster_lsm_common::label_maps::MAX_POLICIES;
-use filemaster_lsm_common::{Bank, DecisionOp, FileId, ObjectKey, TargetKind, Verdict};
+use filemaster_lsm_common::label_maps::{
+	MAX_POLICIES, LABEL_PENDING, RECORD_DECISION, DECISION_REASON_DEFAULT, DECISION_REASON_NONE,
+	DECISION_ALLOW, DECISION_DENY, DECISION_AUDIT, DECISION_SOURCE_VALID, DECISION_TARGET_VALID,
+	DECISION_PATH_MAX, DECISION_SUPPRESS_LIMIT, DECISION_SUPPRESS_WINDOW_NS, DecisionRecord,
+	DecisionSuppressKey, DecisionSuppressValue,
+};
+use filemaster_lsm_common::{Bank, DecisionOp, Dev, FileId, Ino, ObjectKey, TargetKind, Verdict};
 
 use crate::kernel;
 use crate::label::{self, NO_REASON};
-use crate::maps::{AUDIT, COUNTERS, EVAL, NOMATCH, OBJECTS, SCRATCH, SETTINGS, STATE_SEQUENCE};
+use crate::maps::{AUDIT, COUNTERS, DECISION_DROPS, DECISION_SUPPRESS, DECISION_ZERO, EVAL, NOMATCH, OBJECTS, RECORDS, SCRATCH, SETTINGS, STATE_SEQUENCE};
 use crate::matcher::{self, SIDE_ALLOW, SIDE_DENY, SIDE_NOT_COVERED};
 
 const WALK_RUNNING: u32 = 0;
@@ -40,6 +45,7 @@ const NO_LEAF: u32 = u32::MAX;
 #[derive(Clone, Copy)]
 struct Walk {
 	dentry: u64,
+	object: FileId,
 	bank: u32,
 	policy: u32,
 	slot: u32,
@@ -55,11 +61,13 @@ struct Walk {
 
 /// An operation's raw verdict and the operation responsible for a possible
 /// would-deny audit count.
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DecisionResult {
 	verdict: Verdict,
 	operation: DecisionOp,
-	audit: bool,
+	audit: u32,
+	covered: u32,
 	/// The labelling reason to count when this result denies.
 	reason: u32,
 	hook: u32,
@@ -74,10 +82,10 @@ pub fn clamped(result: Option<DecisionResult>) -> i32 {
 	if result.verdict.allows() {
 		return 0;
 	}
-	if result.reason != NO_REASON {
+	if result.reason >= REASON_PENDING && result.reason < filemaster_lsm_common::decision_maps::REASONS as u32 {
 		count(result.reason, result.hook);
 	}
-	if result.audit {
+	if result.audit != 0 {
 		increment(&AUDIT, result.operation.0);
 		return 0;
 	}
@@ -120,7 +128,7 @@ pub fn rename(source: kernel::Dentry, destination: kernel::Dentry, hook: u32) ->
 #[inline(always)]
 fn with_wait(hook: u32, decide: impl Fn() -> u64) -> Option<DecisionResult> {
 	let first = exclusive(hook, &decide)?;
-	if first.verdict.allows() || first.reason != REASON_PENDING || first.audit {
+	if first.verdict.allows() || first.reason != REASON_PENDING || first.audit != 0 {
 		return Some(first);
 	}
 	let Some(start) = kernel::Task::current().group_leader().and_then(|leader| leader.start_boottime()) else {
@@ -143,6 +151,7 @@ const PACKED_DECIDED: u64 = 1;
 const PACKED_DENY: u64 = 1 << 1;
 const PACKED_AUDIT: u64 = 1 << 2;
 const PACKED_CONTENDED: u64 = 1 << 3;
+const PACKED_COVERED: u64 = 1 << 4;
 
 /// Decides until one attempt kept this CPU's evaluation state to itself. LSM
 /// programs run under `rcu_read_lock` and `migrate_disable` only, so with a
@@ -159,7 +168,8 @@ fn exclusive(hook: u32, decide: &impl Fn() -> u64) -> Option<DecisionResult> {
 			return Some(DecisionResult {
 				verdict: if packed & PACKED_DENY != 0 { Verdict::DENY } else { Verdict::ALLOW },
 				operation: DecisionOp((packed >> 8) as u32 & 0xFF),
-				audit: packed & PACKED_AUDIT != 0,
+				audit: (packed & PACKED_AUDIT != 0) as u32,
+				covered: (packed & PACKED_COVERED != 0) as u32,
 				reason: (packed >> 32) as u32,
 				hook,
 			});
@@ -168,7 +178,8 @@ fn exclusive(hook: u32, decide: &impl Fn() -> u64) -> Option<DecisionResult> {
 	Some(DecisionResult {
 		verdict: Verdict::DENY,
 		operation: if hook == HOOK_MKDIR || hook == HOOK_LINK { DecisionOp::CREATE } else { DecisionOp::DELETE },
-		audit: SETTINGS.get(0).is_some_and(|settings| settings.audit != 0),
+		audit: SETTINGS.get(0).is_some_and(|settings| settings.audit != 0) as u32,
+		covered: 1,
 		reason: REASON_STATE_CONTENTION,
 		hook,
 	})
@@ -191,7 +202,8 @@ fn owned(once: impl FnOnce() -> Option<DecisionResult>) -> u64 {
 		Some(result) => {
 			PACKED_DECIDED
 				| if result.verdict.allows() { 0 } else { PACKED_DENY }
-				| if result.audit { PACKED_AUDIT } else { 0 }
+				| if result.audit != 0 { PACKED_AUDIT } else { 0 }
+				| if result.covered != 0 { PACKED_COVERED } else { 0 }
 				| ((result.operation.0 & 0xFF) as u64) << 8
 				| (result.reason as u64) << 32
 		}
@@ -304,19 +316,20 @@ struct Decision {
 	covered: bool,
 	deny: Option<DecisionOp>,
 	covered_deny: bool,
+	deny_reason: u32,
 }
 
 impl Decision {
 	#[inline(always)]
 	fn new(bank: u32, caller: label::Caller, audit: bool, hook: u32) -> Decision {
-		Decision { bank, caller, audit, hook, covered: false, deny: None, covered_deny: false }
+		Decision { bank, caller, audit, hook, covered: false, deny: None, covered_deny: false, deny_reason: DECISION_REASON_NONE }
 	}
 
 	/// Adds one evaluation. Returns true once the verdict cannot change.
 	#[inline(always)]
 	fn side(&mut self, target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -> bool {
 		let side = evaluate(target, operation, kind, hook);
-		let denies = match side {
+		let denies = match side & 0xFF {
 			SIDE_NOT_COVERED => !nomatch(self.bank, self.caller.policy, operation, kind),
 			SIDE_ALLOW => {
 				self.covered = true;
@@ -330,6 +343,7 @@ impl Decision {
 		};
 		if denies && self.deny.is_none() {
 			self.deny = Some(operation);
+			self.deny_reason = if side & 0xFF == SIDE_NOT_COVERED { DECISION_REASON_DEFAULT } else { side >> 8 };
 		}
 		self.covered_deny
 	}
@@ -343,8 +357,9 @@ impl Decision {
 		DecisionResult {
 			verdict,
 			operation,
-			audit: self.audit,
-			reason: self.caller.reason,
+			audit: self.audit as u32,
+			covered: self.covered as u32,
+			reason: if verdict.allows() { DECISION_REASON_NONE } else if self.deny_reason < REASON_PENDING { self.deny_reason } else if self.caller.reason != NO_REASON { self.caller.reason } else { self.deny_reason },
 			hook: self.hook,
 		}
 	}
@@ -455,6 +470,7 @@ unsafe extern "C" fn walk_step(_index: u64, ctx: *mut c_void) -> i64 {
 			let key = ObjectKey::new(Bank(w.bank), FileId::new(dev, ino));
 			// SAFETY: copied immediately; a concurrent update cannot alias it.
 			if let Some(object) = unsafe { OBJECTS.get(&key) }.copied() {
+				w.object = key.file;
 				w.first_context = object.first_context;
 				w.context_count = object.context_count;
 				w.status = WALK_FOUND;
@@ -520,7 +536,8 @@ unsafe extern "C" fn walk_step(_index: u64, ctx: *mut c_void) -> i64 {
 fn evaluate(target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -> u32 {
 	match target.status {
 		WALK_FOUND => {}
-		WALK_TOO_LONG | WALK_DEPTH => return SIDE_DENY,
+		WALK_TOO_LONG => return SIDE_DENY | (REASON_PATH_TOO_LONG << 8),
+		WALK_DEPTH => return SIDE_DENY | (REASON_DEPTH << 8),
 		_ => return SIDE_NOT_COVERED,
 	}
 	let list = match operation {
@@ -531,7 +548,7 @@ fn evaluate(target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -
 	let entry = operation == DecisionOp::CREATE || operation == DecisionOp::DELETE;
 	let Some(state) = EVAL.get_ptr_mut(0) else {
 		count(REASON_UNREADABLE, hook);
-		return SIDE_DENY;
+		return SIDE_DENY | (REASON_UNREADABLE << 8);
 	};
 	// SAFETY: this CPU's slot; `owned` detects another hook using it meanwhile.
 	let e = unsafe { &mut *state };
@@ -550,10 +567,7 @@ fn evaluate(target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -
 	filemaster_evaluate(hook)
 }
 
-/// Runs the matcher over the evaluation `evaluate` loaded into `EVAL`. A
-/// global function, so the verifier checks it, and its `bpf_loop` callback,
-/// once per program rather than once per call: the hooks evaluate up to five
-/// times per decision and decide twice after a label wait.
+/// Runs the matcher once per program through a global function.
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn filemaster_evaluate(hook: u32) -> u32 {
@@ -563,19 +577,20 @@ pub extern "C" fn filemaster_evaluate(hook: u32) -> u32 {
 	}
 	let Some(state) = EVAL.get_ptr_mut(0) else {
 		count(REASON_UNREADABLE, hook);
-		return SIDE_DENY;
+		return SIDE_DENY | (REASON_UNREADABLE << 8);
 	};
 	// SAFETY: this CPU's slot of a per-CPU array.
 	let e = unsafe { &mut *state };
 	if e.phase != matcher::E_DONE_PUB {
 		count(REASON_BUDGET, hook);
-		return SIDE_DENY;
+		return SIDE_DENY | (REASON_BUDGET << 8);
 	}
 	if e.overflow != 0 {
 		count(REASON_CONTEXT_OVERFLOW, hook);
+		return SIDE_DENY | (REASON_CONTEXT_OVERFLOW << 8);
 	}
 	if e.denied != 0 {
-		SIDE_DENY
+		SIDE_DENY | (e.deny_reason << 8)
 	} else if e.covered != 0 {
 		SIDE_ALLOW
 	} else {
@@ -602,4 +617,166 @@ fn increment(map: &aya_ebpf::maps::PerCpuArray<u64>, index: u32) {
 	// Atomic: a preempted read-modify-write would lose another hook's count.
 	// SAFETY: this CPU's slot of a per-CPU array.
 	unsafe { atomic_xadd::<u64, u64, { AtomicOrdering::Relaxed }>(counter, 1) };
+}
+
+#[inline(always)]
+fn suppress(key: DecisionSuppressKey, now: u64) -> Option<u32> {
+	// SAFETY: the value is read or updated before the hook returns.
+	if let Some(value) = DECISION_SUPPRESS.get_ptr_mut(&key) {
+		// SAFETY: a live map value; concurrent updates may reduce suppression,
+		// but cannot change a decision.
+		let value = unsafe { &mut *value };
+		if now.wrapping_sub(value.window_start) >= DECISION_SUPPRESS_WINDOW_NS {
+			let dropped = value.dropped;
+			value.window_start = now;
+			value.emitted = 1;
+			value.dropped = 0;
+			return Some(dropped.min(u32::MAX as u64) as u32);
+		}
+		// SAFETY: aligned fields in a map value shared across CPUs.
+		let prior = unsafe { atomic_xsub::<u64, u64, { AtomicOrdering::SeqCst }>(&mut value.emitted, u64::MAX) };
+		if prior >= DECISION_SUPPRESS_LIMIT as u64 {
+			unsafe { atomic_xadd::<u64, u64, { AtomicOrdering::Relaxed }>(&mut value.dropped, 1) };
+			increment(&DECISION_DROPS, 0);
+			return None;
+		}
+		return Some(0);
+	}
+	let value = DecisionSuppressValue { window_start: now, emitted: 1, dropped: 0 };
+	let _ = DECISION_SUPPRESS.insert(&key, &value, 0);
+	Some(0)
+}
+
+#[inline(always)]
+fn record_path(walk: &Walk, to: *mut u8) -> Option<(FileId, u32, u32)> {
+	if walk.status != WALK_FOUND || walk.rel > REL_END {
+		return None;
+	}
+	let raw = REL_END - walk.rel;
+	let buffer = SCRATCH.get_ptr_mut(walk.slot)? as *const u8;
+	let from = unsafe { buffer.add((walk.rel & SCRATCH_MASK) as usize) };
+	if raw == MAX_REL {
+		// SAFETY: the walk bounded this exact-size path in its scratch slot.
+		if unsafe { bpf_probe_read_kernel(to as *mut c_void, MAX_REL, from as *const c_void) } != 0 {
+			return None;
+		}
+		return Some((walk.object, walk.first_context, raw));
+	}
+	let len = raw & (MAX_REL - 1);
+	if raw != len {
+		return None;
+	}
+	if len != 0 {
+		// SAFETY: the mask bounds the source length below DECISION_PATH_MAX.
+		if unsafe { bpf_probe_read_kernel(to as *mut c_void, len, from as *const c_void) } != 0 {
+			return None;
+		}
+	}
+	Some((walk.object, walk.first_context, len))
+}
+
+/// Emits a covered structural operation after the verdict is fixed. The ring
+/// reservation is private, and a sequence change discards any path assembled
+/// from a per-CPU scratch slot interrupted by another hook.
+#[inline(never)]
+pub fn record(result: &DecisionResult, source: u64, target: u64, operation: u32) {
+	if result.covered == 0 {
+		return;
+	}
+	let verdict = if result.verdict.allows() { DECISION_ALLOW } else if result.audit != 0 { DECISION_AUDIT } else { DECISION_DENY };
+	let tgid = kernel::current_pid().0;
+	let start = kernel::Task::current().group_leader().and_then(|leader| leader.start_boottime()).unwrap_or(0);
+	let label = label::effective(tgid, start).map(|(label, _)| label).unwrap_or(LABEL_PENDING);
+	// SAFETY: helper returns CLOCK_MONOTONIC nanoseconds.
+	let now = unsafe { bpf_ktime_get_ns() };
+	let Some(suppressed) = suppress(DecisionSuppressKey { tgid, operation, verdict }, now) else { return; };
+	let Some(zero) = DECISION_ZERO.get(0) else {
+		increment(&DECISION_DROPS, 0);
+		return;
+	};
+	for _ in 0..STATE_ATTEMPTS {
+		let Some(sequence) = STATE_SEQUENCE.get_ptr_mut(0) else {
+			increment(&DECISION_DROPS, 0);
+			return;
+		};
+		// SAFETY: aligned per-CPU counter. The ticket invalidates interrupted
+		// decision walks on the same CPU.
+		let ticket = unsafe { atomic_xsub::<u64, u64, { AtomicOrdering::SeqCst }>(sequence, u64::MAX) }.wrapping_add(1);
+		let bank = SETTINGS.get(0).map(|settings| Bank(settings.active_bank).masked().0).unwrap_or(0);
+		let source_walk = walk(bank, 0, 0, kernel::Dentry::from_raw(source), result.hook);
+		let target_walk = if target == 0 { None } else { walk(bank, 0, 1, kernel::Dentry::from_raw(target), result.hook) };
+		let Some(mut entry) = RECORDS.reserve::<DecisionRecord>(0) else {
+			increment(&DECISION_DROPS, 0);
+			return;
+		};
+		let record = entry.as_mut_ptr();
+		// SAFETY: this is a private ring reservation of exactly DecisionRecord
+		// bytes. Every header field and both path arrays are initialized before
+		// it can be submitted.
+		unsafe {
+			(*record).kind = RECORD_DECISION;
+			(*record).operation = operation;
+			(*record).verdict = verdict;
+			(*record).reason = if verdict == DECISION_ALLOW { DECISION_REASON_NONE } else { result.reason };
+			(*record).tgid = tgid;
+			(*record).label = label;
+			(*record).bank = bank;
+			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).flags), 0);
+			(*record).start = start;
+			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source.dev), Dev(0));
+			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source.ino), Ino(0));
+			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target.dev), Dev(0));
+			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target.ino), Ino(0));
+			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source_context), 0);
+			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target_context), 0);
+			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source_len), 0);
+			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target_len), 0);
+			(*record).suppressed = suppressed;
+			core::ptr::write_volatile(core::ptr::addr_of_mut!((*record)._pad), 0);
+		}
+		let source_bytes = unsafe { core::ptr::addr_of_mut!((*record).source_path) as *mut u8 };
+		let target_bytes = unsafe { core::ptr::addr_of_mut!((*record).target_path) as *mut u8 };
+		let zero_bytes = zero.0.as_ptr();
+		// SAFETY: the zero map value and each reserved path array have exactly
+		// DECISION_PATH_MAX bytes.
+		let (clear_source, clear_target) = unsafe {
+			(
+				bpf_probe_read_kernel(source_bytes as *mut c_void, DECISION_PATH_MAX as u32, zero_bytes as *const c_void),
+				bpf_probe_read_kernel(target_bytes as *mut c_void, DECISION_PATH_MAX as u32, zero_bytes as *const c_void),
+			)
+		};
+		if clear_source != 0 || clear_target != 0 {
+			entry.discard(0);
+			increment(&DECISION_DROPS, 0);
+			return;
+		}
+		if let Some(walk) = source_walk.as_ref() {
+			if let Some((id, context, len)) = record_path(walk, source_bytes) {
+				unsafe {
+					(*record).source = id;
+					(*record).source_context = context;
+					(*record).source_len = len;
+					(*record).flags |= DECISION_SOURCE_VALID;
+				}
+			}
+		}
+		if let Some(walk) = target_walk.as_ref() {
+			if let Some((id, context, len)) = record_path(walk, target_bytes) {
+				unsafe {
+					(*record).target = id;
+					(*record).target_context = context;
+					(*record).target_len = len;
+					(*record).flags |= DECISION_TARGET_VALID;
+				}
+			}
+		}
+		compiler_fence(Ordering::SeqCst);
+		if unsafe { core::ptr::read_volatile(sequence) } != ticket {
+			entry.discard(0);
+			continue;
+		}
+		entry.submit(0);
+		return;
+	}
+	increment(&DECISION_DROPS, 0);
 }

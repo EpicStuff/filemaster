@@ -72,6 +72,7 @@ type Record struct {
 	Path          string
 	ArgsTruncated bool
 	EnvTruncated  bool
+	Decision      *DecisionRecord
 }
 
 // SeededProcess is a process that predates the generation, entered as pending.

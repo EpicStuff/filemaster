@@ -160,39 +160,26 @@ func registerConfiguration() error { //nolint:maintidx
 		key   string
 		desc  string
 		order int
-		// hidden marks a list retained internally but not exposed in the normal
-		// UI. Write is hidden in the current release: no runtime event populates
-		// or consults it (writes need a supporting backend), but its storage and plumbing are kept
-		// so the future Write evaluation engine can be built and unit-tested
-		// against it before enforcement lands.
-		hidden bool
-		into   *config.StringArrayOption
+		into  *config.StringArrayOption
 	}{
 		// "Access" (not "Read") because the current backend decides at open time
 		// via FAN_OPEN_PERM and cannot tell read from write; the list governs any
 		// open of a file or folder.
-		{"Access Rules", CfgOptionFileAccessReadRulesKey, "Rules governing whether this application may open files and folders — for reading, writing, or both." + ruleSyntax, cfgOptionFileAccessReadRulesOrder, false, &cfgOptionFileAccessReadRules},
-		{"Write Rules", CfgOptionFileAccessWriteRulesKey, "Rules governing content changes to files by this application." + ruleSyntax, cfgOptionFileAccessWriteRulesOrder, true, &cfgOptionFileAccessWriteRules},
+		{"Access Rules", CfgOptionFileAccessReadRulesKey, "Rules governing whether this application may open files and folders — for reading, writing, or both." + ruleSyntax, cfgOptionFileAccessReadRulesOrder, &cfgOptionFileAccessReadRules},
+		{"Write Rules", CfgOptionFileAccessWriteRulesKey, "Rules governing file and folder entry changes such as delete, create, rename, and hard link. Structural enforcement applies these rules in enforce mode; audit mode records would-denies." + ruleSyntax, cfgOptionFileAccessWriteRulesOrder, &cfgOptionFileAccessWriteRules},
 		// Files and folders share one Execute list, so folder entries are accepted,
 		// but folder Execute (traversal) is not enforceable by the current backend
 		// and has no effect in the current release.
-		{"Execute Rules", CfgOptionFileAccessExecRulesKey, "Rules governing whether this application may execute files. Folder entries are accepted but have no effect in the current release." + ruleSyntax, cfgOptionFileAccessExecRulesOrder, false, &cfgOptionFileAccessExecRules},
+		{"Execute Rules", CfgOptionFileAccessExecRulesKey, "Rules governing whether this application may execute files. Folder entries are accepted but have no effect in the current release." + ruleSyntax, cfgOptionFileAccessExecRulesOrder, &cfgOptionFileAccessExecRules},
 	}
 	for _, opt := range fileAccessRuleOptions {
-		// Developer expertise hides the option from the normal and expert UIs
-		// while keeping it registered and fully functional -- the idiomatic
-		// Portmaster way to retain a setting without surfacing it.
-		expertise := config.ExpertiseLevelUser
-		if opt.hidden {
-			expertise = config.ExpertiseLevelDeveloper
-		}
 		err = config.Register(&config.Option{
 			Name:           opt.name,
 			Key:            opt.key,
 			Description:    opt.desc,
 			Sensitive:      true,
 			OptType:        config.OptTypeStringArray,
-			ExpertiseLevel: expertise,
+			ExpertiseLevel: config.ExpertiseLevelUser,
 			DefaultValue:   []string{},
 			Annotations: config.Annotations{
 				config.SettablePerAppAnnotation: true,

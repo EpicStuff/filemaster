@@ -44,6 +44,7 @@ var (
 	runs      = flag.Int("runs", 50, "PENDING-window samples per placement")
 	debug     = flag.Bool("debug", false, "print the daemon's process record for each case")
 	waitOnly  = flag.Bool("wait-only", false, "run only the label-wait matrix")
+	m4Only    = flag.Bool("m4-only", false, "run only M4 decision record and notification checks")
 	failures  int
 	daemon    *exec.Cmd
 	wsConn    *websocket.Conn
@@ -51,9 +52,21 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--m4-helper" {
+		if err := m4Helper(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	flag.Parse()
 	defer cleanup()
 	must(setup())
+	if *m4Only {
+		m4Matrix()
+		finish()
+		return
+	}
 	if *waitOnly {
 		waitMatrix()
 		finish()
@@ -411,9 +424,12 @@ func closeMaps(maps ...*ebpf.Map) {
 }
 
 type diagnostics struct {
-	Structural struct {
-		State     string
-		Labelling struct {
+	LifecycleState string
+	Structural     struct {
+		Mode          string
+		State         string
+		DecisionDrops uint64
+		Labelling     struct {
 			Enabled     bool
 			ExeLearning string
 			Wait        struct {
@@ -460,8 +476,17 @@ func pendingDenials() uint64 {
 }
 
 func setup() error {
-	if out, err := exec.Command("pgrep", "-x", "filemaster-core").Output(); err == nil && len(out) > 0 {
-		return fmt.Errorf("a filemaster-core is already running (pids %s); stop it first", strings.Fields(string(out)))
+	if out, err := exec.Command("pgrep", "-x", "filemaster-core").Output(); err == nil {
+		var running []string
+		for _, pid := range strings.Fields(string(out)) {
+			state, stateErr := exec.Command("ps", "-o", "stat=", "-p", pid).Output()
+			if stateErr == nil && !strings.HasPrefix(strings.TrimSpace(string(state)), "Z") {
+				running = append(running, pid)
+			}
+		}
+		if len(running) > 0 {
+			return fmt.Errorf("a filemaster-core is already running (pids %s); stop it first", running)
+		}
 	}
 	_ = exec.Command(*corePath, "bpf-teardown").Run()
 	for _, dir := range []string{*scope, *dataDir} {
@@ -493,7 +518,7 @@ func startDaemon(mode string) error {
 		return err
 	}
 	for i := 0; i < 90; i++ {
-		if _, err := getDiagnostics(); err == nil {
+		if d, err := getDiagnostics(); err == nil && d.LifecycleState == "running" {
 			conn, _, err := websocket.DefaultDialer.Dial("ws://127.0.0.1:818/api/database/v1", nil)
 			if err != nil {
 				return err
@@ -511,13 +536,18 @@ func setMode(mode string) error {
 	if !strings.Contains(reply, "|success") {
 		return fmt.Errorf("set mode: %s", reply)
 	}
-	for i := 0; i < 60; i++ {
-		if d, err := getDiagnostics(); err == nil && d.Structural.State == "active" && d.Structural.Labelling.Enabled {
+	if *debug {
+		fmt.Println("    structural mode update:", reply)
+		fmt.Println("    structural mode readback:", dbRequest("get|config:fileaccess/structuralEnforcement"))
+	}
+	for i := 0; i < 360; i++ {
+		if d, err := getDiagnostics(); err == nil && d.Structural.Mode == mode && d.Structural.State == "active" && d.Structural.Labelling.Enabled {
 			return nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return errors.New("structural enforcement did not become active with labelling")
+	d, err := getDiagnostics()
+	return fmt.Errorf("structural enforcement did not become active with labelling: diagnostics=%+v, err=%v", d, err)
 }
 
 // putProfile creates or updates a local profile through the database API,

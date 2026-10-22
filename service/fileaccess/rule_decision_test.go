@@ -85,6 +85,27 @@ func TestDecisionOpRuntimeObservable(t *testing.T) {
 	}
 }
 
+func TestCurrentRuleModelWriteMode(t *testing.T) {
+	original := cfgOptionStructural
+	defer func() { cfgOptionStructural = original }()
+
+	for _, tc := range []struct {
+		mode   string
+		active bool
+	}{
+		{"off", false},
+		{"audit", false},
+		{"enforce", true},
+	} {
+		cfgOptionStructural = func() string { return tc.mode }
+		model := CurrentRuleModel()
+		write := model[len(model)-1]
+		if write.Category != "Write" || write.Active != tc.active || write.Note == "" {
+			t.Errorf("mode %s: Write status = %+v, want active=%t with an explanation", tc.mode, write, tc.active)
+		}
+	}
+}
+
 // Section 3 / 9 / 10: with "Deny Write /folder" before "Allow Write
 // /folder/file.txt", content writes to the file are allowed (the folder rule
 // does not apply to modifying an existing file), but deleting the file is

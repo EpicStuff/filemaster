@@ -6,33 +6,25 @@ import (
 	"github.com/safing/portmaster/base/config"
 )
 
-// TestFileAccessWriteRulesHidden verifies the current-release rule-list scope:
-// the Write list is retained and registered but hidden from the normal UI via
-// developer expertise, while Read and Execute stay user-visible. Hiding, not
-// removal, keeps the Write storage/plumbing available for the future Write
-// engine.
-func TestFileAccessWriteRulesHidden(t *testing.T) {
+// TestFileAccessRuleListsVisible verifies that every rule list is editable
+// through the normal settings UI.
+func TestFileAccessRuleListsVisible(t *testing.T) {
 	if err := registerConfiguration(); err != nil {
 		t.Fatalf("registerConfiguration: %v", err)
 	}
 
-	cases := []struct {
-		key            string
-		wantExpertise  config.ExpertiseLevel
-		hiddenFromUser bool
-	}{
-		{CfgOptionFileAccessReadRulesKey, config.ExpertiseLevelUser, false},
-		{CfgOptionFileAccessWriteRulesKey, config.ExpertiseLevelDeveloper, true},
-		{CfgOptionFileAccessExecRulesKey, config.ExpertiseLevelUser, false},
-	}
-	for _, tc := range cases {
-		option, err := config.GetOption(tc.key)
+	for _, key := range []string{
+		CfgOptionFileAccessReadRulesKey,
+		CfgOptionFileAccessWriteRulesKey,
+		CfgOptionFileAccessExecRulesKey,
+	} {
+		option, err := config.GetOption(key)
 		if err != nil {
-			t.Errorf("%s not registered: %v (Write must be retained, not removed)", tc.key, err)
+			t.Errorf("%s not registered: %v", key, err)
 			continue
 		}
-		if option.ExpertiseLevel != tc.wantExpertise {
-			t.Errorf("%s ExpertiseLevel = %d, want %d", tc.key, option.ExpertiseLevel, tc.wantExpertise)
+		if option.ExpertiseLevel != config.ExpertiseLevelUser {
+			t.Errorf("%s ExpertiseLevel = %d, want %d", key, option.ExpertiseLevel, config.ExpertiseLevelUser)
 		}
 	}
 }

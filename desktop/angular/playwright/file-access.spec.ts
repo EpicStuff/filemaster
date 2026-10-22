@@ -294,17 +294,34 @@ async function prepareConfinedRealWatchMount(watchDir: string): Promise<void> {
 
 async function stopFilemaster(core: TestCore) {
 	if (core.process.exitCode === null && core.process.pid) {
-		process.kill(-core.process.pid, 'SIGTERM');
-		await new Promise<void>(resolve => {
-			const done = () => resolve();
-			core.process.once('exit', done);
-			setTimeout(() => {
-				if (core.process.exitCode === null) {
-					process.kill(-core.process.pid!, 'SIGKILL');
-				}
-				resolve();
-			}, 5_000);
-		});
+		let exited = false;
+		try {
+			process.kill(-core.process.pid, 'SIGTERM');
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+			exited = true;
+		}
+		if (!exited) {
+			await new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => {
+					if (core.process.exitCode === null) {
+						try {
+							process.kill(-core.process.pid!, 'SIGKILL');
+						} catch (error) {
+							if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+								reject(error);
+								return;
+							}
+						}
+					}
+					resolve();
+				}, 5_000);
+				core.process.once('exit', () => {
+					clearTimeout(timer);
+					resolve();
+				});
+			});
+		}
 	}
 	if (core.sourceMode === 'real') {
 		await runCommand('umount', ['--lazy', core.watchDir]);

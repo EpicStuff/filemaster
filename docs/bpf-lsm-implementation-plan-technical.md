@@ -762,21 +762,25 @@ A resumes with B's verdict.
 
 ### 2.7 Events, feedback and status
 
-- **Records.** The ring buffer carries `DecisionRecord`s: operation, verdict,
-  label, object id, the leaf-to-object name components (Cordon `fill_comps`),
-  and a second object for rename/link. The daemon prefixes the object's path
-  and emits `filequery.FileAccessRecord` (`service/filequery/record.go:7`). `Op`
-  is `delete`, `create`, `rename` or `link`, with mount attribution from
-  `attributeMount` (`mount_linux.go:861`).
-- **Volume.** Cordon's in-kernel suppressor (`kernel.rs:367`) is kept.
-- **Deny notice.** A new informational notification, modelled on
-  `NotificationsPrompter` (`prompt_notifications.go:43-101`). It shows what was
-  blocked and offers **Allow**, which appends a `+ <path>` Write rule through
-  `profileRuleStore.AppendRule` (`profile_binding.go:240`). That triggers a
-  re-publish, and the user retries.
-- **Rule model.** `CurrentRuleModel` (`rule_decision.go:34`) must report Write
-  as **active** when structural enforcement is `enforce`. The UI must expose the
-  Write list, which is "hidden and retained only" today.
+- **Records.** The ring buffer carries fixed-size `DecisionRecord`s for allow,
+  deny, and audit would-deny decisions: operation, verdict, reason, process and
+  label, the active table bank, source and target object/context IDs, and
+  object-relative paths. The daemon validates each object/context against the
+  published table, reconstructs both paths, attributes the mount when known,
+  and emits `filequery.FileAccessRecord` with `DestPath` for rename and link.
+  Recent bank snapshots cover records queued across a rapid re-publish.
+- **Volume.** A bounded in-kernel suppressor admits the first 64 records per
+  `(tgid, operation, verdict)` in each one-second window. Further records
+  increment a per-CPU drop counter exposed in structural status.
+- **Deny notice.** A deduplicated informational notification shows the app,
+  operation, path, and plain-language reason for an enforced denial. **Allow**
+  appends literal `+ <path>` Write rules to that app's profile (both paths for
+  rename/link), persists and re-publishes the profile, and asks the user to
+  retry. Audit would-denies create Monitor rows without notices.
+- **Rule model.** `CurrentRuleModel` reports Write as active in structural
+  `enforce` mode and explanatory in `audit`/`off`. The app settings expose the
+  Write rule list. Monitor filters and rows show Delete/Create/Rename/Link and
+  `would-deny`, including source and destination paths where applicable.
 - **Status.** Coverage and degraded warnings flow through
   `diagnosticsWarnings` (`diagnostics_linux.go:159`):
   - BPF LSM unavailable;
@@ -785,6 +789,76 @@ A resumes with B's verdict.
   - glob degradation;
   - label map full / `PENDING` denials count;
   - an orphaned older generation.
+
+**As built in M4.** The ring ABI now has a 16,480-byte decision record. It
+carries the operation, verdict, reason, tgid/start time, label, table bank,
+source and target object/context IDs, and up to 8,192 bytes of relative path
+for each side. Kernel hooks emit records for covered allow, deny, and audit
+would-deny decisions. Recording an allow makes Monitor useful for comparison;
+the same bounded suppressor keeps the added volume affordable. The first 64
+records per `(tgid, operation, verdict)` in a one-second window are emitted;
+later records increment a per-CPU drop counter. Failed ring reservations and
+path capture retries increment that counter too. The daemon exposes the sum as
+`DecisionDrops`.
+
+The daemon validates object/context references before joining a context base
+with each relative path. It retains eight prior snapshots per bank to resolve
+records that were queued before a rapid rule publication. Filequery stores
+`dest_path`, and Monitor shows Delete, Create, Rename, Link and audit's
+`would-deny`, with both rename/link paths in the row and details. The app view
+uses the same rows. The Write rule list is editable in app settings and active
+in enforce mode; audit/off explain their status in the rule model.
+
+An enforced denial creates one informational notice per app/operation/path
+pair. It names the app and reason in plain words. If the app has a local
+profile, **Allow** appends literal Write allow rules for the source and, when
+present, destination, persists the profile, invalidates its active cache, and
+re-publishes the table. The user then retries. Audit would-denies never create
+a notice. For an unresolved kernel label, the daemon also tries the live
+process profile before deciding whether Allow can be offered.
+
+Verifier results (verified instructions, stock kernels) are:
+
+| Hook | Arch 7.1.9 | Debian 6.12.107 |
+|---|---:|---:|
+| `inode_unlink` | 72,553 | 51,730 |
+| `inode_rmdir` | 72,688 | 51,739 |
+| `inode_mkdir` | 137,896 | 93,775 |
+| `inode_link` | 473,433 | 176,332 |
+| `inode_rename` | 480,294 | 186,689 |
+| `bprm_check_security` | 143 | 146 |
+| `bprm_committed_creds` | 395 | 417 |
+| `sched_process_fork` | 232 | 273 |
+| `sched_process_exec` | 1,247 | 1,245 |
+| `sched_process_exit` | 205 | 188 |
+
+All remain below the 1,000,000-instruction verifier budget. The largest
+structural program is rename on Arch, at 480,294 instructions.
+
+On Arch 7.1.9, the full `bpflsm` and `fileaccess` suites passed; the 8 × 505
+generated-rule differential had zero mismatches, structural contention had
+7,411 operations with zero fail-open verdicts, and the exec-label race stress
+completed 3,000 child execs with zero unintended deletes. The live daemon
+enforce/off and 50-run label-wait matrix passed. On Debian 6.12.107, the same
+suites and differential passed (4,040 cases, zero mismatches); the explicit
+label-wait test passed with `preempt=full`, structural contention had 8,512
+operations with zero fail-open verdicts, and 3,000 child execs had zero
+unintended deletes. Its live enforce/off and 50-run label-wait matrix passed.
+
+On both kernels the real-daemon M4 harness observed allow and deny rows for
+delete/create/rename/link with the correct app and both full paths where
+needed. It verified a deduplicated deny notice, **Allow** followed by a
+successful retry, an audit would-deny with no notice, and a healthy daemon
+after 10,000 allowed deletes. The suppressor counted 9,872 drops on Arch and
+9,936 on Debian. Browser inspection covered dashboard, Monitor, settings,
+the app's file events, and its editable Write list; the Monitor screenshot
+also shows an expanded rename with both paths.
+
+Known limits: the suppressor deliberately omits records beyond its per-key
+window while counting every omission. Records queued across more than eight
+reuses of a bank can outlive the retained path snapshots. A short-lived
+process that exits before its profile is resolved can leave a deny notice
+without an **Allow** action, because there is no app profile to edit.
 
 ## 3. Milestones
 
@@ -809,7 +883,7 @@ The load, lifecycle and startup daemon checks also passed on Debian 6.12
 | M1 ✅ | Loader, probe, `.rodata` offsets, attach, pin generations, handover, self-test, teardown, mode option, degraded warnings | Enable → 5 hooks attached and shown in diagnostics; SIGKILL → enforcement persists; restart → generation swap with no gap; `off` → detached and reported unprotected | 1.5 |
 | M2 ✅ (fixed up) | Full-path kernel matcher (`matcher.rs`, faithful `filepath.Match` port over a Go-tokenized program, all state in a per-CPU `EVAL` map) + Go compiler with mount-root objects and per-path contexts + banked publish + ABI manifest test; single label `UNIDENTIFIED` | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: Gate B matched ≥11 k generated `(pattern, path)` pairs against `filepath.Match` with zero mismatches; the generated-rule differential (8 seeds × 505 ops, ~60% expected denies) agrees with `DecideOperation`/`DecideRename`/`DecideHardLink` across the operation matrix — folder renames, `DestExists`, `RENAME_EXCHANGE`/`RENAME_NOREPLACE`, `*at()` callers, >100-deep paths, post-publish creations, and a tmpfs mounted inside a scope with re-publish — with zero mismatches; self-test, lifecycle, handover and live-daemon (enforce/SIGKILL-persist/restart/off) all pass | 2–2.5 |
 | M3 ✅ | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny, `(tgid, start_time)` self-bypass, `/proc` seeding, per-label kernel rule lookup | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: `python a.py` (allow) vs `python b.py` (deny) get distinct verdicts; `./x.py`, `./s.sh`, `./s.js`, `./s.pl` env-shebang scripts labelled by their script arg; `python -m fmmod` resolves to the module profile and `python -c` to the interpreter profile; a child `rm` spawned by a deny-profile script gets `rm`'s allow label; an unresolved process stays `PENDING` and denies; a fork storm against an 8-entry label map denies and increments the map-full counter; argv rewrite after start does not change the label. The real daemon (`cmds/bpflsm-live`: profiles via the database API, real processes) reproduces the distinct verdicts, scripts, `-m`/`-c`, child `rm` and a live rule edit, and the PENDING window is measured (see As built in M3). No regressions: self-test, lifecycle, handover, the Gate B/differential (8×505, 0 mismatches) and live-daemon enforce/off all pass on both kernels and filesystems | 2–2.5 |
-| M4 | Events → filequery, deny notification with Allow-and-retry, Write list active in rule model and UI | Monitor shows delete/rename/link records; the notification appears; Allow → retry succeeds; screenshots of dashboard/monitor/settings checked per CLAUDE.md | 1.5–2 |
+| M4 ✅ | Decision records for covered allow/deny/audit would-deny; bounded suppressor and drop count; filequery paths/app/mount; informational deny notice with Allow-and-retry; active Write list and structural Monitor UI | Observed on Arch 7.1 and Debian 6.12: all four operations allowed/denied with full source/destination paths and app; deduplicated notice and successful Allow/retry; audit would-deny without notice; 10,000-delete burst with counted drops and healthy daemon. Full regression matrix passes on both kernels; verifier counts remain below 1,000,000 (see As built in M4). Dashboard, Monitor, settings, and app Write-list screenshots inspected; file-access Playwright E2E 2/2 passed with system Chromium | 1.5–2 |
 | M5 | Hardening matrix (§4) and fixes; **btrfs subvolume/snapshot identity** (risk 7) — key objects by a subvolume-aware id, not just `(s_dev, ino)` | §4 matrix green; coverage warnings correct for every injected failure; multi-subvolume btrfs no longer collides objects | 1–1.5 |
 | | **Total** | | **8.5–11.5** |
 
@@ -934,9 +1008,9 @@ toward the top end:
 - **Cordon's decision logic is replaced, not trimmed** (§2.4). The re-cost
   assumed 150–250 changed BPF lines; the decision table and its differential
   test are closer to 300–450.
-- **The Write list is hidden, and the default maps to Deny.** That forces
-  `audit` mode, UI exposure of the Write list and the deny notice. Most of this
-  lands in M4, which the re-cost only partly covered.
+- **At planning time, the Write list was hidden and the default mapped to
+  Deny.** That motivated `audit` mode, UI exposure of the Write list and the
+  deny notice. M4 delivered those surfaces; this re-cost predates them.
 - **Identity reads `/proc` today.** Feeding captured argv/envp needs a
   boundary change in the ported `process` package. Also, fanotify script-open
   labelling only applies inside watched mounts.

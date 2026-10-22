@@ -42,6 +42,27 @@ export class FileEventRowComponent {
 	}
 
 	get verdictClass(): string {
-		return this.event?.verdict === 'allow' ? 'text-green-400' : 'text-red-400';
+		switch (this.event?.verdict) {
+			case 'allow': return 'text-green-400';
+			case 'would-deny': return 'text-yellow-400';
+			default: return 'text-red-400';
+		}
+	}
+
+	get verdictDotClass(): string {
+		switch (this.event?.verdict) {
+			case 'allow': return 'bg-green-400';
+			case 'would-deny': return 'bg-yellow-400';
+			default: return 'bg-red-400';
+		}
+	}
+
+	get verdictLabel(): string {
+		switch (this.event?.verdict) {
+			case 'allow': return 'Allowed';
+			case 'deny': return 'Blocked';
+			case 'would-deny': return 'Would block';
+			default: return this.event?.verdict || '';
+		}
 	}
 }

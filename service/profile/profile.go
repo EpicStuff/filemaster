@@ -351,7 +351,14 @@ func PersistCurrentFileAccessRule(source ProfileSource, id, cfgKey, newEntry str
 	if current != nil && !current() {
 		return errors.New("profile: stale file access rule writer")
 	}
-	return profileDB.Put(profile)
+	profile.savedInternally = false
+	if err := profileDB.Put(profile); err != nil {
+		return err
+	}
+	if active := getActiveProfile(MakeScopedID(source, id)); active != nil {
+		active.outdated.Set()
+	}
+	return nil
 }
 
 // addStringArrayEntry prepends an entry to a profile-stored StringArray

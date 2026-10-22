@@ -20,24 +20,33 @@ import "path/filepath"
 // not hardcode the current-release scope.
 type RuleCategoryStatus struct {
 	Category string
-	// Active reports whether the current runtime enforces this category. An
-	// inactive category is still presented (or retained) but has no effect until
-	// a supporting backend lands.
+	// Active reports whether the current runtime enforces this category.
+	// An inactive category may still be editable or used for audit decisions.
 	Active bool
 	Note   string
 }
 
 // CurrentRuleModel reports the rule categories the current release presents and
 // whether each is actively enforced. Access (file and folder opens) and File
-// Execute are enforced; Folder Execute is exposed but inactive; Write is hidden
-// and inactive (retained storage only).
+// Execute are enforced; Folder Execute is exposed but inactive. Write is
+// enforced only when structural enforcement is in enforce mode.
 func CurrentRuleModel() []RuleCategoryStatus {
+	write := RuleCategoryStatus{"Write", false, "Structural enforcement is off; Write rules are saved but do not affect operations."}
+	if cfgOptionStructural != nil {
+		switch cfgOptionStructural() {
+		case "enforce":
+			write = RuleCategoryStatus{"Write", true, "BPF LSM enforces Write rules for delete, create folder, rename, and hard link. File content writes remain governed by Open rules."}
+		case "audit":
+			write.Note = "Structural operations are allowed; Write rules record would-denies in Monitor while audit mode is on."
+		}
+	}
+
 	return []RuleCategoryStatus{
 		{"File Access", true, "Open a file for reading, writing, or both (FAN_OPEN_PERM)."},
 		{"Folder Access", true, "Open the folder (FAN_OPEN_PERM). Listing and traversal are not enforced by the current backend."},
 		{"File Execute", true, "Launch the file as a program (FAN_OPEN_EXEC_PERM)."},
 		{"Folder Execute", false, "Exposed but inactive; becomes folder traversal with a supporting backend."},
-		{"Write", false, "Hidden and retained only; the current backend has no runtime write event."},
+		write,
 	}
 }
 

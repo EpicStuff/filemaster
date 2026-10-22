@@ -73,6 +73,10 @@ func (fa *FileAccess) startStructuralEnforcement() {
 		fa.labeller.run(w)
 		return nil
 	})
+	fa.mgr.Go("file-access structural decision observer", func(w *mgr.WorkerCtx) error {
+		fa.labeller.runDecisions(w)
+		return nil
+	})
 	fa.registerStructuralProfilePublisher(apply)
 	fa.mgr.Go("file-access structural mount watch", func(w *mgr.WorkerCtx) error {
 		fa.watchStructuralMounts(w, apply)

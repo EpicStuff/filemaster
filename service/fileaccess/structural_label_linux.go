@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/safing/portmaster/base/database"
 	"github.com/safing/portmaster/base/database/query"
@@ -28,11 +29,13 @@ import (
 // emits a record; this resolves the record's process to a profile, publishes
 // the label's policy if it is new, and writes the label back.
 type structuralLabeller struct {
-	fa     *FileAccess
-	enf    *bpflsm.Enforcer
-	apply  func()
-	queue  chan bpflsm.Record
-	closed chan struct{}
+	fa              *FileAccess
+	enf             *bpflsm.Enforcer
+	apply           func()
+	queue           chan bpflsm.Record
+	decisions       chan bpflsm.Record
+	closed          chan struct{}
+	decisionDropped atomic.Uint64
 	// generation is the last generation seeded; only apply, which holds
 	// structuralApplyMu, reads or writes it.
 	generation string
@@ -68,6 +71,7 @@ func newStructuralLabeller(fa *FileAccess, apply func()) *structuralLabeller {
 		fa:           fa,
 		apply:        apply,
 		queue:        make(chan bpflsm.Record, 1024),
+		decisions:    make(chan bpflsm.Record, 1024),
 		closed:       make(chan struct{}),
 		byProfile:    make(map[string]uint32),
 		byLabel:      map[uint32]string{bpflsm.LabelUnidentified: ""},
@@ -191,6 +195,14 @@ func flattenRules(lists ruleLists) []bpflsm.RuleInput {
 
 // enqueue is the enforcer's OnRecord callback.
 func (l *structuralLabeller) enqueue(record bpflsm.Record) {
+	if record.Kind == bpflsm.RecordDecision {
+		select {
+		case l.decisions <- record:
+		default:
+			l.decisionDropped.Add(1)
+		}
+		return
+	}
 	select {
 	case l.queue <- record:
 	default:

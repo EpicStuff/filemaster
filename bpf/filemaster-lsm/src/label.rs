@@ -176,7 +176,7 @@ unsafe extern "C" fn wait_step(_index: u64, ctx: *mut c_void) -> i64 {
 /// sequence; a pending record resolved by the daemon for the same sequence
 /// yields the resolved label. `None` when the process has no record.
 #[inline(always)]
-fn effective(tgid: u32, start: u64) -> Option<(u32, u64)> {
+pub(crate) fn effective(tgid: u32, start: u64) -> Option<(u32, u64)> {
 	// SAFETY: copied immediately.
 	let proc = unsafe { PROCS.get(&tgid) }.copied()?;
 	if start.wrapping_sub(proc.start) > proc.span as u64 {

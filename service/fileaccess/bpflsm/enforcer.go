@@ -78,6 +78,8 @@ type Status struct {
 	// Undecided counts, per reason and hook, the cases the kernel could not
 	// decide exactly; only non-zero counts are listed.
 	Undecided []UndecidedCount
+	// DecisionDrops counts records suppressed or dropped before reaching the ring.
+	DecisionDrops uint64
 	// CompileWarnings describe rules the compiler left out or could not fit.
 	CompileWarnings []CompileWarning
 	// Labelling reports process labelling, when the generation runs it.
@@ -131,6 +133,8 @@ type Enforcer struct {
 	status            Status
 	settings          publishedSettings
 	table             Table
+	tables            [numBanks]Table
+	tableHistory      [numBanks][]Table
 	waitConfigured    atomic.Bool
 	waitKick          chan struct{}
 	heartbeatStop     chan struct{}
@@ -210,6 +214,11 @@ func (e *Enforcer) Status() Status {
 		status.Undecided = counters
 	} else if e.collection != nil {
 		status.Error = joinStatusError(status.Error, "read undecided counters: "+err.Error())
+	}
+	if drops, err := decisionDropCount(e.collection); err == nil {
+		status.DecisionDrops = drops
+	} else if e.collection != nil {
+		status.Error = joinStatusError(status.Error, "read decision drops: "+err.Error())
 	}
 	status.Labelling.Programs = slices.Clone(status.Labelling.Programs)
 	if full, drops, unreadable, err := labelCounterTotals(e.collection); err == nil {
@@ -349,6 +358,8 @@ func (e *Enforcer) release() {
 	}
 	e.settings = publishedSettings{}
 	e.table = Table{}
+	e.tables = [numBanks]Table{}
+	e.tableHistory = [numBanks][]Table{}
 }
 
 func (e *Enforcer) start(mode Mode, table Table) Status {
@@ -454,11 +465,15 @@ func (e *Enforcer) start(mode Mode, table Table) Status {
 	e.links = links
 	e.settings = settings
 	e.table = Table{}
+	e.tables = [numBanks]Table{}
+	e.tableHistory = [numBanks][]Table{}
 	if err := e.publishLocked(table, mode); err != nil {
 		e.collection = nil
 		e.links = nil
 		e.settings = publishedSettings{}
 		e.table = Table{}
+		e.tables = [numBanks]Table{}
+		e.tableHistory = [numBanks][]Table{}
 		return fail("publish initial structural table: %v", err)
 	}
 
@@ -469,6 +484,8 @@ func (e *Enforcer) start(mode Mode, table Table) Status {
 		e.links = nil
 		e.settings = publishedSettings{}
 		e.table = Table{}
+		e.tables = [numBanks]Table{}
+		e.tableHistory = [numBanks][]Table{}
 		return fail("pin generation: %v", err)
 	}
 	status.Generation = generation
@@ -507,6 +524,13 @@ func (e *Enforcer) publishLocked(table Table, mode Mode) error {
 	}
 	e.settings = settings
 	e.table = table
+	if len(e.tables[inactive].Contexts) > 0 {
+		e.tableHistory[inactive] = append([]Table{e.tables[inactive]}, e.tableHistory[inactive]...)
+		if len(e.tableHistory[inactive]) > 8 {
+			e.tableHistory[inactive] = e.tableHistory[inactive][:8]
+		}
+	}
+	e.tables[inactive] = table
 	return nil
 }
 

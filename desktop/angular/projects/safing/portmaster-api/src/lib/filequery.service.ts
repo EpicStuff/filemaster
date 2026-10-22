@@ -6,20 +6,21 @@ import { PORTMASTER_HTTP_API_ENDPOINT } from "./portapi.service";
 import { Condition, Query, QueryResult, Select } from "./netquery.service";
 
 export interface FileAccessRecord {
-  id: number;
-  at: string;
-  pid: number;
-  exe: string;
-  path: string;
-  op: string;
-  verdict: string;
-  profile: string;
-  app_name: string;
-  // Protected mount the event was attributed to (backend Phase 2.5). A zero
-  // mount_id with an empty mount_path means the mount was unknown.
-  mount_id: number;
-  mount_path: string;
-  is_dir: boolean;
+	id: number;
+	at: string;
+	pid: number;
+	exe: string;
+	path: string;
+	dest_path?: string;
+	op: string;
+	verdict: string;
+	profile: string;
+	app_name: string;
+	// Protected mount the event was attributed to (backend Phase 2.5). A zero
+	// mount_id with an empty mount_path means the mount was unknown.
+	mount_id: number;
+	mount_path: string;
+	is_dir: boolean;
 }
 
 export interface FileDecisionChartPoint {

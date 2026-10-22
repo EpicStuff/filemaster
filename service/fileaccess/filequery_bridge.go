@@ -64,6 +64,16 @@ func (h *recordingHandler) Observe(e *FileEvent, verdict Verdict) {
 	}
 }
 
+// ObserveStructural forwards a completed kernel decision without involving the
+// fanotify decision pipeline. A full feed must not delay the kernel verdict.
+func (h *recordingHandler) ObserveStructural(rec filequery.FileAccessRecord) {
+	select {
+	case h.feed <- rec:
+	default:
+		h.dropped.Add(1)
+	}
+}
+
 func (h *recordingHandler) Decide(ctx context.Context, e *FileEvent) Verdict {
 	verdict := h.inner.Decide(ctx, e)
 	h.Observe(e, verdict)
