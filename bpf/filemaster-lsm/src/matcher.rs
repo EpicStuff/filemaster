@@ -11,7 +11,7 @@ use core::ffi::c_void;
 
 use aya_ebpf::helpers::r#gen::bpf_probe_read_kernel;
 use filemaster_lsm_common::decision_maps::{
-	ARENA_MASK, CONTEXT_OVERFLOW, CONTEXT_RULES, CONTEXT_SCOPES, MAX_CHUNKS, MAX_PATTERNS,
+	ARENA_MASK, CONTEXT_OVERFLOW, CONTEXT_RULES, CONTEXT_SUBVOLUME, CONTEXT_SCOPES, MAX_CHUNKS, MAX_PATTERNS,
 	MAX_RANGES, MAX_STRING, MAX_TOKENS, REL_END, RULE_ALLOW, RULE_KIND_MASK, RULE_KIND_SHIFT,
 	SCRATCH_MASK, TOKEN_CLASS, TOKEN_LITERAL, TOKEN_QUESTION,
 };
@@ -122,6 +122,7 @@ pub struct EvalState {
 	pub denied: u32,
 	pub covered: u32,
 	pub overflow: u32,
+	pub subvolume: u32,
 	pub deny_reason: u32,
 }
 
@@ -196,6 +197,13 @@ fn step_context(e: &mut EvalState, arena: *const u8, scratch: *const u8) -> i64 
 		e.phase = E_DONE;
 		return 1;
 	};
+	if context.flags & CONTEXT_SUBVOLUME != 0 {
+		e.subvolume = 1;
+		e.denied = 1;
+		e.covered = 1;
+		e.context += 1;
+		return 0;
+	}
 	if context.flags & CONTEXT_OVERFLOW != 0 || context.scope_count > CONTEXT_SCOPES as u32 {
 		e.overflow = 1;
 		e.denied = 1;

@@ -1,6 +1,6 @@
 // Ported from cordon crates/bpf-common/src/offsets.rs @ b40a8c7 (Apache-2.0) — renamed the crate;
 // added `dentry_d_name_len` for the path rebuild; M3 appends the labelling
-// offsets after `binprm_file`.
+// offsets after `binprm_file`, and M5 `sb_s_magic` at the end.
 //! Running-kernel struct field offsets — the portability shim that replaces a
 //! build-time-pinned `vmlinux.rs`.
 //!
@@ -90,6 +90,8 @@ pub struct Offsets {
     /// `linux_binprm -> filename` and `interp`: equal pointers on the first binfmt pass.
     pub binprm_filename: u32,
     pub binprm_interp: u32,
+    /// `super_block -> s_magic`, to recognise btrfs for subvolume identity.
+    pub sb_s_magic: u32,
 }
 
 impl Offsets {
@@ -126,6 +128,7 @@ impl Offsets {
         inode_i_generation: u32::MAX,
         binprm_filename: u32::MAX,
         binprm_interp: u32::MAX,
+        sb_s_magic: u32::MAX,
     };
 }
 

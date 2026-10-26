@@ -205,3 +205,28 @@ func policyRules(t *testing.T, table Table, policy uint32, path string) []Compil
 	}
 	return table.RuleLists[list].Rules
 }
+
+func TestObjectSubvolumeMatchesTheKernelKey(t *testing.T) {
+	layout := btrfsLayout{ok: true, root: -400, rootID: 384}
+	for _, c := range []struct {
+		name   string
+		fsType string
+		stat   pathStat
+		btrfs  btrfsLayout
+		subvol uint64
+		known  bool
+	}{
+		{"btrfs with layout", "btrfs", pathStat{subvol: 257, hasSubvol: true}, layout, 257, true},
+		{"btrfs top level", "btrfs", pathStat{subvol: 5, hasSubvol: true}, layout, 5, true},
+		{"btrfs without layout", "btrfs", pathStat{subvol: 257, hasSubvol: true}, btrfsLayout{}, 0, false},
+		{"btrfs without STATX_SUBVOL", "btrfs", pathStat{}, layout, 0, false},
+		{"bcachefs", "bcachefs", pathStat{subvol: 1, hasSubvol: true}, layout, 0, false},
+		{"ext4", "ext4", pathStat{}, layout, 0, true},
+		{"tmpfs without layout", "tmpfs", pathStat{}, btrfsLayout{}, 0, true},
+	} {
+		subvol, known := objectSubvolume(c.fsType, c.stat, c.btrfs)
+		if subvol != c.subvol || known != c.known {
+			t.Errorf("%s: got (%d, %t), want (%d, %t)", c.name, subvol, known, c.subvol, c.known)
+		}
+	}
+}

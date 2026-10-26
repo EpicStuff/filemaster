@@ -106,6 +106,7 @@ func loadSpec(object []byte, kernel *btf.Spec) (*ebpf.CollectionSpec, error) {
 		{"inode", []string{"i_generation"}},
 		{"linux_binprm", []string{"filename"}},
 		{"linux_binprm", []string{"interp"}},
+		{"super_block", []string{"s_magic"}},
 	}
 	variable, ok := spec.Variables["OFFSETS"]
 	if !ok {

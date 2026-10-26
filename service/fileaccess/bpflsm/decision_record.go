@@ -22,9 +22,9 @@ const (
 	DecisionDeny      = 1
 	DecisionWouldDeny = 2
 
-	DecisionRuleMatch      = 10
-	DecisionProfileDefault = 11
-	DecisionNoReason       = 12
+	DecisionRuleMatch      = 11
+	DecisionProfileDefault = 12
+	DecisionNoReason       = 13
 )
 
 type DecisionRecord struct {

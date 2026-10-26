@@ -33,7 +33,7 @@ pub mod offsets;
 pub mod policy_maps;
 
 pub use decision_maps::{
-    Arena, Chunk, Context, DecisionOp, ObjectKey, ObjectValue, Pattern, Range, RuleRef, Scratch,
+    Arena, Chunk, Context, DecisionOp, ObjectId, ObjectKey, ObjectValue, Pattern, Range, RuleRef, Scratch,
     ScopeRef, TargetKind, Token, Verdict,
 };
 pub use label_maps::{

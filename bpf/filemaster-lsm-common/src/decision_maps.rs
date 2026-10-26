@@ -5,8 +5,7 @@
 //! per-object path contexts; the kernel rebuilds each target's full path and
 //! evaluates those lists with a port of Go's `path/filepath.Match`.
 
-use crate::ids::Bank;
-use crate::maps::FileId;
+use crate::ids::{Bank, Dev, Ino};
 
 pub const MAP_OBJECTS: &str = "OBJECTS";
 pub const MAP_CONTEXTS: &str = "CONTEXTS";
@@ -84,7 +83,7 @@ pub const HOOK_RENAME: u32 = 4;
 
 /// Cases the kernel cannot decide exactly, and labelling denials. Each is
 /// counted per hook.
-pub const REASONS: usize = 10;
+pub const REASONS: usize = 11;
 /// A kernel value could not be read; the operation was allowed.
 pub const REASON_UNREADABLE: u32 = 0;
 /// The target is more than [`WALK_LIMIT`] levels below its object; denied.
@@ -97,15 +96,18 @@ pub const REASON_UNREGISTERED_ROOT: u32 = 3;
 pub const REASON_CONTEXT_OVERFLOW: u32 = 4;
 /// An evaluation used its whole `bpf_loop` budget; denied.
 pub const REASON_BUDGET: u32 = 5;
+/// The object is on a filesystem with subvolumes whose identity the kernel
+/// cannot read, so its inode numbers may repeat; denied.
+pub const REASON_SUBVOLUME: u32 = 6;
 /// The caller's label was still pending; the pending policy denied.
-pub const REASON_PENDING: u32 = 6;
+pub const REASON_PENDING: u32 = 7;
 /// The caller had no label (label map full) or an unpublished one; denied.
-pub const REASON_UNLABELLED: u32 = 7;
+pub const REASON_UNLABELLED: u32 = 8;
 /// The caller was pending and its label wait ran out; the pending policy denied.
-pub const REASON_WAIT_TIMEOUT: u32 = 8;
+pub const REASON_WAIT_TIMEOUT: u32 = 9;
 /// Every decision state on the CPU was claimed by another decision in
 /// progress (preempted) there; denied.
-pub const REASON_STATE_CONTENTION: u32 = 9;
+pub const REASON_STATE_CONTENTION: u32 = 10;
 pub const COUNTERS: usize = REASONS * HOOKS;
 
 /// Rule lists. A rule reference carries the list its rule came from.
@@ -121,6 +123,12 @@ pub const RULE_KIND_MASK: u8 = 3;
 
 /// `Context::flags`: the context overflowed its scope array.
 pub const CONTEXT_OVERFLOW: u32 = 1;
+/// `Context::flags`: the context's object is on a filesystem whose subvolume
+/// identity the kernel cannot read, and the filesystem is covered.
+pub const CONTEXT_SUBVOLUME: u32 = 2;
+
+/// btrfs's `s_magic`.
+pub const BTRFS_SUPER_MAGIC: u64 = 0x9123_683E;
 
 /// The existing Filemaster engine's operation dimension.
 #[repr(transparent)]
@@ -159,18 +167,36 @@ impl Verdict {
 	}
 }
 
+/// An object's inode identity: the superblock's `s_dev`, the inode number,
+/// and the btrfs subvolume (root objectid) the inode belongs to, which is 0 on
+/// every other filesystem. btrfs repeats inode numbers across subvolumes and
+/// snapshots within one superblock.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ObjectId {
+	pub dev: Dev,
+	pub ino: Ino,
+	pub subvol: u64,
+}
+
+impl ObjectId {
+	pub const fn new(dev: Dev, ino: Ino, subvol: u64) -> Self {
+		ObjectId { dev, ino, subvol }
+	}
+}
+
 padded_pod! {
 	/// `(inode identity, bank) -> ObjectValue`, the walk's stop test.
 	#[repr(C)]
 	#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 	pub struct ObjectKey {
-		pub file: FileId,
+		pub file: ObjectId,
 		pub bank: Bank,
 	}
 }
 
 impl ObjectKey {
-	pub const fn new(bank: Bank, file: FileId) -> Self {
+	pub const fn new(bank: Bank, file: ObjectId) -> Self {
 		ObjectKey {
 			file,
 			bank,
@@ -310,7 +336,7 @@ mod tests {
 	fn writes_abi_manifest() {
 		let mut manifest = String::from("{\n");
 		let layouts: &[(&str, usize, &[(&str, usize)])] = &[
-			("FileId", size_of::<FileId>(), &[("dev", offset_of!(FileId, dev)), ("ino", offset_of!(FileId, ino))]),
+			("ObjectId", size_of::<ObjectId>(), &[("dev", offset_of!(ObjectId, dev)), ("ino", offset_of!(ObjectId, ino)), ("subvol", offset_of!(ObjectId, subvol))]),
 			(
 				"Settings",
 				size_of::<Settings>(),
@@ -321,6 +347,8 @@ mod tests {
 					("active_bank", offset_of!(Settings, active_bank)),
 					("audit", offset_of!(Settings, audit)),
 					("flags", offset_of!(Settings, flags)),
+					("btrfs_root", offset_of!(Settings, btrfs_root)),
+					("btrfs_root_id", offset_of!(Settings, btrfs_root_id)),
 				],
 			),
 			(

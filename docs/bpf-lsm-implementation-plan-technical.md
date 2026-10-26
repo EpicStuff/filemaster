@@ -153,9 +153,11 @@ operation is **denied and counted**; a path longer than the buffer is **denied
 and counted**; an unreadable kernel value **fails open and is counted**; a walk
 that reaches an unregistered filesystem root is **not covered and counted**.
 
-**Objects** are keyed by `(mountinfo s_dev, ino)` — `pathFileID` takes the
-superblock device from `/proc/self/mountinfo` via `statx`'s `STATX_MNT_ID`,
-never `stat`'s `st_dev` (btrfs minors differ). The object set is: every watch
+**Objects** are keyed by `(mountinfo s_dev, ino, subvolume)` — the superblock
+device comes from `/proc/self/mountinfo` via `statx`'s `STATX_MNT_ID`, never
+`stat`'s `st_dev` (btrfs minors differ), and the subvolume is the btrfs root
+objectid (`STATX_SUBVOL`), 0 on every other filesystem (see "As built in M5:
+subvolume-aware object identity" in §2.6). The object set is: every watch
 scope root; the deepest existing ancestor of each rule's literal prefix; and
 **every mount root** in `/proc/self/mountinfo` (including bind mounts whose root
 is a subdirectory). Because mount roots are objects, the walk stops at them, so
@@ -535,7 +537,8 @@ below. `NOMATCH` is now keyed by `(bank, policy, operation, kind)`.
   labels learned before a newly *created* (not yet active) profile are kept until
   a fingerprint change event. argv-rewrite immunity comes from capturing argv at
   `sched_process_exec` before user code. The btrfs subvolume identity collision
-  (risk 7) is deferred to M5; UI exposure of labels and the deny notice are M4.
+  (risk 7) was deferred to M5 (resolved in M5 stage 2); UI exposure of labels
+  and the deny notice are M4.
 
 **As built in M3: narrowed PENDING and the label wait.**
 
@@ -876,6 +879,97 @@ sequence is still n+2). A's last failed attempt also took no new ticket.
   structural operation that starts while eight are preempted on that CPU is
   denied and counted. That is a local denial of service, never an allow.
 
+**As built in M5: subvolume-aware object identity.**
+
+Objects were keyed by `(s_dev, ino)`. btrfs keeps one superblock (one `s_dev`)
+for all its subvolumes, every subvolume root is inode 256, the first directory
+made in a fresh subvolume is 257 in each, and a snapshot repeats its source's
+numbers. A walk could therefore stop at another subvolume's object and decide
+the target under that object's path. (btrfs gives userspace a different
+`st_dev` per subvolume, the root's anonymous device, but the daemon never used
+`st_dev`: both sides already agreed on `i_sb->s_dev` through mountinfo.)
+
+- **Reproduced before the fix.** `TestStructuralBPFSubvolumes`
+  (`structural_subvolume_linux_test.go`) loop-mounts a fresh btrfs with
+  subvolumes `a` and `b`, a snapshot `a-snap` of `a`, and `b` mounted a second
+  time; it checks 22 unlink/mkdir verdicts against the engine (a target is
+  decided at each path it is reachable at). With the previous object on Arch
+  7.1: 12 mismatches, 2 wrong allows (an allow rule on `a/d` let deletes
+  through in `a-snap/d` and `b/x`) and 10 wrong denies (watching `a` denied in
+  `b` and `a-snap`; a deny rule on `a/d` denied in the snapshot). The real
+  daemon (`bpflsm-live -subvol-only`, whole btrfs watched, one app with
+  `+ a/d/**` and a block default, one with `- a/d/**` and a permit default)
+  failed 18 checks: 5 wrong allows (delete in `b/x`, `a-snap/d` and through
+  the second mount, mkdir in `a-snap/d`, rename in `b/x`), 5 wrong denies, and
+  their records.
+- **The key.** `ObjectId { dev, ino, subvol }` (24 bytes; `ObjectKey` 32,
+  `DecisionRecord` 16,496). `subvol` is the btrfs root objectid,
+  `BTRFS_I(inode)->root->root_key.objectid`, and 0 on every other filesystem.
+  The daemon gets it from `statx(STATX_SUBVOL)`, which btrfs's `getattr` fills
+  from exactly that field (v6.12.107 and v7.1.9 `fs/btrfs/inode.c`; the flag
+  exists since 6.10). The kernel reads the same field: a walk reads its
+  superblock's `s_magic` once (a walk never leaves its superblock), and on
+  `BTRFS_SUPER_MAGIC` each directory it checks costs two more probe reads
+  (`inode + delta → root`, `root + objectid offset`). rustc emits no CO-RE
+  relocations, so the offsets come from BTF as all others do: `s_magic` joins
+  `OFFSETS` (vmlinux), and the btrfs layout — `btrfs_inode.root` relative to
+  `btrfs_inode.vfs_inode`, and `btrfs_root.root_key.objectid` — is resolved by
+  the daemon from vmlinux BTF when btrfs is built in (Arch) or from the btrfs
+  module's split BTF `/sys/kernel/btf/btrfs` (Debian), with the member types
+  checked (struct inode, a pointer, a 64-bit integer). The layout is not in
+  `.rodata`: a module loaded after the generation would never get it. It is in
+  `SETTINGS` (`SETTINGS_BTRFS`, `btrfs_root`, `btrfs_root_id`), carried by the
+  compiled table and written in the same map update as the bank flip, so a
+  bank is always read with the layout its keys were computed with. A table
+  with no btrfs mount leaves the flag off and the kernel never reads `s_magic`.
+- **btrfs placeholders.** A snapshot shows each subvolume nested in its source
+  as an empty directory, inode 2 (`BTRFS_EMPTY_SUBVOL_DIR_OBJECTID`) of the
+  snapshot's own root, so placeholders collide even with the subvolume. Nothing
+  can be created below one, so the compiler never makes a placeholder an
+  object; a walk passes through it to its parent's object.
+- **When the kernel cannot tell subvolumes apart: fail closed.** That is btrfs
+  without a readable layout (no BTF, a changed struct) or without
+  `STATX_SUBVOL`, and any other filesystem that reports `STATX_SUBVOL`
+  (bcachefs, a module on Debian 6.12). Its objects are keyed with subvolume 0,
+  as the kernel computes, and if the filesystem is covered — a scope or rule
+  anchors on it, or one of its mounts lies inside a scope or below a rule's
+  literal prefix — every context on it carries `CONTEXT_SUBVOLUME` and denies
+  under the new counted reason `subvolume-identity` (`REASON_SUBVOLUME` = 6;
+  the later reasons and the record reasons moved up by one). The compile
+  warning `subvolume-identity-unknown` (diagnostics error) names the mounts and
+  the layout error. An uncovered such filesystem is unaffected.
+  `TestSubvolumeIdentityUnknownFailsClosed` forces an unreadable layout: a
+  covered btrfs denies in `a`, `b` and the top level (counted), a tmpfs and an
+  uncovered btrfs allow, and the readable layout then allows again.
+- **After.** `TestStructuralBPFSubvolumes`: 22/22 agree; `bpflsm-live
+  -subvol-only`: every verdict right and every record names the exact path
+  (a target in `b` is recorded under its object's first context, the second
+  mount). Both on Arch 7.1 and Debian 6.12.
+
+  Verified instructions (labelling programs unchanged):
+
+  | Hook | Arch 7.1.9 | Debian 6.12.107 | Arch before | Debian before |
+  |---|---:|---:|---:|---:|
+  | `inode_unlink` | 6,996 | 6,559 | 6,679 | 6,242 |
+  | `inode_rmdir` | 7,040 | 6,565 | 6,723 | 6,248 |
+  | `inode_mkdir` | 6,555 | 6,073 | 6,361 | 5,881 |
+  | `inode_link` | 12,039 | 11,288 | 10,668 | 10,188 |
+  | `inode_rename` | 18,857 | 18,361 | 15,533 | 15,045 |
+
+  The full regression set passed on both kernels: the `bpflsm` suite (exit
+  tests, map-full, lifecycle, handover, self-test, label wait), the
+  differential (8 × 505, 0 mismatches), structural contention (Arch, 4
+  preemptors: 8,992 operations, 0 wrong allows, 353 wrong denials ≤ 614
+  `state-contention`; Debian voluntary: 8,859, 0, 0, 0; Debian `preempt=full`, 4/0/12 preemptors: 9,252/8,651/9,559 operations, 0 wrong allows, 345/0/386 wrong denials ≤ 626/4/764), exec-label contention (3,000 execs, 0
+  deletes on each kernel; 1,000 with Debian `preempt=full`), live enforce/off, and the M3/wait and M4
+  `bpflsm-live` matrices on btrfs and tmpfs (Arch bursts: 8,208 and 8,326 of
+  10,000 records dropped, `suppressed` equal to the drops; Debian 8,080 and 8,147, equal again; with `preempt=full` the label-wait test, the M3/wait and M4 matrices on btrfs and both subvolume tests passed too).
+- **Known limits.** Executable labels (`EXEC_LABELS`) are still keyed by
+  `(s_dev, ino, generation)`, so an executable in a snapshot shares the label
+  learned for its source (the profile is still resolved by path when the label
+  is learned). A covered filesystem whose subvolumes the kernel cannot tell
+  apart denies every structural operation on it.
+
 ### 2.7 Events, feedback and status
 
 - **Records.** The ring buffer carries fixed-size `DecisionRecord`s for allow,
@@ -1063,7 +1157,7 @@ The load, lifecycle and startup daemon checks also passed on Debian 6.12
 | M2 ✅ (fixed up) | Full-path kernel matcher (`matcher.rs`, faithful `filepath.Match` port over a Go-tokenized program, all state in a per-CPU `EVAL` map) + Go compiler with mount-root objects and per-path contexts + banked publish + ABI manifest test; single label `UNIDENTIFIED` | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: Gate B matched ≥11 k generated `(pattern, path)` pairs against `filepath.Match` with zero mismatches; the generated-rule differential (8 seeds × 505 ops, ~60% expected denies) agrees with `DecideOperation`/`DecideRename`/`DecideHardLink` across the operation matrix — folder renames, `DestExists`, `RENAME_EXCHANGE`/`RENAME_NOREPLACE`, `*at()` callers, >100-deep paths, post-publish creations, and a tmpfs mounted inside a scope with re-publish — with zero mismatches; self-test, lifecycle, handover and live-daemon (enforce/SIGKILL-persist/restart/off) all pass | 2–2.5 |
 | M3 ✅ | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny, `(tgid, start_time)` self-bypass, `/proc` seeding, per-label kernel rule lookup | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: `python a.py` (allow) vs `python b.py` (deny) get distinct verdicts; `./x.py`, `./s.sh`, `./s.js`, `./s.pl` env-shebang scripts labelled by their script arg; `python -m fmmod` resolves to the module profile and `python -c` to the interpreter profile; a child `rm` spawned by a deny-profile script gets `rm`'s allow label; an unresolved process stays `PENDING` and denies; a fork storm against an 8-entry label map denies and increments the map-full counter; argv rewrite after start does not change the label. The real daemon (`cmds/bpflsm-live`: profiles via the database API, real processes) reproduces the distinct verdicts, scripts, `-m`/`-c`, child `rm` and a live rule edit, and the PENDING window is measured (see As built in M3). No regressions: self-test, lifecycle, handover, the Gate B/differential (8×505, 0 mismatches) and live-daemon enforce/off all pass on both kernels and filesystems | 2–2.5 |
 | M4 ✅ | Decision records for covered allow/deny/audit would-deny; bounded suppressor and drop count; filequery paths/app/mount; informational deny notice with Allow-and-retry; active Write list and structural Monitor UI | Observed on Arch 7.1 and Debian 6.12: all four operations allowed/denied with full source/destination paths and app; deduplicated notice and successful Allow/retry; audit would-deny without notice; 10,000-delete burst with counted drops and healthy daemon. Full regression matrix passes on both kernels; verifier counts remain below 1,000,000 (see As built in M4). Dashboard, Monitor, settings, and app Write-list screenshots inspected; file-access Playwright E2E 2/2 passed with system Chromium | 1.5–2 |
-| M5 | Hardening matrix (§4) and fixes; **btrfs subvolume/snapshot identity** (risk 7) — key objects by a subvolume-aware id, not just `(s_dev, ino)`. Stage 1 ✅: claimed per-CPU decision states replace the sequence ticket, closing the preempted-writer gap (see As built in M5) | §4 matrix green; coverage warnings correct for every injected failure; multi-subvolume btrfs no longer collides objects. Stage 1: the gap reproduced on the M4 object (wrong allows under stress); after it 0 wrong allows on Arch 7.1 and Debian 6.12, full regression set passes on both | 1–1.5 |
+| M5 | Hardening matrix (§4) and fixes; **btrfs subvolume/snapshot identity** (risk 7) — key objects by a subvolume-aware id, not just `(s_dev, ino)`. Stage 1 ✅: claimed per-CPU decision states replace the sequence ticket, closing the preempted-writer gap (see As built in M5). Stage 2 ✅: objects keyed by `(s_dev, ino, btrfs subvolume)`, fail closed where the kernel cannot read the subvolume (see As built in M5: subvolume-aware object identity) | §4 matrix green; coverage warnings correct for every injected failure; multi-subvolume btrfs no longer collides objects. Stage 1: the gap reproduced on the M4 object (wrong allows under stress); after it 0 wrong allows on Arch 7.1 and Debian 6.12, full regression set passes on both. Stage 2: 12 wrong verdicts (2 wrong allows) on the kernel object and 18 failed real-daemon checks before; 0 after on Arch 7.1 and Debian 6.12, full regression set passes on both | 1–1.5 |
 | | **Total** | | **8.5–11.5** |
 
 ## 4. Test plan
@@ -1168,16 +1262,19 @@ the actual coverage:
    daemon's structural writes.
    - *If observed:* include the exe in `SELF`'s key with a generation-agnostic
      exe match, accepting the PID-reuse caveat only for the daemon's own exe.
-7. **btrfs subvolume identity collision (DEFERRED, M5).** Objects are keyed by
-   `(mountinfo s_dev, ino)`. That pair is **not** unique across btrfs
+7. **btrfs subvolume identity collision (RESOLVED, M5 stage 2).** Objects were
+   keyed by `(mountinfo s_dev, ino)`. That pair is **not** unique across btrfs
    subvolumes and snapshots: every subvolume root is inode 256, and a snapshot
    repeats the inode numbers (and generations) of its source. Two different
-   files in two subvolumes of one filesystem can therefore collide on
-   `(s_dev, ino)` and share an object, so a rule on one would wrongly apply to
-   the other. This work does not address it (test runs use a single subvolume);
-   a correct key needs the btrfs subvolume/root id (e.g. via `ino_lookup` or the
-   subvol id the kernel exposes), which is M5. Until then, multi-subvolume
-   btrfs coverage is unsound and must be documented as such.
+   files in two subvolumes of one filesystem could therefore collide on
+   `(s_dev, ino)` and share an object, so a rule on one wrongly applied to the
+   other (reproduced in both directions). Objects are now keyed by
+   `(s_dev, ino, subvolume)`, with the btrfs root objectid read by both sides;
+   a filesystem whose subvolumes the kernel cannot tell apart fails closed
+   with a warning (see "As built in M5: subvolume-aware object identity").
+   Executable labels (`EXEC_LABELS`) are still keyed by
+   `(s_dev, ino, generation)`, so a snapshot's copy of a learned executable
+   shares its label (a known limit of that section).
 
 ## Estimate check
 

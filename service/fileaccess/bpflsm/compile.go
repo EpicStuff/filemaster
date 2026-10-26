@@ -113,11 +113,14 @@ type CompiledRule struct {
 	Kind    RuleKind
 }
 
-// CompiledContext is one absolute path an object is reachable at.
+// CompiledContext is one absolute path an object is reachable at. Subvolume
+// marks a context on a covered filesystem whose subvolumes the kernel cannot
+// tell apart; it denies.
 type CompiledContext struct {
 	Path      string
 	ParentLen uint32
 	Overflow  bool
+	Subvolume bool
 	Scopes    []ScopeInput
 }
 
@@ -154,6 +157,10 @@ type Table struct {
 	Policies  []CompiledPolicy
 	RuleLists []CompiledRuleList
 	Labels    map[uint32]uint32
+
+	// btrfs is the layout the kernel needs to key btrfs objects by subvolume
+	// as this table does; it is published with the table's bank.
+	btrfs btrfsLayout
 }
 
 // classifiedRule is a rule after matchPathPattern's split into the `/**`
@@ -227,30 +234,43 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 		scopes = append(scopes, ScopeInput{Path: filepath.Clean(scope.Path), Exclude: scope.Exclude})
 	}
 
-	candidates := make(map[string]struct{})
+	// A candidate is true when a scope or rule anchors on it.
+	candidates := make(map[string]bool)
 	for _, scope := range scopes {
 		if !scope.Exclude {
 			if anchor, ok := existingDirectory(scope.Path); ok {
-				candidates[anchor] = struct{}{}
+				candidates[anchor] = true
 			}
 		}
 	}
 	for _, rule := range pending {
 		if anchor, ok := existingDirectory(anchorPath(rule)); ok {
-			candidates[anchor] = struct{}{}
+			candidates[anchor] = true
 		}
 	}
 	for _, mount := range mounts {
-		candidates[mount.Mountpoint] = struct{}{}
+		if _, ok := candidates[mount.Mountpoint]; !ok {
+			candidates[mount.Mountpoint] = false
+		}
 	}
 
 	byID := make(map[int]*mountinfo.Info, len(mounts))
+	var btrfs btrfsLayout
+	var btrfsErr error
 	for _, mount := range mounts {
 		byID[mount.ID] = mount
+		if mount.FSType == "btrfs" && !btrfs.ok && btrfsErr == nil {
+			btrfs, btrfsErr = btrfsLayoutSource()
+		}
 	}
+	unknownSubvolumes := make(map[uint64]bool)
+	anchored := make(map[uint64]bool)
 	contextsByObject := make(map[fileID]map[string]struct{})
-	for candidate := range candidates {
-		id, paths, ok := reachablePaths(candidate, mounts, byID)
+	for candidate, anchor := range candidates {
+		id, paths, ok := reachablePaths(candidate, mounts, byID, btrfs, unknownSubvolumes)
+		if anchor && id.dev != 0 {
+			anchored[id.dev] = true
+		}
 		if !ok {
 			continue
 		}
@@ -273,10 +293,13 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 		if ids[i].dev != ids[j].dev {
 			return ids[i].dev < ids[j].dev
 		}
+		if ids[i].subvol != ids[j].subvol {
+			return ids[i].subvol < ids[j].subvol
+		}
 		return ids[i].ino < ids[j].ino
 	})
 
-	table := Table{Labels: labels}
+	table := Table{Labels: labels, btrfs: btrfs}
 	for _, set := range sets {
 		table.Policies = append(table.Policies, CompiledPolicy{DefaultAllow: set.defaultAllow, Lists: make(map[uint32]uint32)})
 	}
@@ -373,6 +396,11 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 	for pattern := range overflowPatterns {
 		warnings.add("context-rule-overflow", pattern)
 	}
+	var literals []string
+	for _, rule := range pending {
+		literals = append(literals, rule.literal)
+	}
+	markUnknownSubvolumes(&table, unknownSubvolumes, anchored, mounts, scopes, literals, btrfsErr, warnings)
 	if _, _, err := layoutArena(table); err != nil {
 		return Table{}, warnings.list(), err
 	}
@@ -483,30 +511,45 @@ func existingDirectory(path string) (string, bool) {
 // reachablePaths returns the inode identity of the directory at candidate and
 // every absolute path in this mount namespace at which that same dentry is
 // visible: the same filesystem path under every mount of the superblock whose
-// root contains it, confirmed by statx.
-func reachablePaths(candidate string, mounts []*mountinfo.Info, byID map[int]*mountinfo.Info) (fileID, []string, bool) {
+// root contains it, confirmed by statx. A superblock whose subvolumes the
+// kernel cannot tell apart is added to unknown. A btrfs placeholder is not an
+// object, but its identity still names its superblock.
+func reachablePaths(candidate string, mounts []*mountinfo.Info, byID map[int]*mountinfo.Info, btrfs btrfsLayout, unknown map[uint64]bool) (fileID, []string, bool) {
 	real, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
 		return fileID{}, nil, false
 	}
-	ino, mountID, mode, err := statPath(real)
-	if err != nil || mode&unix.S_IFMT != unix.S_IFDIR {
+	st, err := statPath(real)
+	if err != nil || st.mode&unix.S_IFMT != unix.S_IFDIR {
 		return fileID{}, nil, false
 	}
-	mount, ok := byID[int(mountID)]
+	mount, ok := byID[int(st.mountID)]
 	if !ok || !pathContains(mount.Mountpoint, real) {
 		return fileID{}, nil, false
 	}
+	// Every empty placeholder btrfs shows for a subvolume nested in a
+	// snapshot is inode 2 of the snapshot's own subvolume, and nothing can be
+	// created below one, so a placeholder is never an object.
+	if mount.FSType == "btrfs" && st.ino == btrfsEmptySubvolumeDir {
+		return fileID{dev: deviceID(mount)}, nil, false
+	}
 	inFS := joinBelow(mount.Root, strings.TrimPrefix(real, mount.Mountpoint))
-	id := fileID{dev: deviceID(mount), ino: ino}
+	subvol, known := objectSubvolume(mount.FSType, st, btrfs)
+	id := fileID{dev: deviceID(mount), ino: st.ino, subvol: subvol}
+	if !known {
+		unknown[id.dev] = true
+	}
 	var paths []string
 	for _, other := range mounts {
 		if other.Major != mount.Major || other.Minor != mount.Minor || !pathContains(other.Root, inFS) {
 			continue
 		}
 		path := joinBelow(other.Mountpoint, strings.TrimPrefix(inFS, other.Root))
-		otherIno, otherMount, _, err := statPath(path)
-		if err != nil || otherIno != ino || int(otherMount) != other.ID {
+		otherStat, err := statPath(path)
+		if err != nil || otherStat.ino != st.ino || int(otherStat.mountID) != other.ID {
+			continue
+		}
+		if otherSubvol, _ := objectSubvolume(other.FSType, otherStat, btrfs); otherSubvol != subvol {
 			continue
 		}
 		paths = append(paths, path)

@@ -144,12 +144,14 @@ func structuralReason(reason uint32) string {
 	case 5:
 		return "the policy evaluation budget was exhausted"
 	case 6:
-		return "the app was still being identified"
+		return "the kernel cannot tell this filesystem's subvolumes apart"
 	case 7:
-		return "the app could not be identified"
+		return "the app was still being identified"
 	case 8:
-		return "identification took too long"
+		return "the app could not be identified"
 	case 9:
+		return "identification took too long"
+	case 10:
 		return "temporary policy contention"
 	case bpflsm.DecisionRuleMatch:
 		return "a matching Write rule"

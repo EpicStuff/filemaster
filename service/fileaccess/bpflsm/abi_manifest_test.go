@@ -62,9 +62,12 @@ func TestABImanifestMatchesGoLayout(t *testing.T) {
 		size    int
 		offsets map[string]int
 	}{
-		{"FileId", 16, map[string]int{"dev": 0, "ino": 8}},
-		{"Settings", settingsSize, map[string]int{"daemon_start": 0, "daemon_tgid": 8, "daemon_span": 12, "active_bank": 16, "audit": 20, "flags": 24}},
-		{"ObjectKey", objectKeySize, map[string]int{"file": 0, "bank": 16, "pad": 20}},
+		{"ObjectId", 24, map[string]int{"dev": 0, "ino": 8, "subvol": 16}},
+		{"Settings", settingsSize, map[string]int{
+			"daemon_start": 0, "daemon_tgid": 8, "daemon_span": 12, "active_bank": 16, "audit": 20, "flags": 24,
+			"btrfs_root": 28, "btrfs_root_id": 32,
+		}},
+		{"ObjectKey", objectKeySize, map[string]int{"file": 0, "bank": objectKeyBank, "pad": 28}},
 		{"ObjectValue", objectValueSize, map[string]int{"first_context": 0, "context_count": 4}},
 		{"ScopeRef", scopeRefSize, map[string]int{"off": 0, "len": 4, "exclude": 8}},
 		{"RuleRef", ruleRefSize, map[string]int{"pattern": 0, "list": 2, "flags": 3}},
@@ -84,8 +87,8 @@ func TestABImanifestMatchesGoLayout(t *testing.T) {
 		}},
 		{"DecisionRecord", decisionRecordSize, map[string]int{
 			"kind": 0, "operation": 4, "verdict": 8, "reason": 12, "tgid": 16, "label": 20, "bank": 24, "flags": 28,
-			"start": 32, "source": 40, "target": 56, "source_context": 72, "target_context": 76,
-			"source_len": 80, "target_len": 84, "suppressed": 88, "source_path": 96, "target_path": 8288,
+			"start": 32, "source": 40, "target": 64, "source_context": 88, "target_context": 92,
+			"source_len": 96, "target_len": 100, "suppressed": 104, "source_path": 112, "target_path": 8304,
 		}},
 		{"Pattern", patternSize, map[string]int{"off": 0, "len": 4, "recursive": 8, "chunk_off": 12, "chunk_len": 16}},
 		{"Chunk", chunkSize, map[string]int{"star": 0, "token_off": 4, "token_len": 8}},

@@ -13,7 +13,7 @@ use core::intrinsics::{AtomicOrdering, atomic_xadd, atomic_xsub};
 use aya_ebpf::helpers::r#gen::{bpf_ktime_get_ns, bpf_loop, bpf_probe_read_kernel};
 use filemaster_lsm_common::decision_maps::{
 	EVAL_BUDGET, HOOKS, HOOK_LINK, HOOK_MKDIR, LIST_EXECUTE, LIST_READ, LIST_WRITE, MAX_REL, REASON_BUDGET,
-	REASON_CONTEXT_OVERFLOW, REASON_DEPTH, REASON_PATH_TOO_LONG, REASON_UNREADABLE,
+	BTRFS_SUPER_MAGIC, REASON_CONTEXT_OVERFLOW, REASON_DEPTH, REASON_PATH_TOO_LONG, REASON_SUBVOLUME, REASON_UNREADABLE,
 	REASON_PENDING, REASON_STATE_CONTENTION, REASON_UNREGISTERED_ROOT, REASON_WAIT_TIMEOUT, REL_END, SCRATCH_MASK, SCRATCH_SLOTS,
 	STATE_SLOTS, WALK_LIMIT,
 };
@@ -21,9 +21,9 @@ use filemaster_lsm_common::label_maps::{
 	MAX_POLICIES, RECORD_DECISION, DECISION_DELETE, DECISION_CREATE, DECISION_RENAME, DECISION_LINK, DECISION_REASON_DEFAULT, DECISION_REASON_NONE,
 	DECISION_ALLOW, DECISION_DENY, DECISION_AUDIT, DECISION_SOURCE_VALID, DECISION_TARGET_VALID,
 	DECISION_PATH_MAX, DECISION_SUPPRESS_LIMIT, DECISION_SUPPRESS_WINDOW_NS, DecisionRecord,
-	DecisionSuppressKey, DecisionSuppressValue,
+	DecisionSuppressKey, DecisionSuppressValue, SETTINGS_BTRFS,
 };
-use filemaster_lsm_common::{Bank, DecisionOp, Dev, FileId, Ino, ObjectKey, TargetKind, Verdict};
+use filemaster_lsm_common::{Bank, DecisionOp, Dev, Ino, ObjectId, ObjectKey, TargetKind, Verdict};
 
 use crate::kernel;
 use crate::label::{self, NO_REASON};
@@ -43,11 +43,13 @@ const NO_LEAF: u32 = u32::MAX;
 
 /// A walk from one target dentry to its object. `rel..REL_END` of the slot's
 /// buffer holds the relative path, and `leaf` is the slash before the leaf name.
+/// On btrfs, `btrfs_root` and `btrfs_root_id` locate each directory's
+/// subvolume.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Walk {
 	dentry: u64,
-	object: FileId,
+	object: ObjectId,
 	bank: u32,
 	policy: u32,
 	slot: u32,
@@ -57,6 +59,9 @@ struct Walk {
 	first_context: u32,
 	context_count: u32,
 	depth: u32,
+	btrfs: u32,
+	btrfs_root: i32,
+	btrfs_root_id: u32,
 	_pad: u32,
 }
 
@@ -316,9 +321,9 @@ pub extern "C" fn filemaster_rename(source: u64, destination: u64, hook: u32, re
 
 #[inline(always)]
 fn remove_once(owner: &Owner, dentry: kernel::Dentry, folder: bool, hook: u32) -> Option<DecisionResult> {
-	let (bank, caller, audit) = live_settings(hook)?;
+	let (bank, caller, audit, btrfs) = live_settings(hook)?;
 	let kind = if folder { TargetKind::FOLDER } else { positive_kind(dentry, hook)? };
-	let target = walk(bank, caller.policy, owner.state * 2, dentry, hook)?;
+	let target = walk(bank, caller.policy, btrfs, owner.state * 2, dentry, hook)?;
 	let mut decision = Decision::new(owner.state, bank, caller, audit, hook);
 	decision.side(&target, DecisionOp::DELETE, kind, hook);
 	Some(owner.conclude(decision.finish(), false))
@@ -326,8 +331,8 @@ fn remove_once(owner: &Owner, dentry: kernel::Dentry, folder: bool, hook: u32) -
 
 #[inline(always)]
 fn mkdir_once(owner: &Owner, dentry: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	let (bank, caller, audit) = live_settings(hook)?;
-	let target = walk(bank, caller.policy, owner.state * 2, dentry, hook)?;
+	let (bank, caller, audit, btrfs) = live_settings(hook)?;
+	let target = walk(bank, caller.policy, btrfs, owner.state * 2, dentry, hook)?;
 	let mut decision = Decision::new(owner.state, bank, caller, audit, hook);
 	decision.side(&target, DecisionOp::CREATE, TargetKind::FOLDER, hook);
 	Some(owner.conclude(decision.finish(), false))
@@ -335,11 +340,11 @@ fn mkdir_once(owner: &Owner, dentry: kernel::Dentry, hook: u32) -> Option<Decisi
 
 #[inline(always)]
 fn hard_link_once(owner: &Owner, source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	let (bank, caller, audit) = live_settings(hook)?;
+	let (bank, caller, audit, btrfs) = live_settings(hook)?;
 	let kind = positive_kind(source, hook)?;
 	let destination_exists = exists(destination, hook)?;
-	let source_walk = walk(bank, caller.policy, owner.state * 2, source, hook)?;
-	let destination_walk = walk(bank, caller.policy, owner.state * 2 + 1, destination, hook)?;
+	let source_walk = walk(bank, caller.policy, btrfs, owner.state * 2, source, hook)?;
+	let destination_walk = walk(bank, caller.policy, btrfs, owner.state * 2 + 1, destination, hook)?;
 	let mut decision = Decision::new(owner.state, bank, caller, audit, hook);
 	'decided: {
 		for operation in [DecisionOp::READ, DecisionOp::WRITE, DecisionOp::EXECUTE] {
@@ -357,12 +362,12 @@ fn hard_link_once(owner: &Owner, source: kernel::Dentry, destination: kernel::De
 
 #[inline(always)]
 fn rename_once(owner: &Owner, source: kernel::Dentry, destination: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	let (bank, caller, audit) = live_settings(hook)?;
+	let (bank, caller, audit, btrfs) = live_settings(hook)?;
 	let source_kind = positive_kind(source, hook)?;
 	let destination_exists = exists(destination, hook)?;
 	let destination_kind = if destination_exists { positive_kind(destination, hook)? } else { source_kind };
-	let source_walk = walk(bank, caller.policy, owner.state * 2, source, hook)?;
-	let destination_walk = walk(bank, caller.policy, owner.state * 2 + 1, destination, hook)?;
+	let source_walk = walk(bank, caller.policy, btrfs, owner.state * 2, source, hook)?;
+	let destination_walk = walk(bank, caller.policy, btrfs, owner.state * 2 + 1, destination, hook)?;
 	let mut decision = Decision::new(owner.state, bank, caller, audit, hook);
 	'decided: {
 		if decision.side(&source_walk, DecisionOp::DELETE, source_kind, hook) {
@@ -443,14 +448,16 @@ impl Decision {
 	}
 }
 
-/// The active bank, the caller, and audit mode. `None` is the daemon's own
-/// bypass or an unreadable caller.
+/// The active bank, the caller, audit mode, and the btrfs layout the bank's
+/// objects are keyed with. `None` is the daemon's own bypass or an unreadable
+/// caller.
 #[inline(always)]
-fn live_settings(hook: u32) -> Option<(u32, label::Caller, bool)> {
+fn live_settings(hook: u32) -> Option<(u32, label::Caller, bool, Option<(i32, u32)>)> {
 	let settings = SETTINGS.get(0).copied()?;
 	let bank = Bank(settings.active_bank).masked().0;
 	let caller = label::caller_policy(&settings, bank, hook)?;
-	Some((bank, caller, settings.audit != 0))
+	let btrfs = if settings.flags & SETTINGS_BTRFS != 0 { Some((settings.btrfs_root, settings.btrfs_root_id)) } else { None };
+	Some((bank, caller, settings.audit != 0, btrfs))
 }
 
 #[inline(always)]
@@ -484,9 +491,10 @@ fn is_dir(mode: u16) -> bool {
 }
 
 /// Walks from `dentry` to its object. `None` (counted) means a kernel value
-/// was unreadable and the operation fails open.
+/// was unreadable and the operation fails open. A walk never leaves its
+/// superblock, so one magic check decides whether it keys by subvolume.
 #[inline(always)]
-fn walk(bank: u32, policy: u32, slot: u32, dentry: kernel::Dentry, hook: u32) -> Option<&'static Walk> {
+fn walk(bank: u32, policy: u32, btrfs: Option<(i32, u32)>, slot: u32, dentry: kernel::Dentry, hook: u32) -> Option<&'static Walk> {
 	let Some(state) = WALKS.get_ptr_mut(slot) else {
 		count(REASON_UNREADABLE, hook);
 		return None;
@@ -497,7 +505,9 @@ fn walk(bank: u32, policy: u32, slot: u32, dentry: kernel::Dentry, hook: u32) ->
 	// linker's global one).
 	// SAFETY: fields of this CPU's slot.
 	unsafe {
-		core::ptr::write_volatile(&mut state.object, FileId::new(Dev(0), Ino(0)));
+		core::ptr::write_volatile(&mut state.object.dev, Dev(0));
+		core::ptr::write_volatile(&mut state.object.ino, Ino(0));
+		core::ptr::write_volatile(&mut state.object.subvol, 0);
 		core::ptr::write_volatile(&mut state.first_context, 0);
 		core::ptr::write_volatile(&mut state.context_count, 0);
 		core::ptr::write_volatile(&mut state.depth, 0);
@@ -509,6 +519,18 @@ fn walk(bank: u32, policy: u32, slot: u32, dentry: kernel::Dentry, hook: u32) ->
 	state.rel = REL_END;
 	state.leaf = NO_LEAF;
 	state.status = WALK_RUNNING;
+	state.btrfs = 0;
+	if let Some((root, root_id)) = btrfs {
+		let Some(magic) = dentry.super_block().and_then(|sb| sb.magic()) else {
+			count(REASON_UNREADABLE, hook);
+			return None;
+		};
+		if magic == BTRFS_SUPER_MAGIC {
+			state.btrfs = 1;
+			state.btrfs_root = root;
+			state.btrfs_root_id = root_id;
+		}
+	}
 	let mut slot = slot;
 	// SAFETY: the callback only reads `slot`, which outlives the call.
 	unsafe {
@@ -552,7 +574,16 @@ unsafe extern "C" fn walk_step(_index: u64, ctx: *mut c_void) -> i64 {
 				w.status = WALK_UNREADABLE;
 				return 1;
 			};
-			let key = ObjectKey::new(Bank(w.bank), FileId::new(dev, ino));
+			let subvol = if w.btrfs != 0 {
+				let Some(subvol) = inode.btrfs_subvolume(w.btrfs_root, w.btrfs_root_id) else {
+					w.status = WALK_UNREADABLE;
+					return 1;
+				};
+				subvol
+			} else {
+				0
+			};
+			let key = ObjectKey::new(Bank(w.bank), ObjectId::new(dev, ino, subvol));
 			// SAFETY: copied immediately; a concurrent update cannot alias it.
 			if let Some(object) = unsafe { OBJECTS.get(&key) }.copied() {
 				w.object = key.file;
@@ -672,6 +703,10 @@ pub extern "C" fn filemaster_evaluate(hook: u32, state: u32) -> u32 {
 		count(REASON_BUDGET, hook);
 		return SIDE_DENY | (REASON_BUDGET << 8);
 	}
+	if e.subvolume != 0 {
+		count(REASON_SUBVOLUME, hook);
+		return SIDE_DENY | (REASON_SUBVOLUME << 8);
+	}
 	if e.overflow != 0 {
 		count(REASON_CONTEXT_OVERFLOW, hook);
 		return SIDE_DENY | (REASON_CONTEXT_OVERFLOW << 8);
@@ -735,7 +770,7 @@ fn suppress(key: DecisionSuppressKey, now: u64) -> Option<u32> {
 }
 
 #[inline(always)]
-fn record_path(walk: &Walk, to: *mut u8) -> Option<(FileId, u32, u32)> {
+fn record_path(walk: &Walk, to: *mut u8) -> Option<(ObjectId, u32, u32)> {
 	if walk.status != WALK_FOUND || walk.rel > REL_END {
 		return None;
 	}
@@ -817,8 +852,10 @@ pub extern "C" fn filemaster_record(decision: u64, state: u32) -> u64 {
 		(*record).start = start;
 		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source.dev), Dev(0));
 		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source.ino), Ino(0));
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source.subvol), 0);
 		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target.dev), Dev(0));
 		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target.ino), Ino(0));
+		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target.subvol), 0);
 		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source_context), 0);
 		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).target_context), 0);
 		core::ptr::write_volatile(core::ptr::addr_of_mut!((*record).source_len), 0);
@@ -846,7 +883,9 @@ pub extern "C" fn filemaster_record(decision: u64, state: u32) -> u64 {
 	let (source, target) = unsafe { (&*source, &*target) };
 	if let Some((id, context, len)) = record_path(source, source_bytes) {
 		unsafe {
-			(*record).source = id;
+			(*record).source.dev = id.dev;
+			(*record).source.ino = id.ino;
+			(*record).source.subvol = id.subvol;
 			(*record).source_context = context;
 			(*record).source_len = len;
 			(*record).flags |= DECISION_SOURCE_VALID;
@@ -854,7 +893,9 @@ pub extern "C" fn filemaster_record(decision: u64, state: u32) -> u64 {
 	}
 	if let Some((id, context, len)) = if destination { record_path(target, target_bytes) } else { None } {
 		unsafe {
-			(*record).target = id;
+			(*record).target.dev = id.dev;
+			(*record).target.ino = id.ino;
+			(*record).target.subvol = id.subvol;
 			(*record).target_context = context;
 			(*record).target_len = len;
 			(*record).flags |= DECISION_TARGET_VALID;

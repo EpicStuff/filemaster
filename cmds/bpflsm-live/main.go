@@ -37,18 +37,19 @@ const (
 )
 
 var (
-	corePath  = flag.String("core", "./filemaster-core", "filemaster-core binary")
-	scope     = flag.String("scope", "/srv/watched", "watched scope (created fresh)")
-	outside   = flag.String("outside", "/mnt/fm-unwatched", "tmpfs mounted outside every watched mount")
-	dataDir   = flag.String("data", "/tmp/fm-live", "daemon data directory (created fresh)")
-	runs      = flag.Int("runs", 50, "PENDING-window samples per placement")
-	debug     = flag.Bool("debug", false, "print the daemon's process record for each case")
-	waitOnly  = flag.Bool("wait-only", false, "run only the label-wait matrix")
-	m4Only    = flag.Bool("m4-only", false, "run only M4 decision record and notification checks")
-	failures  int
-	daemon    *exec.Cmd
-	wsConn    *websocket.Conn
-	messageID int
+	corePath   = flag.String("core", "./filemaster-core", "filemaster-core binary")
+	scope      = flag.String("scope", "/srv/watched", "watched scope (created fresh)")
+	outside    = flag.String("outside", "/mnt/fm-unwatched", "tmpfs mounted outside every watched mount")
+	dataDir    = flag.String("data", "/tmp/fm-live", "daemon data directory (created fresh)")
+	runs       = flag.Int("runs", 50, "PENDING-window samples per placement")
+	debug      = flag.Bool("debug", false, "print the daemon's process record for each case")
+	waitOnly   = flag.Bool("wait-only", false, "run only the label-wait matrix")
+	m4Only     = flag.Bool("m4-only", false, "run only M4 decision record and notification checks")
+	subvolOnly = flag.Bool("subvol-only", false, "run only the M5 btrfs subvolume and snapshot checks")
+	failures   int
+	daemon     *exec.Cmd
+	wsConn     *websocket.Conn
+	messageID  int
 )
 
 func main() {
@@ -64,6 +65,11 @@ func main() {
 	must(setup())
 	if *m4Only {
 		m4Matrix()
+		finish()
+		return
+	}
+	if *subvolOnly {
+		subvolMatrix()
 		finish()
 		return
 	}

@@ -270,6 +270,9 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 			message = "Delete, folder create, hard link and rename operations are denied in some folders because more rules can apply there than the structural BPF table holds."
 		case "pattern-never-matches":
 			message = "A rule pattern can never match, because filepath.Match rejects it, so the structural BPF table leaves it out."
+		case "subvolume-identity-unknown":
+			severity = "error"
+			message = "Delete, folder create, hard link and rename operations are denied on these filesystems, because their inode numbers repeat across subvolumes and snapshots and the kernel cannot read which subvolume a folder belongs to."
 		}
 		appendWarning("bpf-lsm-"+warning.ID, severity, message,
 			"patterns="+strings.Join(warning.Patterns, ","))
@@ -285,6 +288,7 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 		bpflsm.ReasonUnregisteredRoot: "The structural BPF LSM treated some operations as not covered because they were on a mount it had not registered yet.",
 		bpflsm.ReasonContextOverflow:  "The structural BPF LSM denied operations in folders whose rules do not fit its table.",
 		bpflsm.ReasonBudget:           "The structural BPF LSM denied operations whose rule evaluation exceeded its step budget.",
+		bpflsm.ReasonSubvolume:        "The structural BPF LSM denied operations on a filesystem whose subvolumes it cannot tell apart.",
 		bpflsm.ReasonPending:          "The structural BPF LSM denied operations by processes whose profile it had not resolved yet.",
 		bpflsm.ReasonUnlabelled:       "The structural BPF LSM denied operations by processes it could not label (the label map may be full).",
 		bpflsm.ReasonWaitTimeout:      "The structural BPF LSM denied operations by processes whose profile was not resolved within the label wait.",

@@ -5,6 +5,7 @@
 // negative-versus-unreadable inode read and the `d_name` reader for the path walk.
 // M3 replaces `caller_exe` with the task, mm, binprm and inode-generation
 // readers for labelling. The race fix reads hook arguments as plain integers.
+// M5 adds the superblock magic and btrfs subvolume readers.
 //! The unsafe boundary: every read of kernel memory lives here, behind safe typed
 //! handles, so the decision flow in `main.rs` is `unsafe`-free.
 //!
@@ -155,6 +156,14 @@ impl Inode {
     pub fn file_id(self) -> Option<FileId> {
         Some(FileId::new(self.super_block()?.dev()?, self.ino()?))
     }
+    /// A btrfs inode's subvolume, `BTRFS_I(inode)->root->root_key.objectid`,
+    /// which is what btrfs's getattr reports as `STATX_SUBVOL`. `root` is the
+    /// `btrfs_inode.root` offset relative to the embedded `struct inode`, and
+    /// `root_id` the objectid's offset in `btrfs_root`.
+    pub fn btrfs_subvolume(self, root: i32, root_id: u32) -> Option<u64> {
+        let root = read_at::<*const u8>(self.0.wrapping_offset(root as isize), 0)?;
+        read_at::<u64>(root, root_id)
+    }
 }
 
 /// A `struct super_block *`.
@@ -167,6 +176,10 @@ impl SuperBlock {
     pub fn dev(self) -> Option<Dev> {
         // s_dev is dev_t == u32.
         Some(Dev(read_at::<u32>(self.0, offset!(sb_s_dev))? as u64))
+    }
+    pub fn magic(self) -> Option<u64> {
+        // s_magic is unsigned long.
+        read_at::<u64>(self.0, offset!(sb_s_magic))
     }
 }
 

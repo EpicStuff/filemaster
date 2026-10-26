@@ -104,6 +104,7 @@ const (
 	ReasonUnregisteredRoot = "unregistered-root"
 	ReasonContextOverflow  = "context-overflow"
 	ReasonBudget           = "evaluation-budget"
+	ReasonSubvolume        = "subvolume-identity"
 	ReasonPending          = "label-pending"
 	ReasonUnlabelled       = "unlabelled"
 	ReasonWaitTimeout      = "label-wait-timeout"
@@ -112,7 +113,7 @@ const (
 
 var undecidedReasons = [reasonCount]string{
 	ReasonUnreadable, ReasonDepth, ReasonPathTooLong, ReasonUnregisteredRoot, ReasonContextOverflow, ReasonBudget,
-	ReasonPending, ReasonUnlabelled, ReasonWaitTimeout, ReasonStateContention,
+	ReasonSubvolume, ReasonPending, ReasonUnlabelled, ReasonWaitTimeout, ReasonStateContention,
 }
 
 // Enforcer owns the loaded BPF LSM object and its pinned generations.
@@ -150,6 +151,7 @@ type publishedSettings struct {
 	bank      uint32
 	audit     bool
 	labelling bool
+	btrfs     btrfsLayout
 }
 
 // Options supplies non-default paths and identity only when an embedding
@@ -529,6 +531,7 @@ func (e *Enforcer) publishLocked(table Table, mode Mode) error {
 	settings := e.settings
 	settings.bank = inactive
 	settings.audit = mode == ModeAudit
+	settings.btrfs = table.btrfs
 	if err := e.collection.Maps["SETTINGS"].Put(uint32(0), encodeSettings(settings)); err != nil {
 		return fmt.Errorf("flip active decision-table bank: %w", err)
 	}
@@ -630,7 +633,7 @@ func clearObjectBank(m *ebpf.Map, bank uint32) error {
 	var keys [][objectKeySize]byte
 	iter := m.Iterate()
 	for iter.Next(&key, &value) {
-		if binary.LittleEndian.Uint32(key[16:]) == bank {
+		if binary.LittleEndian.Uint32(key[objectKeyBank:]) == bank {
 			keys = append(keys, key)
 		}
 	}

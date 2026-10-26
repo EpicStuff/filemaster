@@ -45,6 +45,9 @@ pub const RECORDS_SIZE: usize = 8 << 20;
 /// `Settings::flags`: fork/exec labelling is on and unlabelled processes are
 /// pending. Off, every process uses label 0 (the M2 behaviour).
 pub const SETTINGS_LABELLING: u32 = 1;
+/// `Settings::flags`: `btrfs_root` and `btrfs_root_id` hold the running
+/// kernel's btrfs layout, so walks on btrfs key objects by subvolume.
+pub const SETTINGS_BTRFS: u32 = 2;
 
 /// `RuleList::flags`: the list overflowed its array; the context denies.
 pub const RULELIST_OVERFLOW: u32 = 1;
@@ -104,6 +107,11 @@ pub struct Settings {
 	pub active_bank: u32,
 	pub audit: u32,
 	pub flags: u32,
+	/// With [`SETTINGS_BTRFS`]: the byte offset from a btrfs `struct inode` to
+	/// its `btrfs_inode.root` pointer (negative: `vfs_inode` follows `root`).
+	pub btrfs_root: i32,
+	/// With [`SETTINGS_BTRFS`]: `btrfs_root.root_key.objectid`'s offset.
+	pub btrfs_root_id: u32,
 	pub _pad: u32,
 }
 
@@ -217,9 +225,9 @@ pub const DECISION_LINK: u32 = 4;
 pub const DECISION_ALLOW: u32 = 0;
 pub const DECISION_DENY: u32 = 1;
 pub const DECISION_AUDIT: u32 = 2;
-pub const DECISION_REASON_RULE: u32 = 10;
-pub const DECISION_REASON_DEFAULT: u32 = 11;
-pub const DECISION_REASON_NONE: u32 = 12;
+pub const DECISION_REASON_RULE: u32 = 11;
+pub const DECISION_REASON_DEFAULT: u32 = 12;
+pub const DECISION_REASON_NONE: u32 = 13;
 pub const DECISION_SOURCE_VALID: u32 = 1;
 pub const DECISION_TARGET_VALID: u32 = 2;
 pub const DECISION_PATH_MAX: usize = crate::decision_maps::MAX_REL as usize;
@@ -242,8 +250,8 @@ pub struct DecisionRecord {
 	pub bank: u32,
 	pub flags: u32,
 	pub start: u64,
-	pub source: crate::FileId,
-	pub target: crate::FileId,
+	pub source: crate::ObjectId,
+	pub target: crate::ObjectId,
 	pub source_context: u32,
 	pub target_context: u32,
 	pub source_len: u32,

@@ -28,7 +28,7 @@ const (
 	maxString     = 4095
 	auditSlots    = 5
 	hookCount     = 5
-	reasonCount   = 10
+	reasonCount   = 11
 
 	maxLabels       = 16384
 	maxPolicies     = 1024
@@ -49,6 +49,7 @@ const (
 	policyPending     = 0
 
 	settingsLabelling = 1
+	settingsBtrfs     = 2
 	ruleListOverflow  = 1
 
 	recordExec          = 1
@@ -57,9 +58,10 @@ const (
 	recordArgsTruncated = 1
 	recordEnvTruncated  = 2
 
-	settingsSize            = 32
+	settingsSize            = 40
 	waitSettingsSize        = 16
-	objectKeySize           = 24
+	objectKeySize           = 32
+	objectKeyBank           = 24
 	objectValueSize         = 8
 	scopeRefSize            = 12
 	ruleRefSize             = 4
@@ -71,7 +73,7 @@ const (
 	procValueSize           = 24
 	resolvedSize            = 24
 	recordHeader            = 104
-	decisionRecordSize      = 16480
+	decisionRecordSize      = 16496
 	decisionPathMax         = 8192
 	decisionSuppressEntries = 4096
 	decisionSuppressLimit   = 64
@@ -82,11 +84,12 @@ const (
 	arenaValueSize          = arenaSize + 4096
 	scratchSize             = 16384 + 4096
 	stateSlots              = 8
-	offsetsSize             = 112
+	offsetsSize             = 116
 
-	contextOverflow = 1
-	ruleAllow       = 1
-	ruleKindShift   = 1
+	contextOverflow  = 1
+	contextSubvolume = 2
+	ruleAllow        = 1
+	ruleKindShift    = 1
 
 	tokenLiteral  = 0
 	tokenQuestion = 1
@@ -144,32 +147,44 @@ func checkMapLayout(spec *ebpf.CollectionSpec) error {
 }
 
 // fileID is the kernel's inode identity: sb->s_dev in the kernel's internal
-// encoding (major<<20 | minor) and the inode number.
+// encoding (major<<20 | minor), the inode number, and for objects the btrfs
+// subvolume (0 elsewhere).
 type fileID struct {
-	dev uint64
-	ino uint64
+	dev    uint64
+	ino    uint64
+	subvol uint64
 }
 
-// statPath returns the inode number, mount ID and mode of path.
-func statPath(path string) (ino, mountID uint64, mode uint16, err error) {
+// pathStat is the statx subset objects are keyed by. hasSubvol reports that
+// the filesystem filled STATX_SUBVOL.
+type pathStat struct {
+	ino       uint64
+	mountID   uint64
+	subvol    uint64
+	hasSubvol bool
+	mode      uint16
+}
+
+func statPath(path string) (pathStat, error) {
 	var st unix.Statx_t
-	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_NO_AUTOMOUNT, unix.STATX_INO|unix.STATX_MODE|unix.STATX_MNT_ID, &st); err != nil {
-		return 0, 0, 0, err
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_NO_AUTOMOUNT, unix.STATX_INO|unix.STATX_MODE|unix.STATX_MNT_ID|unix.STATX_SUBVOL, &st); err != nil {
+		return pathStat{}, err
 	}
 	if st.Mask&unix.STATX_MNT_ID == 0 {
-		return 0, 0, 0, fmt.Errorf("statx %s: kernel reported no mount ID", path)
+		return pathStat{}, fmt.Errorf("statx %s: kernel reported no mount ID", path)
 	}
-	return st.Ino, st.Mnt_id, st.Mode, nil
+	return pathStat{ino: st.Ino, mountID: st.Mnt_id, subvol: st.Subvol, hasSubvol: st.Mask&unix.STATX_SUBVOL != 0, mode: st.Mode}, nil
 }
 
 // pathFileID keys path by the superblock device of the mount that statx
 // reports, from mountinfo, never stat's st_dev, which differs from sb->s_dev
-// on btrfs subvolumes.
+// on btrfs subvolumes. It is an executable's identity, which has no subvolume.
 func pathFileID(path string) (fileID, error) {
-	ino, mountID, _, err := statPath(path)
+	st, err := statPath(path)
 	if err != nil {
 		return fileID{}, err
 	}
+	ino, mountID := st.ino, st.mountID
 	mounts, err := mountinfo.GetMounts(func(info *mountinfo.Info) (skip, stop bool) {
 		return uint64(info.ID) != mountID, uint64(info.ID) == mountID
 	})
@@ -187,7 +202,7 @@ func deviceID(info *mountinfo.Info) uint64 {
 }
 
 // Settings: daemon start@0, daemon tgid@8, start span@12, active bank@16,
-// audit@20, flags@24, padding@28.
+// audit@20, flags@24, btrfs root@28, btrfs root id@32, padding@36.
 func encodeSettings(s publishedSettings) []byte {
 	b := make([]byte, settingsSize)
 	binary.LittleEndian.PutUint64(b[0:], s.daemon.start)
@@ -197,9 +212,16 @@ func encodeSettings(s publishedSettings) []byte {
 	if s.audit {
 		binary.LittleEndian.PutUint32(b[20:], 1)
 	}
+	var flags uint32
 	if s.labelling {
-		binary.LittleEndian.PutUint32(b[24:], settingsLabelling)
+		flags |= settingsLabelling
 	}
+	if s.btrfs.ok {
+		flags |= settingsBtrfs
+		binary.LittleEndian.PutUint32(b[28:], uint32(s.btrfs.root))
+		binary.LittleEndian.PutUint32(b[32:], s.btrfs.rootID)
+	}
+	binary.LittleEndian.PutUint32(b[24:], flags)
 	return b
 }
 
@@ -214,12 +236,13 @@ func encodeWaitSettings(heartbeat uint64, maxWaiters uint32, enabled bool) []byt
 	return b
 }
 
-// ObjectKey: dev@0, ino@8, bank@16, explicit trailing padding@20.
+// ObjectKey: dev@0, ino@8, subvol@16, bank@24, explicit trailing padding@28.
 func encodeObjectKey(bank uint32, id fileID) []byte {
 	b := make([]byte, objectKeySize)
 	binary.LittleEndian.PutUint64(b[0:], id.dev)
 	binary.LittleEndian.PutUint64(b[8:], id.ino)
-	binary.LittleEndian.PutUint32(b[16:], bank)
+	binary.LittleEndian.PutUint64(b[16:], id.subvol)
+	binary.LittleEndian.PutUint32(b[objectKeyBank:], bank)
 	return b
 }
 
@@ -242,6 +265,10 @@ func encodeContext(c CompiledContext, arena map[string]uint32) []byte {
 	binary.LittleEndian.PutUint32(b[0:], arena[c.Path])
 	binary.LittleEndian.PutUint32(b[4:], pathLen)
 	binary.LittleEndian.PutUint32(b[8:], c.ParentLen)
+	if c.Subvolume {
+		binary.LittleEndian.PutUint32(b[12:], contextSubvolume)
+		return b
+	}
 	if c.Overflow {
 		binary.LittleEndian.PutUint32(b[12:], contextOverflow)
 		return b
@@ -344,8 +371,8 @@ func decodeRecord(b []byte) (Record, error) {
 		if len(b) < decisionRecordSize {
 			return Record{}, fmt.Errorf("decision record of %d bytes is shorter than %d", len(b), decisionRecordSize)
 		}
-		sourceLen := int(binary.LittleEndian.Uint32(b[80:]))
-		targetLen := int(binary.LittleEndian.Uint32(b[84:]))
+		sourceLen := int(binary.LittleEndian.Uint32(b[96:]))
+		targetLen := int(binary.LittleEndian.Uint32(b[100:]))
 		if sourceLen > decisionPathMax || targetLen > decisionPathMax {
 			return Record{}, fmt.Errorf("decision path lengths %d and %d exceed %d", sourceLen, targetLen, decisionPathMax)
 		}
@@ -358,13 +385,13 @@ func decodeRecord(b []byte) (Record, error) {
 			Bank:          binary.LittleEndian.Uint32(b[24:]),
 			SourceValid:   flags&1 != 0,
 			TargetValid:   flags&2 != 0,
-			Source:        fileID{dev: binary.LittleEndian.Uint64(b[40:]), ino: binary.LittleEndian.Uint64(b[48:])},
-			Target:        fileID{dev: binary.LittleEndian.Uint64(b[56:]), ino: binary.LittleEndian.Uint64(b[64:])},
-			SourceContext: binary.LittleEndian.Uint32(b[72:]),
-			TargetContext: binary.LittleEndian.Uint32(b[76:]),
-			SourcePath:    string(b[96 : 96+sourceLen]),
-			TargetPath:    string(b[8288 : 8288+targetLen]),
-			Suppressed:    binary.LittleEndian.Uint32(b[88:]),
+			Source:        decodeFileID(b[40:]),
+			Target:        decodeFileID(b[64:]),
+			SourceContext: binary.LittleEndian.Uint32(b[88:]),
+			TargetContext: binary.LittleEndian.Uint32(b[92:]),
+			SourcePath:    string(b[112 : 112+sourceLen]),
+			TargetPath:    string(b[8304 : 8304+targetLen]),
+			Suppressed:    binary.LittleEndian.Uint32(b[104:]),
 		}
 		return Record{Kind: recordDecision, TGID: binary.LittleEndian.Uint32(b[16:]), Start: binary.LittleEndian.Uint64(b[32:]), Decision: decision}, nil
 	}
@@ -395,6 +422,11 @@ func decodeRecord(b []byte) (Record, error) {
 	path := b[recordHeader+argsLen+envLen : recordHeader+argsLen+envLen+pathLen]
 	r.Path = strings.TrimRight(string(path), "\x00")
 	return r, nil
+}
+
+// ObjectId: dev@0, ino@8, subvol@16.
+func decodeFileID(b []byte) fileID {
+	return fileID{dev: binary.LittleEndian.Uint64(b[0:]), ino: binary.LittleEndian.Uint64(b[8:]), subvol: binary.LittleEndian.Uint64(b[16:])}
 }
 
 // splitNUL splits NUL-terminated strings; a truncated last string is kept.
