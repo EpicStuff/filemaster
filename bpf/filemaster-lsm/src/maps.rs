@@ -5,7 +5,7 @@ use aya_ebpf::macros::map;
 use aya_ebpf::maps::{Array, HashMap, LruHashMap, PerCpuArray, RingBuf};
 use filemaster_lsm_common::decision_maps::{
 	AUDIT_COUNTERS, COUNTERS as COUNTER_SLOTS, MAX_CHUNKS, MAX_CONTEXTS, MAX_OBJECTS, MAX_PATTERNS,
-	MAX_RANGES, MAX_TOKENS, NUM_BANKS, SCRATCH_SLOTS,
+	MAX_RANGES, MAX_TOKENS, NUM_BANKS, SCRATCH_SLOTS, STATE_SLOTS,
 };
 use filemaster_lsm_common::label_maps::{
 	EXEC_SCRATCH_ENTRIES, LABEL_COUNTERS as LABEL_COUNTER_SLOTS, MAX_EXEC_LABELS, MAX_LABELS,
@@ -49,14 +49,15 @@ pub static SCRATCH: PerCpuArray<Scratch> = PerCpuArray::with_max_entries(SCRATCH
 /// The whole evaluation state lives here, not on the stack: the verifier does
 /// not track map-value contents precisely, so the `bpf_loop` callback's state
 /// converges in a few passes instead of exploding past the instruction limit.
-/// Hooks are preemptible, so `SCRATCH` and `EVAL` are shared by every hook
-/// interleaved on a CPU; `STATE_SEQUENCE` tells a decision it lost them.
+/// One per decision state; `STATE_CLAIMS` gives each to one decision at a time.
 #[map]
-pub static EVAL: PerCpuArray<EvalState> = PerCpuArray::with_max_entries(1, 0);
-/// Bumped (atomically) by every structural decision as it starts using this
-/// CPU's `SCRATCH` and `EVAL`.
+pub static EVAL: PerCpuArray<EvalState> = PerCpuArray::with_max_entries(STATE_SLOTS as u32, 0);
+/// Hooks are preemptible, so several decisions can be in progress on one CPU;
+/// each claims a decision state (its `EVAL` entry and its pair of `SCRATCH` and
+/// `WALKS` entries) here and is the only writer of that state until it
+/// releases it. Non-zero is claimed.
 #[map]
-pub static STATE_SEQUENCE: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+pub static STATE_CLAIMS: PerCpuArray<u64> = PerCpuArray::with_max_entries(STATE_SLOTS as u32, 0);
 /// The one-element control record (daemon identity, active bank, audit mode).
 #[map]
 pub static SETTINGS: Array<Settings> = Array::with_max_entries(1, 0);

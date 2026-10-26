@@ -4,7 +4,7 @@
 // getEsc, class syntax and bad-pattern detection — is done at compile time in
 // Go (service/fileaccess/bpflsm/tokens.go); the kernel executes only Match's
 // control flow over the flat token program that produces. Every piece of
-// mutable evaluation state lives in the per-CPU `EVAL` map value, not on the
+// mutable evaluation state lives in a per-CPU `EVAL` map value, not on the
 // stack, so the `bpf_loop` callback's state converges for the verifier.
 
 use core::ffi::c_void;
@@ -148,14 +148,14 @@ fn byte_at(base: *const u8, pos: u32, mask: u32) -> u8 {
 }
 
 /// One step of the evaluation+matcher state machine. The `bpf_loop` callback.
-/// All persistent state is in the `EVAL` map value, looked up here.
+/// All persistent state is in the `EVAL` map value whose index `ctx` points to.
 #[inline(never)]
-pub unsafe extern "C" fn eval_step(_index: u64, _ctx: *mut c_void) -> i64 {
-	let Some(e) = crate::maps::EVAL.get_ptr_mut(0) else {
+pub unsafe extern "C" fn eval_step(_index: u64, ctx: *mut c_void) -> i64 {
+	// SAFETY: the caller passes its own `u32` state index.
+	let Some(e) = crate::maps::EVAL.get_ptr_mut(unsafe { *(ctx as *const u32) }) else {
 		return 1;
 	};
-	// SAFETY: this CPU's slot; the caller's `decide::owned` detects another hook
-	// using it meanwhile.
+	// SAFETY: this CPU's state, which the caller's decision claimed.
 	let e = unsafe { &mut *e };
 	let (Some(arena), Some(scratch)) = (ARENA.get_ptr(e.bank), SCRATCH.get_ptr(e.slot)) else {
 		e.denied = 1;

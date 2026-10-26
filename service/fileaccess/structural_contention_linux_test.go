@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +28,8 @@ import (
 // operation's outcome must equal DecideOperation/DecideRename/DecideHardLink.
 // Root-only; the VM gate enables it with FM_BPF_CONTENTION=1, sets the run
 // length with FM_BPF_CONTENTION_SECONDS and the filesystem with
-// FM_BPF_DIFFERENTIAL_ROOT.
+// FM_BPF_DIFFERENTIAL_ROOT, and the number of SCHED_FIFO preemptors (4) with
+// FM_BPF_CONTENTION_PREEMPTORS.
 func TestStructuralBPFContention(t *testing.T) {
 	if os.Getenv("FM_BPF_CONTENTION") != "1" {
 		t.Skip("set FM_BPF_CONTENTION=1 to run the root-only BPF contention test")
@@ -42,6 +44,15 @@ func TestStructuralBPFContention(t *testing.T) {
 			t.Fatal(err)
 		}
 		duration = time.Duration(seconds) * time.Second
+	}
+
+	preemptors := 4
+	if value := os.Getenv("FM_BPF_CONTENTION_PREEMPTORS"); value != "" {
+		count, err := strconv.Atoi(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		preemptors = count
 	}
 
 	root := differentialRoot(t, 0)
@@ -63,7 +74,7 @@ func TestStructuralBPFContention(t *testing.T) {
 	for i, nice := range []int{0, 0, 5, -5, 10, 0, 5, -5, 0, 10} {
 		roles = append(roles, role{name: "worker-" + strconv.Itoa(i), nice: nice, allowDir: i%2 == 0})
 	}
-	for i := range 4 {
+	for i := range preemptors {
 		roles = append(roles, role{name: "rt-" + strconv.Itoa(i), fifo: 1 + i, allowDir: i%2 == 1})
 	}
 	for i := range 3 {
@@ -189,6 +200,10 @@ func TestStructuralBPFContention(t *testing.T) {
 		}
 	}
 
+	// A stop-the-world started on a SCHED_FIFO thread spins on CPU 0 waiting
+	// for goroutines whose threads it starves there, so no garbage collection
+	// may start while the threads run.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	deadline := time.Now().Add(duration)
 	var wg sync.WaitGroup
 	setupErrors := make(chan error, len(roles))
@@ -196,8 +211,10 @@ func TestStructuralBPFContention(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// Never unlocked: the thread exits with the goroutine instead of
+			// returning to the runtime still SCHED_FIFO on CPU 0, where it can
+			// starve a worker preempted inside a hook (an RCU stall).
 			runtime.LockOSThread()
-			defer runtime.UnlockOSThread()
 			var cpu unix.CPUSet
 			cpu.Set(0)
 			if err := unix.SchedSetaffinity(0, &cpu); err != nil {
@@ -254,8 +271,8 @@ func TestStructuralBPFContention(t *testing.T) {
 	if failOpen.Load() > 0 {
 		t.Errorf("%d operations allowed against a deny reference", failOpen.Load())
 	}
-	// A decision that lost its per-CPU state on every attempt denies by design
-	// and is counted, so only uncounted wrong denials are mismatches.
+	// A decision that found every per-CPU decision state claimed denies by
+	// design and is counted, so only uncounted wrong denials are mismatches.
 	if failClosed.Load() > contention {
 		t.Errorf("%d operations denied against an allow reference, only %d state-contention denials counted", failClosed.Load(), contention)
 	}

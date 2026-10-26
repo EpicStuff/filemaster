@@ -81,6 +81,7 @@ const (
 	rangeSize               = 8
 	arenaValueSize          = arenaSize + 4096
 	scratchSize             = 16384 + 4096
+	stateSlots              = 8
 	offsetsSize             = 112
 
 	contextOverflow = 1
@@ -111,9 +112,9 @@ func checkMapLayout(spec *ebpf.CollectionSpec) error {
 		"NOMATCH":  {4, 4, nomatchEntries},
 		"AUDIT":    {4, 8, auditSlots},
 		"COUNTERS": {4, 8, hookCount * reasonCount},
-		"SCRATCH":  {4, scratchSize, 2},
+		"SCRATCH":  {4, scratchSize, 2 * stateSlots},
 
-		"STATE_SEQUENCE": {4, 8, 1},
+		"STATE_CLAIMS": {4, 8, stateSlots},
 
 		"POLICY_LISTS":      {policyListKey, 4, maxPolicyLists},
 		"RULELISTS":         {4, ruleListSize, numBanks * maxRuleLists},

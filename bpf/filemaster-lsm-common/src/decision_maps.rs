@@ -59,8 +59,12 @@ pub const SCRATCH_SLACK: usize = 4096;
 pub const REL_END: u32 = 12288;
 /// Longest relative path (target below its object) the buffer accepts.
 pub const MAX_REL: u32 = 8192;
-/// Scratch slots: the source and destination of a two-path operation.
-pub const SCRATCH_SLOTS: usize = 2;
+/// Decision states per CPU: a structural decision claims one for itself, so
+/// this many decisions can be in progress (preempted) on one CPU at once.
+pub const STATE_SLOTS: usize = 8;
+/// Two scratch slots per decision state: the source and destination of a
+/// two-path operation.
+pub const SCRATCH_SLOTS: usize = 2 * STATE_SLOTS;
 
 /// Dentry levels between a target and its object.
 pub const WALK_LIMIT: u32 = 4096;
@@ -99,8 +103,8 @@ pub const REASON_PENDING: u32 = 6;
 pub const REASON_UNLABELLED: u32 = 7;
 /// The caller was pending and its label wait ran out; the pending policy denied.
 pub const REASON_WAIT_TIMEOUT: u32 = 8;
-/// Every attempt's per-CPU evaluation state was used by another hook on the
-/// same CPU before the verdict was read; denied.
+/// Every decision state on the CPU was claimed by another decision in
+/// progress (preempted) there; denied.
 pub const REASON_STATE_CONTENTION: u32 = 9;
 pub const COUNTERS: usize = REASONS * HOOKS;
 
@@ -503,6 +507,7 @@ mod tests {
 			("MAX_PROCS", MAX_PROCS),
 			("MAX_EXEC_LABELS", MAX_EXEC_LABELS),
 			("EXEC_SCRATCH_ENTRIES", EXEC_SCRATCH_ENTRIES),
+			("STATE_SLOTS", STATE_SLOTS),
 			("RECORDS_SIZE", RECORDS_SIZE),
 			("RECORD_BUF_SIZE", RECORD_BUF_SIZE),
 			("DECISION_PATH_MAX", DECISION_PATH_MAX),

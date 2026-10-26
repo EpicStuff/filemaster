@@ -48,9 +48,10 @@ fn run(_ctx: *mut c_void) -> i32 {
 	let e = unsafe { &mut *e };
 	e.reset();
 	matcher::setup_self_match(e, 0, req.pattern_idx, req.name_base, req.name_end);
-	// SAFETY: the callback reads the EVAL map value, which outlives the call.
+	let mut state = 0u32;
+	// SAFETY: the callback reads `state` and the EVAL map value, which outlive the call.
 	unsafe {
-		bpf_loop(EVAL_BUDGET, matcher::eval_step as *mut c_void, core::ptr::null_mut(), 0);
+		bpf_loop(EVAL_BUDGET, matcher::eval_step as *mut c_void, &mut state as *mut u32 as *mut c_void, 0);
 	}
 	let Some(e) = maps::EVAL.get_ptr_mut(0) else {
 		return 0;

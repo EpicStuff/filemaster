@@ -110,7 +110,7 @@ func TestABImanifestMatchesGoLayout(t *testing.T) {
 		"AUDIT_COUNTERS": auditSlots, "NOMATCH_ENTRIES": nomatchEntries, "HOOKS": hookCount, "REASONS": reasonCount,
 		"MAX_LABELS": maxLabels, "MAX_POLICIES": maxPolicies, "MAX_RULELISTS": maxRuleLists, "MAX_POLICY_LISTS": maxPolicyLists,
 		"MAX_PROCS": maxProcs, "MAX_EXEC_LABELS": maxExecLabels, "EXEC_SCRATCH_ENTRIES": execScratchSize,
-		"RECORDS_SIZE": recordsSize, "RECORD_BUF_SIZE": recordBufSize, "DECISION_RECORD_SIZE": decisionRecordSize,
+		"STATE_SLOTS": stateSlots, "RECORDS_SIZE": recordsSize, "RECORD_BUF_SIZE": recordBufSize, "DECISION_RECORD_SIZE": decisionRecordSize,
 		"DECISION_PATH_MAX": decisionPathMax, "DECISION_SUPPRESS_ENTRIES": decisionSuppressEntries,
 		"DECISION_SUPPRESS_LIMIT": decisionSuppressLimit, "ARGS_MAX": argsMax, "ENV_MAX": envMax,
 		"LABEL_COUNTERS": labelCounters, "WAIT_CAP_NS": int(waitCap), "WAIT_STALE_NS": int(waitStale),

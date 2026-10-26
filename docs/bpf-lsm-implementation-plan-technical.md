@@ -197,9 +197,10 @@ explodes the verifier even for a trivial callback), so the matcher is one flat
 loop. `memset`/`memcpy` from the linker are rejected by the verifier, so state
 is zeroed with volatile word stores and subprograms return packed `u64`s rather
 than multi-word tuples (which otherwise spill through an invalid `r11`). The
-per-CPU state is **not** private to one hook: hooks are preemptible, so every
-decision checks that it kept the state to itself (see "As built: the per-CPU
-state race" in §2.6).
+per-CPU state is **not** private to one hook: hooks are preemptible, so each
+decision claims one of the CPU's `STATE_SLOTS` decision states for itself (see
+"As built: the per-CPU state race" and "As built in M5: claimed decision
+states" in §2.6).
 
 **Destinations with no object (owner decision).** "Not covered → allow" applies
 only when *every* object an operation touches is uncovered. A rename or hard
@@ -683,7 +684,7 @@ A resumes with B's verdict.
   reference, 375 denied against an allow reference**; Debian 6.12 with
   `preempt=full` — 9,203 operations, **372 and 412**; Debian 6.12 default
   (`preempt=voluntary`, no kernel preemption) — 8,639 operations, 0 and 0.
-- **The fix (`decide.rs`).** Each decision is a global BPF function
+- **The fix (`decide.rs`; its sequence ticket is replaced in M5, below).** Each decision is a global BPF function
   (`filemaster_remove`, `filemaster_mkdir`, `filemaster_hard_link`,
   `filemaster_rename`) wrapped in `owned`: it takes a ticket by atomically
   incrementing this CPU's `STATE_SEQUENCE` before its first walk, runs the whole
@@ -755,10 +756,125 @@ A resumes with B's verdict.
   Debian 6.12 — unlink 6 114, rmdir 6 153, mkdir 5 854, link 11 820, rename
   16 148, bprm_check 146, bprm_committed_creds 417, fork 273, exec 1 245, exit
   188. The largest single frame is 264 B.
-- **Known limits.** Under sustained contention a decision can lose its state on
-  all 4 attempts and deny; that is a local denial-of-service of structural
+- **Known limits (until M5).** Under sustained contention a decision could lose
+  its state on all 4 attempts and deny; that is a local denial-of-service of structural
   operations on one CPU, never an allow. Events counted from a run that later
   lost its state (budget, overflow) can be over-counted.
+
+**As built in M5: claimed decision states.**
+
+The sequence ticket above detected a hook that *started* after mine, not one
+that *wrote* after mine. Hook A takes ticket n+1 and is preempted; B takes
+n+2 and is preempted; A resumes, writes the shared state and is preempted
+before its check; B resumes, finishes on A's state, and its check passes (the
+sequence is still n+2). A's last failed attempt also took no new ticket.
+
+- **Reproduced before the fix.** `TestStructuralBPFContention` gained
+  `FM_BPF_CONTENTION_PREEMPTORS` (default 4 SCHED_FIFO threads). On Arch 7.1
+  with the M4 object: with 0 preemptors (10 SCHED_OTHER workers and 3
+  yielders), 45 s, **3 allowed against a deny reference** in 10,243
+  operations. With the default 4, the second of a series of 40 s runs had
+  **2** (9,085 operations). An instrumented build (a randomized 4 ms spin
+  before the sequence check) showed 2 in each of two 45 s runs. Debian 6.12
+  `preempt=full`: one 45 s run with 0 preemptors had none (12,212
+  operations).
+- **Task-local storage was not workable.** The state a decision writes is about
+  41 KiB (`SCRATCH` 2 × 20,480 B, plus `WALKS` and `EVAL`). On 7.1,
+  `bpf_selem_alloc` allocates task-storage elements with
+  `bpf_map_kmalloc_nolock`, and `kmalloc_nolock` returns NULL for any size above
+  `KMALLOC_MAX_CACHE_SIZE` (8 KiB with 4 KiB pages; `mm/slub.c` v7.1.9), so
+  every `bpf_task_storage_get(F_CREATE)` would fail. 6.12 takes elements from
+  a per-CPU `bpf_mem_alloc` cache that irq_work refills (`memalloc.c`), so it
+  would work there until a burst empties the cache. The 8,192-byte relative-path
+  buffer alone exceeds the 7.1 limit, so task storage was dropped for both kernels.
+- **The fix: claimed decision states (`decide.rs` `owned`,
+  `filemaster_claim_state`).** `EVAL` has `STATE_SLOTS` = 8 entries per CPU,
+  and `SCRATCH` and `WALKS` have two per state. Before its first walk, each
+  decision claims a state through the per-CPU `STATE_CLAIMS` words. It skips
+  non-zero words, and a claim succeeds when its atomic add returns 0. An add
+  that saw a claimed word is undone. The decision then walks, evaluates, and
+  records only in that state's entries, and releases the claim (atomic
+  subtract) after its record is out. **Why this is sound:** an LSM program
+  runs with migration disabled, so all of its per-CPU lookups resolve to one
+  CPU. Only structural decisions on that CPU touch these entries, and the
+  daemon never writes them. A word is non-zero while its owner holds it, so a
+  second add cannot return 0 until the owner's release. Two decisions
+  therefore never own one state, and a decision writes only to the state it
+  owns. A stale writer is impossible, because a decision stops writing before it releases. Preemption
+  at any point, including between an add and its undo, makes a free state look
+  claimed only for a moment (fail closed). It cannot hand an owned state to a
+  second decision. A program always runs to its end, so a claim is always
+  released. A leaked claim would only shrink the pool. With no free state, the
+  decision denies at once under `state-contention`, which now means "every
+  decision state on this CPU is held by an interrupted decision"; audit counts
+  it and allows. Retrying would not help, because nothing on this CPU releases
+  while the hook runs. `STATE_SEQUENCE`, the 4-attempt retry loop, and the
+  record's two sequence checks are gone, and a record is always copied from
+  the walks that decided it. The claim is a global function (verified once).
+  Inlining its loop cost about 1,000–9,000 extra verified instructions per
+  hook.
+- **Memory.** Per possible CPU: 8 × (2 × 20,480 + 2 × 56 + `EvalState`) ≈
+  330 KiB, up from about 41 KiB. With 4 states (≈165 KiB), the stress test
+  on Arch wrongly denied 8–12 % of operations with 4 preemptors and about 2 %
+  with none. With 8, it denied 2–4 % with 4 preemptors and almost none with
+  none (the old ticket: about 1.7 % with 4). Nothing is allocated per task or
+  per decision.
+- **Test harness hang (pre-existing, fixed).** Repeated stress runs hung the
+  VM about once in 3–10 runs with 4 or 12 preemptors, with the M4 object too.
+  The RCU stall (`P…/1:b..l`, `rcub/0` blocked) showed a worker preempted
+  inside `eval_step` that never ran again while every SCHED_FIFO test thread
+  stayed runnable on CPU 0 in user space (Go runtime). RCU boosting runs at
+  FIFO priority 1, below the preemptors. Two causes in the test, both fixed:
+  the FIFO threads unlocked their OS threads on exit and returned to the Go
+  runtime still SCHED_FIFO on CPU 0; and a garbage collection's
+  stop-the-world started on a FIFO thread spins waiting for goroutines whose
+  CPU 0 threads it starves. The threads now exit locked (the runtime
+  terminates them), and the test turns GC off while they run. With `GOGC=off`
+  alone, 14 consecutive 30 s runs with 12 and 4 preemptors completed. The
+  same starvation would stall RCU behind any FIFO hog. The claimed states
+  neither cause nor change it.
+- **Results.** The contention test passes when nothing is allowed against a
+  deny reference and every wrong denial is covered by a counted
+  `state-contention` denial.
+
+  | Kernel | Preemptors | Operations | Wrong allows | Wrong denials | `state-contention` |
+  |---|---:|---:|---:|---:|---:|
+  | Arch 7.1 | 4 | 9,045 | 0 | 205 | 354 |
+  | Arch 7.1 | 0 | 8,336 | 0 | 0 | 3 |
+  | Arch 7.1 | 12 | 9,568 | 0 | 76 | 123 |
+  | Debian 6.12, voluntary | 4 | 9,130 | 0 | 0 | 0 |
+  | Debian 6.12, `preempt=full` | 4 | 9,198 | 0 | 349 | 622 |
+  | Debian 6.12, `preempt=full` | 0 | 8,761 | 0 | 1 | 1 |
+  | Debian 6.12, `preempt=full` | 12 | 9,627 | 0 | 191 | 538 |
+
+  The Arch runs with 4 preemptors are from the full regression set. On Arch,
+  14 further runs of 30 s, alternating 12 and 4 preemptors, had no wrong
+  allows. Exec labelling stress: 3,000 execs with 0 deletes on Arch (4,409
+  recursion misses) and on Debian voluntary, and 1,000 with 0 deletes on
+  Debian `preempt=full`. `TestLabelWait` passed on Arch and on Debian
+  `preempt=full`. The full regression set passed on both kernels: the
+  `bpflsm` suite (exit tests, map-full, lifecycle, handover, self-test), the
+  differential (8 × 505, 0 mismatches), live enforce/off, the M3/wait
+  `bpflsm-live` matrix and the M4 matrix on btrfs and tmpfs. Both M4 bursts
+  stayed within their budgets: 8,080–8,304 of 10,000 records were dropped,
+  and the `suppressed` totals equalled the drops (for example, 18,144 of
+  18,144). On Debian `preempt=full`, the M3/wait and M4 matrices passed on
+  btrfs.
+
+  Verified instructions (labelling programs unchanged):
+
+  | Hook | Arch 7.1.9 | Debian 6.12.107 | Arch M4 | Debian M4 |
+  |---|---:|---:|---:|---:|
+  | `inode_unlink` | 6,679 | 6,242 | 6,587 | 6,224 |
+  | `inode_rmdir` | 6,723 | 6,248 | 6,617 | 6,227 |
+  | `inode_mkdir` | 6,361 | 5,881 | 6,344 | 5,989 |
+  | `inode_link` | 10,668 | 10,188 | 10,507 | 10,344 |
+  | `inode_rename` | 15,533 | 15,045 | 14,592 | 14,778 |
+
+  The largest structural frame is still 184 B (link).
+- **Known limits.** A CPU has at most 8 decisions in progress. A ninth
+  structural operation that starts while eight are preempted on that CPU is
+  denied and counted. That is a local denial of service, never an allow.
 
 ### 2.7 Events, feedback and status
 
@@ -838,7 +954,7 @@ check:
   decision's return on the stack had doubled the decision's own verification
   (about 12,000 for unlink), while map memory is tracked loosely, as `EVAL`
   is. Both are shared per-CPU state, so the decision's sequence ticket guards
-  them: a decision that lost the state before recording runs again and records
+  them (M5 replaced the ticket with claimed decision states, §2.6): a decision that lost the state before recording runs again and records
   then; a sequence change while the paths are copied discards the ring
   reservation and counts a drop, so no record is ever submitted with another
   hook's path. A submitted record confirms the decision. A pending caller's
@@ -947,7 +1063,7 @@ The load, lifecycle and startup daemon checks also passed on Debian 6.12
 | M2 ✅ (fixed up) | Full-path kernel matcher (`matcher.rs`, faithful `filepath.Match` port over a Go-tokenized program, all state in a per-CPU `EVAL` map) + Go compiler with mount-root objects and per-path contexts + banked publish + ABI manifest test; single label `UNIDENTIFIED` | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: Gate B matched ≥11 k generated `(pattern, path)` pairs against `filepath.Match` with zero mismatches; the generated-rule differential (8 seeds × 505 ops, ~60% expected denies) agrees with `DecideOperation`/`DecideRename`/`DecideHardLink` across the operation matrix — folder renames, `DestExists`, `RENAME_EXCHANGE`/`RENAME_NOREPLACE`, `*at()` callers, >100-deep paths, post-publish creations, and a tmpfs mounted inside a scope with re-publish — with zero mismatches; self-test, lifecycle, handover and live-daemon (enforce/SIGKILL-persist/restart/off) all pass | 2–2.5 |
 | M3 ✅ | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny, `(tgid, start_time)` self-bypass, `/proc` seeding, per-label kernel rule lookup | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: `python a.py` (allow) vs `python b.py` (deny) get distinct verdicts; `./x.py`, `./s.sh`, `./s.js`, `./s.pl` env-shebang scripts labelled by their script arg; `python -m fmmod` resolves to the module profile and `python -c` to the interpreter profile; a child `rm` spawned by a deny-profile script gets `rm`'s allow label; an unresolved process stays `PENDING` and denies; a fork storm against an 8-entry label map denies and increments the map-full counter; argv rewrite after start does not change the label. The real daemon (`cmds/bpflsm-live`: profiles via the database API, real processes) reproduces the distinct verdicts, scripts, `-m`/`-c`, child `rm` and a live rule edit, and the PENDING window is measured (see As built in M3). No regressions: self-test, lifecycle, handover, the Gate B/differential (8×505, 0 mismatches) and live-daemon enforce/off all pass on both kernels and filesystems | 2–2.5 |
 | M4 ✅ | Decision records for covered allow/deny/audit would-deny; bounded suppressor and drop count; filequery paths/app/mount; informational deny notice with Allow-and-retry; active Write list and structural Monitor UI | Observed on Arch 7.1 and Debian 6.12: all four operations allowed/denied with full source/destination paths and app; deduplicated notice and successful Allow/retry; audit would-deny without notice; 10,000-delete burst with counted drops and healthy daemon. Full regression matrix passes on both kernels; verifier counts remain below 1,000,000 (see As built in M4). Dashboard, Monitor, settings, and app Write-list screenshots inspected; file-access Playwright E2E 2/2 passed with system Chromium | 1.5–2 |
-| M5 | Hardening matrix (§4) and fixes; **btrfs subvolume/snapshot identity** (risk 7) — key objects by a subvolume-aware id, not just `(s_dev, ino)` | §4 matrix green; coverage warnings correct for every injected failure; multi-subvolume btrfs no longer collides objects | 1–1.5 |
+| M5 | Hardening matrix (§4) and fixes; **btrfs subvolume/snapshot identity** (risk 7) — key objects by a subvolume-aware id, not just `(s_dev, ino)`. Stage 1 ✅: claimed per-CPU decision states replace the sequence ticket, closing the preempted-writer gap (see As built in M5) | §4 matrix green; coverage warnings correct for every injected failure; multi-subvolume btrfs no longer collides objects. Stage 1: the gap reproduced on the M4 object (wrong allows under stress); after it 0 wrong allows on Arch 7.1 and Debian 6.12, full regression set passes on both | 1–1.5 |
 | | **Total** | | **8.5–11.5** |
 
 ## 4. Test plan
