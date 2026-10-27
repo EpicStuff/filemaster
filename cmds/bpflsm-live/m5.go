@@ -126,6 +126,8 @@ func promptRun(exe, op, path, answer string) (bool, int) {
 		}
 	}
 	cmd := exec.Command(exe, "--m4-helper", op, path)
+	var output strings.Builder
+	cmd.Stdout, cmd.Stderr = &output, &output
 	must(cmd.Start())
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -134,6 +136,9 @@ func promptRun(exe, op, path, answer string) (bool, int) {
 	for {
 		select {
 		case err := <-done:
+			if err != nil && *debug {
+				fmt.Printf("    prompt helper %s [%s %s]: %v %s\n", exe, op, path, err, output.String())
+			}
 			return err == nil, len(answered)
 		case <-deadline:
 			_ = cmd.Process.Kill()
@@ -205,14 +210,17 @@ func m5Coexistence() {
 		allowed, prompts = promptRun(askBlock, "open", data, "Block")
 		outcome = append(outcome, fmt.Sprintf("ask+Block open=%v prompts=%d", allowed, prompts))
 		allowed, prompts = promptRun(askExec, "exec", tool, "Allow")
-		outcome = append(outcome, fmt.Sprintf("ask+Allow exec=%v prompts=%d", allowed, prompts))
+		time.Sleep(2 * time.Second)
+		againExec, promptsAgainExec := promptRun(askExec, "exec", tool, "Allow")
+		outcome = append(outcome, fmt.Sprintf("ask+Allow exec=%v prompts=%d, again exec=%v prompts=%d", allowed, prompts, againExec, promptsAgainExec))
 		outcomes[mode] = strings.Join(outcome, "; ")
 		fmt.Printf("  %s: %s\n", mode, outcomes[mode])
 	}
 	for _, mode := range []string{"off", "audit", "enforce"} {
 		outcome := outcomes[mode]
-		report(strings.HasPrefix(outcome, "rule-allow open=true exec=true; rule-deny open=false exec=false; ask+Allow open=true prompts=1,") &&
+		report(strings.HasPrefix(outcome, "rule-allow open=true exec=true; rule-deny open=false exec=false; ask+Allow open=true prompts=1, again open=true prompts=0;") &&
 			strings.Contains(outcome, "; ask+Block open=false prompts=1;") && strings.Contains(outcome, "; ask+Allow exec=true prompts=") &&
+			strings.HasSuffix(outcome, "again exec=true prompts=0") &&
 			outcome == outcomes["off"],
 			fmt.Sprintf("Open/Execute outcome under %s equals off and the expected decisions", mode))
 	}

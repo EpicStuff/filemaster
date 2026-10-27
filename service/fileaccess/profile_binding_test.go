@@ -52,6 +52,36 @@ func TestProcessProfileLookupUsesUnidentifiedProfileWhenProcessIsMissing(t *test
 	}
 }
 
+func TestProcessProfileLookupRefreshesOutdatedLayeredProfile(t *testing.T) {
+	origLookup := getProcessWithProfile
+	origProfile := processLayeredProfile
+	t.Cleanup(func() {
+		getProcessWithProfile = origLookup
+		processLayeredProfile = origProfile
+	})
+
+	local := profile.New(&profile.Profile{
+		ID:     "lookup-refresh",
+		Source: profile.SourceLocal,
+		Config: map[string]interface{}{profile.CfgOptionDefaultActionKey: profile.DefaultActionPermitValue},
+	})
+	layered := profile.NewLayeredProfile(local)
+	if !layered.NeedsUpdate() {
+		t.Fatal("new layered profile should need a validity refresh")
+	}
+	getProcessWithProfile = func(context.Context, int) (*process.Process, error) {
+		return &process.Process{Path: "/usr/bin/lookup-refresh"}, nil
+	}
+	processLayeredProfile = func(*process.Process) *profile.LayeredProfile { return layered }
+
+	if _, err := (&processProfileLookup{}).Lookup(context.Background(), 42); err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if layered.NeedsUpdate() {
+		t.Fatal("Lookup left the layered profile outdated")
+	}
+}
+
 func TestProcessProfileLookupReusesPortmasterIdentityStore(t *testing.T) {
 	orig := getProcessWithProfile
 	t.Cleanup(func() { getProcessWithProfile = orig })

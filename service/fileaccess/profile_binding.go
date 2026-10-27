@@ -93,6 +93,9 @@ func (l *processProfileLookup) Lookup(ctx context.Context, pid int32) (LookupRes
 	if lp == nil {
 		return res, nil
 	}
+	if lp.NeedsUpdate() {
+		lp.Update(p.MatchingData(), p.CreateProfileCallback)
+	}
 	local := lp.LocalProfile()
 	if local == nil {
 		return res, nil

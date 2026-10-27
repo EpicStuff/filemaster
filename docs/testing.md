@@ -108,7 +108,9 @@ two **Open** rows, one for each command. This verifies open-time decisions; it
 does not classify events as separate Read or Write operations.
 
 The prompt exposes only `Allow` and `Block`; both persist a permanent per-app
-Open rule (there is no one-time option in the current backend).
+Open rule (there is no one-time option in the current backend). After the rule is
+saved, the next Open lookup refreshes an outdated layered profile and uses the
+saved rule without prompting again. File Execute follows the same lookup path.
 
 ## Confined fanotify integration harness
 
