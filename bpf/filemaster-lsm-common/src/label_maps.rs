@@ -128,7 +128,9 @@ pub struct WaitSettings {
 }
 
 /// A file identity with the inode generation, so a recycled inode number does
-/// not inherit a label.
+/// not inherit a label, and the btrfs subvolume (0 elsewhere), so a
+/// snapshot's copy does not inherit its source's.
+/// [`EXEC_SUBVOL_UNKNOWN`] marks a btrfs file read without the btrfs layout.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ExecFile {
@@ -136,7 +138,12 @@ pub struct ExecFile {
 	pub ino: u64,
 	pub generation: u32,
 	pub _pad: u32,
+	pub subvol: u64,
 }
+
+/// The subvolume of a btrfs file whose subvolume the kernel could not read:
+/// its execs are never labelled from `EXEC_LABELS`.
+pub const EXEC_SUBVOL_UNKNOWN: u64 = u64::MAX;
 
 /// `{exe, zero}` labels an executable by itself; `{interpreter, script}` a
 /// script run through its `#!` line.

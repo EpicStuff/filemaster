@@ -20,7 +20,7 @@ use filemaster_lsm_common::label_maps::{
 	LABEL_COUNTER_UNREADABLE, LABEL_COUNTER_WAIT, LABEL_COUNTER_WAIT_BUSY, LABEL_COUNTER_WAIT_NS,
 	LABEL_COUNTER_WAIT_RESOLVED, LABEL_COUNTER_WAIT_STALE, LABEL_COUNTER_WAIT_TIMEOUT, LABEL_MASK, LABEL_PENDING, LABEL_UNIDENTIFIED, MAX_LABELS,
 	POLICY_PENDING, RECORD_ARGS_TRUNCATED, RECORD_ENV_TRUNCATED, RECORD_EXEC, RECORD_FORK,
-	RECORD_SIZE_MASK, SETTINGS_LABELLING, WAIT_CAP_NS, WAIT_LOOPS, WAIT_STALE_NS,
+	RECORD_SIZE_MASK, SETTINGS_BTRFS, SETTINGS_LABELLING, WAIT_CAP_NS, WAIT_LOOPS, WAIT_STALE_NS, EXEC_SUBVOL_UNKNOWN,
 };
 use filemaster_lsm_common::{ExecFile, ExecLabelKey, ProcValue, RecordHeader, Settings};
 
@@ -32,7 +32,7 @@ use crate::maps::{
 
 /// No labelling reason to count.
 pub const NO_REASON: u32 = u32::MAX;
-const NO_FILE: ExecFile = ExecFile { dev: 0, ino: 0, generation: 0, _pad: 0 };
+const NO_FILE: ExecFile = ExecFile { dev: 0, ino: 0, generation: 0, _pad: 0, subvol: 0 };
 const HEADER: u32 = core::mem::size_of::<RecordHeader>() as u32;
 const RECORD_SLOT_FORK: u32 = 0;
 const RECORD_SLOT_EXEC: u32 = 1;
@@ -252,7 +252,7 @@ pub fn bprm_check(bprm: Binprm) {
 	if bprm.first_pass() != Some(true) {
 		return;
 	}
-	let Some(file) = bprm.file().and_then(|file| file.exec_file()) else {
+	let Some(file) = bprm.file().and_then(|file| file.exec_file(btrfs_layout())) else {
 		increment(LABEL_COUNTER_UNREADABLE);
 		return;
 	};
@@ -316,7 +316,7 @@ fn image(task: Task, bprm: Binprm) -> Option<(u32, u64, Mm, ExecFile, ExecFile)>
 		increment(LABEL_COUNTER_UNREADABLE);
 		return None;
 	};
-	let Some(exe) = mm.exe_file().and_then(|file| file.exec_file()) else {
+	let Some(exe) = mm.exe_file().and_then(|file| file.exec_file(btrfs_layout())) else {
 		increment(LABEL_COUNTER_UNREADABLE);
 		return None;
 	};
@@ -324,8 +324,18 @@ fn image(task: Task, bprm: Binprm) -> Option<(u32, u64, Mm, ExecFile, ExecFile)>
 	Some((tgid, start, mm, exe, script))
 }
 
+/// The btrfs layout the active table keys btrfs with, if it has one.
+#[inline(always)]
+fn btrfs_layout() -> Option<(i32, u32)> {
+	let settings = SETTINGS.get(0)?;
+	(settings.flags & SETTINGS_BTRFS != 0).then_some((settings.btrfs_root, settings.btrfs_root_id))
+}
+
 #[inline(always)]
 fn exec_label(exe: ExecFile, script: ExecFile) -> u32 {
+	if exe.subvol == EXEC_SUBVOL_UNKNOWN || script.subvol == EXEC_SUBVOL_UNKNOWN {
+		return LABEL_PENDING;
+	}
 	let mut key = core::mem::MaybeUninit::<ExecLabelKey>::uninit();
 	// SAFETY: both fields are fully written before the key is read.
 	let key = unsafe {
@@ -485,6 +495,7 @@ fn put_file(to: &mut ExecFile, from: ExecFile) {
 		core::ptr::write_volatile(&mut to.ino, from.ino);
 		core::ptr::write_volatile(&mut to.generation, from.generation);
 		core::ptr::write_volatile(&mut to._pad, 0);
+		core::ptr::write_volatile(&mut to.subvol, from.subvol);
 	}
 }
 

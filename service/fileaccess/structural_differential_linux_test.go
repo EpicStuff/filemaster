@@ -30,13 +30,16 @@ func TestStructuralBPFDifferential(t *testing.T) {
 	}
 
 	seeds := []int64{101, 211, 307, 401, 509, 613, 727, 829}
+	// Each profile default (no-match under not-set, Block, Ask and Permit)
+	// decides two seeds.
+	defaults := []uint8{profile.DefaultActionNotSet, profile.DefaultActionBlock, profile.DefaultActionAsk, profile.DefaultActionPermit}
 	grandTotal, grandAllow, grandDeny := 0, 0, 0
-	for _, seed := range seeds {
-		allow, deny := runDifferentialSeed(t, seed)
+	for i, seed := range seeds {
+		allow, deny := runDifferentialSeed(t, seed, defaults[i%len(defaults)])
 		grandTotal += allow + deny
 		grandAllow += allow
 		grandDeny += deny
-		t.Logf("differential seed=%d cases=%d allow=%d deny=%d mismatches=0", seed, allow+deny, allow, deny)
+		t.Logf("differential seed=%d default=%d cases=%d allow=%d deny=%d mismatches=0", seed, defaults[i%len(defaults)], allow+deny, allow, deny)
 	}
 	if grandDeny*100 < grandTotal*30 {
 		t.Fatalf("only %d/%d (%.0f%%) cases expected a deny, want at least 30%%", grandDeny, grandTotal, float64(grandDeny)*100/float64(grandTotal))
@@ -44,7 +47,7 @@ func TestStructuralBPFDifferential(t *testing.T) {
 	t.Logf("differential total=%d allow=%d deny=%d mismatches=0", grandTotal, grandAllow, grandDeny)
 }
 
-func runDifferentialSeed(t *testing.T, seed int64) (allow, deny int) {
+func runDifferentialSeed(t *testing.T, seed int64, defaultAction uint8) (allow, deny int) {
 	t.Helper()
 	random := rand.New(rand.NewSource(seed))
 	root := differentialRoot(t, seed)
@@ -55,10 +58,6 @@ func runDifferentialSeed(t *testing.T, seed int64) (allow, deny int) {
 		mustMkdirAll(t, dir)
 	}
 
-	defaultAction := []uint8{
-		profile.DefaultActionNotSet, profile.DefaultActionBlock,
-		profile.DefaultActionAsk, profile.DefaultActionPermit,
-	}[random.Intn(4)]
 	snapshot := generateSnapshot(random, scopeA, scopeB, outside, defaultAction)
 
 	// Materialize the current matches of each generated rule so the compiler
@@ -269,12 +268,31 @@ func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, o
 	mustMkdirAll(t, filepath.Dir(futureGlob))
 	futureExact := filepath.Join(scopeA, "future-exact")
 
-	exchangeRef := func() Verdict {
-		if rename(exchangeLeft, exchangeRight, false, false, true) == VerdictDeny {
+	// Hard links and renames into, out of and within a scope; an exchange of
+	// a protected file with an unprotected folder; a no-replace rename onto an
+	// existing file, which the VFS refuses with EEXIST before any hook.
+	linkWithinSrc := file(liveA, "link-within-src-")
+	linkWithinDest := filepath.Join(liveA, "link-within-dst-"+tag)
+	linkOutSrc := file(liveA, "link-out-src-")
+	linkOutDest := filepath.Join(outside, "link-out-dst-"+tag)
+	renameInSrc := file(outside, "rename-in-src-")
+	renameInDest := filepath.Join(liveA, "rename-in-dst-"+tag)
+	renameOutSrc := file(liveB, "rename-out-src-")
+	renameOutDest := filepath.Join(outside, "rename-out-dst-"+tag)
+	renameWithinSrc := file(liveA, "rename-within-src-")
+	renameWithinDest := file(liveA, "rename-within-dst-")
+	exchangeFile := file(liveA, "exchange-file-")
+	exchangeFolder := dir(outside, "exchange-folder-")
+	noreplaceExistingSrc := file(liveA, "noreplace-existing-src-")
+	noreplaceExistingDest := file(liveB, "noreplace-existing-dst-")
+
+	exchange := func(left, right string, leftDir, rightDir bool) Verdict {
+		if rename(left, right, leftDir, rightDir, true) == VerdictDeny {
 			return VerdictDeny
 		}
-		return rename(exchangeRight, exchangeLeft, false, false, true)
+		return rename(right, left, rightDir, leftDir, true)
 	}
+	exchangeRef := func() Verdict { return exchange(exchangeLeft, exchangeRight, false, false) }
 
 	return []differentialOperation{
 		{"unlink", ref(unlinkTarget, DecisionDelete, false), func() error { return os.Remove(unlinkTarget) }},
@@ -304,6 +322,21 @@ func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, o
 				return err
 			}
 			return os.Remove(futureExact)
+		}},
+		{"link-within", link(linkWithinSrc, linkWithinDest, false), func() error { return os.Link(linkWithinSrc, linkWithinDest) }},
+		{"link-out", link(linkOutSrc, linkOutDest, false), func() error { return os.Link(linkOutSrc, linkOutDest) }},
+		{"rename-in", rename(renameInSrc, renameInDest, false, false, false), func() error { return os.Rename(renameInSrc, renameInDest) }},
+		{"rename-out", rename(renameOutSrc, renameOutDest, false, false, false), func() error { return os.Rename(renameOutSrc, renameOutDest) }},
+		{"rename-over-within", rename(renameWithinSrc, renameWithinDest, false, false, true), func() error { return os.Rename(renameWithinSrc, renameWithinDest) }},
+		{"rename-exchange-file-folder", exchange(exchangeFile, exchangeFolder, false, true), func() error {
+			return unix.Renameat2(unix.AT_FDCWD, exchangeFile, unix.AT_FDCWD, exchangeFolder, unix.RENAME_EXCHANGE)
+		}},
+		{"rename-noreplace-existing", VerdictAllow, func() error {
+			err := unix.Renameat2(unix.AT_FDCWD, noreplaceExistingSrc, unix.AT_FDCWD, noreplaceExistingDest, unix.RENAME_NOREPLACE)
+			if errors.Is(err, unix.EEXIST) {
+				return nil
+			}
+			return fmt.Errorf("RENAME_NOREPLACE onto an existing file: %v, want EEXIST", err)
 		}},
 		{"unlink-live-exact", ref(filepath.Join(liveA, "exact"), DecisionDelete, false), func() error {
 			defer mustWriteFile(t, filepath.Join(liveA, "exact"))

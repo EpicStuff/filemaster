@@ -37,13 +37,17 @@ const clockTick = 10_000_000
 // labelPrograms are the observe-only labelling programs, in attach order.
 var labelPrograms = []string{"bprm_check_security", "bprm_committed_creds", "sched_process_fork", "sched_process_exec", "sched_process_exit"}
 
-// ExecFile is an executable or script identity: superblock device, inode and
-// inode generation.
+// ExecFile is an executable or script identity: superblock device, inode,
+// inode generation and btrfs subvolume (0 on other filesystems, and
+// execSubvolUnknown for a btrfs file the kernel read without the btrfs layout).
 type ExecFile struct {
 	Dev        uint64
 	Ino        uint64
 	Generation uint32
+	Subvol     uint64
 }
+
+const execSubvolUnknown = ^uint64(0)
 
 // ProcValue is the kernel's record of one thread group.
 type ProcValue struct {
@@ -152,7 +156,7 @@ func attachLabelling(collection *ebpf.Collection) ([]link.Link, []HookStatus, er
 		if program == nil {
 			err = fmt.Errorf("object has no %s program", name)
 		} else if program.Type() == ebpf.LSM {
-			l, err = link.AttachLSM(link.LSMOptions{Program: program})
+			l, err = attachLSM(link.LSMOptions{Program: program})
 		} else {
 			l, err = link.AttachTracing(link.TracingOptions{Program: program})
 		}
@@ -169,10 +173,17 @@ func attachLabelling(collection *ebpf.Collection) ([]link.Link, []HookStatus, er
 }
 
 // SameFile reports whether path names the file a record identified, by
-// superblock device and inode.
+// superblock device, inode and, where the kernel read one, btrfs subvolume.
 func SameFile(path string, file ExecFile) bool {
 	id, err := pathFileID(path)
-	return err == nil && id.dev == file.Dev && id.ino == file.Ino
+	if err != nil || id.dev != file.Dev || id.ino != file.Ino {
+		return false
+	}
+	if file.Subvol == 0 || file.Subvol == execSubvolUnknown {
+		return true
+	}
+	st, err := statPath(path)
+	return err == nil && st.hasSubvol && st.subvol == file.Subvol
 }
 
 // labelMap returns one of the active generation's maps.

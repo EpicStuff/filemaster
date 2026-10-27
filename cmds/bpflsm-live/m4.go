@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,45 @@ func m4Helper(args []string) error {
 	case "link":
 		if len(args) == 3 {
 			return os.Link(args[1], args[2])
+		}
+	case "gated-delete":
+		if len(args) == 3 {
+			for {
+				if _, err := os.Stat(args[1]); err == nil {
+					return os.Remove(args[2])
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	case "open":
+		if len(args) == 2 {
+			f, err := os.Open(args[1])
+			if err != nil {
+				return err
+			}
+			return f.Close()
+		}
+	case "exec":
+		if len(args) == 2 {
+			return exec.Command(args[1]).Run()
+		}
+	case "deny-burst":
+		// Attempts every delete and fails if any succeeded.
+		if len(args) == 3 {
+			count, err := strconv.Atoi(args[2])
+			if err != nil {
+				return err
+			}
+			deleted := 0
+			for i := 0; i < count; i++ {
+				if os.Remove(filepath.Join(args[1], fmt.Sprintf("deny-%05d", i))) == nil {
+					deleted++
+				}
+			}
+			if deleted > 0 {
+				return fmt.Errorf("%d of %d denied deletes succeeded", deleted, count)
+			}
+			return nil
 		}
 	case "burst":
 		if len(args) == 2 {

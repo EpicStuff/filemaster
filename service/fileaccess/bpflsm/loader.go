@@ -12,6 +12,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
+	"github.com/cilium/ebpf/link"
 	"github.com/moby/sys/mountinfo"
 )
 
@@ -29,6 +30,9 @@ var Hooks = []Hook{
 	{"inode_link", "hard link"},
 	{"inode_rename", "rename/move"},
 }
+
+// attachLSM is link.AttachLSM, replaceable by tests that fail an attach.
+var attachLSM = link.AttachLSM
 
 // probe returns the reasons BPF LSM cannot run on this kernel, and the hooks
 // whose BTF attach target is missing.

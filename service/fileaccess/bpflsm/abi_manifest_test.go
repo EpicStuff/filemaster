@@ -74,7 +74,7 @@ func TestABImanifestMatchesGoLayout(t *testing.T) {
 		{"Context", contextSize, map[string]int{
 			"path_off": 0, "path_len": 4, "parent_len": 8, "flags": 12, "scope_count": 16, "scopes": 24,
 		}},
-		{"ExecFile", execFileSize, map[string]int{"dev": 0, "ino": 8, "generation": 16}},
+		{"ExecFile", execFileSize, map[string]int{"dev": 0, "ino": 8, "generation": 16, "subvol": 24}},
 		{"ExecLabelKey", execLabelKey, map[string]int{"exe": 0, "script": execFileSize}},
 		{"ProcValue", procValueSize, map[string]int{"start": 0, "seq": 8, "span": 16, "label": 20}},
 		{"Resolved", resolvedSize, map[string]int{"start": 0, "seq": 8, "label": 16}},
@@ -82,8 +82,8 @@ func TestABImanifestMatchesGoLayout(t *testing.T) {
 		{"RuleList", ruleListSize, map[string]int{"rule_count": 0, "flags": 4, "rules": 8}},
 		{"WaitSettings", waitSettingsSize, map[string]int{"heartbeat": 0, "max_waiters": 8, "enabled": 12}},
 		{"RecordHeader", recordHeader, map[string]int{
-			"kind": 0, "tgid": 4, "start": 8, "seq": 16, "exe": 24, "script": 48, "parent_seq": 72,
-			"parent_tgid": 80, "flags": 84, "args_len": 88, "env_len": 92, "path_len": 96,
+			"kind": 0, "tgid": 4, "start": 8, "seq": 16, "exe": 24, "script": 56, "parent_seq": 88,
+			"parent_tgid": 96, "flags": 100, "args_len": 104, "env_len": 108, "path_len": 112,
 		}},
 		{"DecisionRecord", decisionRecordSize, map[string]int{
 			"kind": 0, "operation": 4, "verdict": 8, "reason": 12, "tgid": 16, "label": 20, "bank": 24, "flags": 28,

@@ -46,6 +46,7 @@ var (
 	waitOnly   = flag.Bool("wait-only", false, "run only the label-wait matrix")
 	m4Only     = flag.Bool("m4-only", false, "run only M4 decision record and notification checks")
 	subvolOnly = flag.Bool("subvol-only", false, "run only the M5 btrfs subvolume and snapshot checks")
+	m5Only     = flag.Bool("m5-only", false, "run only the M5 hardening matrix: coexistence, labelling, workflows and pressure")
 	failures   int
 	daemon     *exec.Cmd
 	wsConn     *websocket.Conn
@@ -70,6 +71,11 @@ func main() {
 	}
 	if *subvolOnly {
 		subvolMatrix()
+		finish()
+		return
+	}
+	if *m5Only {
+		m5Matrix()
 		finish()
 		return
 	}

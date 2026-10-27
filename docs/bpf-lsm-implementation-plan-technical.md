@@ -150,7 +150,10 @@ buffer (`SCRATCH`, 16 KiB + 4 KiB slack, with bounded masked offsets). The
 object context's stored absolute path is prefixed to give the target's exact
 full path (and the parent's, for Create/Delete). Past the walk limit the
 operation is **denied and counted**; a path longer than the buffer is **denied
-and counted**; an unreadable kernel value **fails open and is counted**; a walk
+and counted** (the relative path is capped at 8,192 bytes; every walk step adds
+at least two, so this cap is always reached before the 4,096-step walk limit,
+which is only a backstop — measured in M5, see "As built in M5: hardening
+matrix" in §4); an unreadable kernel value **fails open and is counted**; a walk
 that reaches an unregistered filesystem root is **not covered and counted**.
 
 **Objects** are keyed by `(mountinfo s_dev, ino, subvolume)` — the superblock
@@ -428,7 +431,8 @@ below. `NOMATCH` is now keyed by `(bank, policy, operation, kind)`.
 
 - **Maps.** `PROCS` (HASH `tgid → {start_boottime, seq, span, label}`),
   `RESOLVED` (HASH `tgid → {start, seq, label}`, daemon-written), `EXEC_LABELS`
-  (HASH `{exe(dev,ino,gen), script(dev,ino,gen)} → label`, the `EXE_LABEL`/
+  (HASH `{exe(dev,ino,gen), script(dev,ino,gen)} → label`, plus each file's
+  btrfs subvolume since M5 stage 3, the `EXE_LABEL`/
   `SCRIPT_LABEL` fast path), `EXEC_SCRATCH` (LRU `binprm → first-pass file`),
   `LABEL_POLICY` (per-bank array `label → policy`), `POLICY_LISTS`, `RULELISTS`,
   `RECORDS` (ring buffer), `RECORD_BUF` (per-CPU assembly), `LABEL_COUNTERS`
@@ -656,7 +660,9 @@ changes fix it.
 - **Known gaps.** The 50 ms cap can be outlasted by a never-seen executable's
   first resolution (profile creation plus table publish) and by bursts larger
   than the resolver's throughput; both fail closed. The spinner holds the
-  parent directory's `i_rwsem`; inferred from the lock order, not observed, a
+  parent directory's `i_rwsem` (measured in M5: lookups in that directory
+  stall for the wait, see "As built in M5: hardening matrix"); inferred from
+  the lock order, a
   daemon resolution that must look up a path in that same directory (e.g. a
   fresh binary deleting next to itself) would block until the cap. Exe-only learning remains unsound against disguised argv[0]
   (caveat above). The per-CPU state race found here is fixed in the next
@@ -964,11 +970,11 @@ the target under that object's path. (btrfs gives userspace a different
   deletes on each kernel; 1,000 with Debian `preempt=full`), live enforce/off, and the M3/wait and M4
   `bpflsm-live` matrices on btrfs and tmpfs (Arch bursts: 8,208 and 8,326 of
   10,000 records dropped, `suppressed` equal to the drops; Debian 8,080 and 8,147, equal again; with `preempt=full` the label-wait test, the M3/wait and M4 matrices on btrfs and both subvolume tests passed too).
-- **Known limits.** Executable labels (`EXEC_LABELS`) are still keyed by
-  `(s_dev, ino, generation)`, so an executable in a snapshot shares the label
-  learned for its source (the profile is still resolved by path when the label
-  is learned). A covered filesystem whose subvolumes the kernel cannot tell
-  apart denies every structural operation on it.
+- **Known limits.** Executable labels (`EXEC_LABELS`) were still keyed by
+  `(s_dev, ino, generation)`, so an executable in a snapshot shared the label
+  learned for its source; M5 stage 3 adds the subvolume to that key (see "As
+  built in M5: hardening matrix"). A covered filesystem whose subvolumes the
+  kernel cannot tell apart denies every structural operation on it.
 
 ### 2.7 Events, feedback and status
 
@@ -1157,7 +1163,7 @@ The load, lifecycle and startup daemon checks also passed on Debian 6.12
 | M2 ✅ (fixed up) | Full-path kernel matcher (`matcher.rs`, faithful `filepath.Match` port over a Go-tokenized program, all state in a per-CPU `EVAL` map) + Go compiler with mount-root objects and per-path contexts + banked publish + ABI manifest test; single label `UNIDENTIFIED` | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: Gate B matched ≥11 k generated `(pattern, path)` pairs against `filepath.Match` with zero mismatches; the generated-rule differential (8 seeds × 505 ops, ~60% expected denies) agrees with `DecideOperation`/`DecideRename`/`DecideHardLink` across the operation matrix — folder renames, `DestExists`, `RENAME_EXCHANGE`/`RENAME_NOREPLACE`, `*at()` callers, >100-deep paths, post-publish creations, and a tmpfs mounted inside a scope with re-publish — with zero mismatches; self-test, lifecycle, handover and live-daemon (enforce/SIGKILL-persist/restart/off) all pass | 2–2.5 |
 | M3 ✅ | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny, `(tgid, start_time)` self-bypass, `/proc` seeding, per-label kernel rule lookup | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: `python a.py` (allow) vs `python b.py` (deny) get distinct verdicts; `./x.py`, `./s.sh`, `./s.js`, `./s.pl` env-shebang scripts labelled by their script arg; `python -m fmmod` resolves to the module profile and `python -c` to the interpreter profile; a child `rm` spawned by a deny-profile script gets `rm`'s allow label; an unresolved process stays `PENDING` and denies; a fork storm against an 8-entry label map denies and increments the map-full counter; argv rewrite after start does not change the label. The real daemon (`cmds/bpflsm-live`: profiles via the database API, real processes) reproduces the distinct verdicts, scripts, `-m`/`-c`, child `rm` and a live rule edit, and the PENDING window is measured (see As built in M3). No regressions: self-test, lifecycle, handover, the Gate B/differential (8×505, 0 mismatches) and live-daemon enforce/off all pass on both kernels and filesystems | 2–2.5 |
 | M4 ✅ | Decision records for covered allow/deny/audit would-deny; bounded suppressor and drop count; filequery paths/app/mount; informational deny notice with Allow-and-retry; active Write list and structural Monitor UI | Observed on Arch 7.1 and Debian 6.12: all four operations allowed/denied with full source/destination paths and app; deduplicated notice and successful Allow/retry; audit would-deny without notice; 10,000-delete burst with counted drops and healthy daemon. Full regression matrix passes on both kernels; verifier counts remain below 1,000,000 (see As built in M4). Dashboard, Monitor, settings, and app Write-list screenshots inspected; file-access Playwright E2E 2/2 passed with system Chromium | 1.5–2 |
-| M5 | Hardening matrix (§4) and fixes; **btrfs subvolume/snapshot identity** (risk 7) — key objects by a subvolume-aware id, not just `(s_dev, ino)`. Stage 1 ✅: claimed per-CPU decision states replace the sequence ticket, closing the preempted-writer gap (see As built in M5). Stage 2 ✅: objects keyed by `(s_dev, ino, btrfs subvolume)`, fail closed where the kernel cannot read the subvolume (see As built in M5: subvolume-aware object identity) | §4 matrix green; coverage warnings correct for every injected failure; multi-subvolume btrfs no longer collides objects. Stage 1: the gap reproduced on the M4 object (wrong allows under stress); after it 0 wrong allows on Arch 7.1 and Debian 6.12, full regression set passes on both. Stage 2: 12 wrong verdicts (2 wrong allows) on the kernel object and 18 failed real-daemon checks before; 0 after on Arch 7.1 and Debian 6.12, full regression set passes on both | 1–1.5 |
+| M5 | Hardening matrix (§4) and fixes; **btrfs subvolume/snapshot identity** (risk 7) — key objects by a subvolume-aware id, not just `(s_dev, ino)`. Stage 1 ✅: claimed per-CPU decision states replace the sequence ticket, closing the preempted-writer gap (see As built in M5). Stage 2 ✅: objects keyed by `(s_dev, ino, btrfs subvolume)`, fail closed where the kernel cannot read the subvolume (see As built in M5: subvolume-aware object identity). Stage 3 ✅: §4 matrix run; fixed: failed starts now report a still-enforcing older generation, lost pins are reported, executable labels are subvolume-aware, overlay mounts are reported not covered instead of keyed on unproven inodes; the label wait's parent-lock stall measured and documented (see As built in M5: hardening matrix). M5 is not marked done: Flatpak was not run, because `dl.flathub.org` is unreachable from the VM | §4 matrix green; coverage warnings correct for every injected failure; multi-subvolume btrfs no longer collides objects. Stage 1: the gap reproduced on the M4 object (wrong allows under stress); after it 0 wrong allows on Arch 7.1 and Debian 6.12, full regression set passes on both. Stage 2: 12 wrong verdicts (2 wrong allows) on the kernel object and 18 failed real-daemon checks before; 0 after on Arch 7.1 and Debian 6.12, full regression set passes on both. Stage 3: every matrix item passes, is fixed, or is reported degraded (overlay merged view not covered); a snapshot's executable inheriting its source's label reproduced before and fixed; full regression set plus the new matrix tests pass on both kernels | 1–1.5 |
 | | **Total** | | **8.5–11.5** |
 
 ## 4. Test plan
@@ -1224,6 +1230,129 @@ the actual coverage:
 - `tar -x`;
 - a package upgrade of a labelled exe, followed by re-publish.
 
+### As built in M5: hardening matrix
+
+Stage 3 of M5 ran this section's matrix. Each item passed, was fixed, or is
+degraded with a visible report. The kernel-level checks live in the `bpflsm`
+suite and in `fileaccess` tests gated by `FM_BPF_DIFFERENTIAL`,
+`FM_BPF_MOUNTS`, `FM_BPF_SUBVOLUMES` and `FM_BPF_CONTENTION` (the scope's
+filesystem is chosen with `FM_BPF_DIFFERENTIAL_ROOT`). The real-daemon checks
+are `bpflsm-live -m5-only`: coexistence, labelling, workflows and a denied
+burst.
+
+| Item | Result | Evidence |
+|---|---|---|
+| tmpfs, btrfs, ext4 (loop) | pass | Differential 8 × 505, 0 mismatches, plus `TestStructuralBPFMounts` and `TestStructuralBPFUnrepresentable`, with the scope on each of the three filesystems; ext4 and tmpfs also mounted inside a scope |
+| Bind mount of a protected folder | pass | The bind view and the original decide as one object at both paths: allow rule, covered default and mkdir, each through both views |
+| Private mount namespace (`unshare -m`) | pass | A bind of the scope made inside the namespace decides under the daemon's paths (deny and allow). A tmpfs the namespace mounts over a covered folder is a new filesystem: not covered, counted `unregistered-root` |
+| Overlayfs, merged view | degraded (not covered, reported) | Folder inode numbers have no provable identity (risk 5), so nothing on an overlay superblock is keyed and its walks end at its unregistered root. A covered overlay mount raises the `overlay-not-covered` error. Before: an overlay on btrfs layers failed closed by accident (it reports `STATX_SUBVOL`, so it was treated as an unknown-subvolume filesystem); an overlay on tmpfs layers was keyed by `st_ino` without proof |
+| Overlayfs, upper and lower layers | pass | overlayfs's own unlink, whiteout rename and mkdir in its upper layer are decided under the upper layer's path: an upper layer in a scope denies merged-view changes by default, and allows them with a rule on it. Direct changes in a layer are ordinary |
+| unlink, rmdir, mkdir; hard link in, out, within; rename within, out, in, over; `RENAME_EXCHANGE`, `RENAME_NOREPLACE` | pass | The differential gained link within and out, rename in, out and over within a scope, an exchange of a protected file with an unprotected folder, and a no-replace rename onto an existing file (`EEXIST` before any hook). Each profile default (not set, Block, Ask, Permit) now decides two seeds. Exchange is decided as two directed renames, both required to allow |
+| Unrepresentable cases | pass | Context rule overflow, a path past the relative-path limit and 4,100-deep folders all deny under an allow policy and are counted. A rule `filepath.Match` rejects never matches, as in the engine. The 4,096-step depth limit cannot be reached: every step adds at least 2 bytes, so the 8,192-byte relative-path limit (`path-too-long`) comes first |
+| Coexistence (BPF-2) | pass | Open and Execute decisions under `off`, `audit` and `enforce` matched: read/exec rule allow and deny, an Ask prompt answered Allow, one answered Block, and an Execute prompt. `bpftool link` and the link iterator show no `file_open` program in any mode, and no structural program when off |
+| SIGKILL between bank fill and flip | pass | `TestLifecycleKillDuringPublish`: the child fills the inactive bank with an allow-all table and is killed. The pinned generation keeps the old bank (deny), and a restart reports and enforces its own table |
+| Loader failure partway through attach | pass / fixed | `TestLifecycleAttachFailure` fails `inode_rename`'s attach. The generation is active with only that hook reported unattached; rename is allowed and the others deny. A failed labelling attach fails the start and detaches the new links. **Fixed:** an older pinned generation then kept enforcing while the status said unprotected. `Status.Retained` now lists it, and `bpf-lsm-failed` says the older generation still enforces its last policy |
+| Forced verifier failure | pass / fixed | `TestLifecycleVerifierFailure` patches `inode_unlink`'s first instruction to `exit`, and the verifier rejects it. With no older generation nothing is attached or denied; with one, it is reported as retained and still denies (the same fix) |
+| bpffs not mounted | pass / fixed | At start: `bpf-lsm-unavailable` ("bpffs is not mounted"), and nothing is enforced. Unmounted under a live generation: the daemon's links keep enforcing until it stops, and then nothing does. **Fixed:** the lost pins were not reported. The new `bpf-lsm-generation-unpinned` warning names the generation |
+| `bpf` missing from the LSM list | pass | Booted with `lsm=capability,landlock,lockdown,yama`: `bpf-lsm-unavailable` ("bpf is not in the active LSM list"), no program attached, unlink allowed. The default cmdline was restored |
+| Interpreters, script open order | pass | First action is the unlink, allow profile, 20 runs each: `python3`, `perl` and `node` 20/20 allowed with the label wait on. bash deletes only through a child, which takes `rm`'s own profile |
+| Script forms | pass | `./s.js` (`#!/usr/bin/node`), `node s.js` (allow) and `node d.js` (deny). `#!/usr/bin/env python3`, `python -m`, `python -c`, `./x.py`, `./s.pl` and `./s.sh` are unchanged from M3 in the `bpflsm-live` regression |
+| AppImage | pass | A built AppImage (squashfuse at `/tmp/.mount_*`, tagged by `APPIMAGE`) deletes under its allow profile; a copy with a deny profile is denied |
+| Flatpak | not run (network) | `dl.flathub.org` is unreachable from the VM (connect timeout), so no Flatpak app could be installed |
+| argv rewrite (`$0` in perl) | pass | Each script rewrote its cmdline to the other's name, which is confirmed in `/proc/<pid>/cmdline`, and kept its own verdict |
+| fork then exec; thread exec; restart | pass | The child of a deny-profile python that forks without exec is denied. A non-leader thread's exec takes the new image's label in both directions. After a daemon restart, live processes are relabelled from `/proc`, as is one started while the daemon was down |
+| Fork storm until the label map is full | pass (kernel test) | `TestLabelMapFullDenies` (8-entry map): denies, counts, no eviction. The real 65,536-entry map cannot be filled from live processes in the VM (`kernel.threads-max` 63,279) |
+| Ring-buffer overflow | pass | `TestRingOverflowKeepsDenials`, with no ring reader: about 180,000 decisions in 4 s, 508 records in the full ring, every other decision counted as a drop (exact sum), and 0 denials allowed. Real daemon: a denied 10,000-delete burst kept every file, and its drops were counted |
+| Workflows | pass | Enforce, with tool profiles allowing one folder and denying another. vim atomic save (`backupcopy=no`) and default save; `mv` rename, `cp -r`, moving a tree out, `rm -r`; `git checkout` of a branch that deletes and adds files; `tar -x`. In the denied folder each structural change is refused and nothing is lost. vim then writes the file in place, which is not a structural operation. `git checkout` stops with the old file kept. VS Code is not installed |
+| Package upgrade of a labelled exe | pass | `pacman -U` tar 1.35-3, then 1.35-5, from the cache: `/usr/bin/tar` gets a new inode. Its first two runs after the upgrade were allowed, each after at most one label wait; the denied folder still denies |
+| `live-test.sh` false "UNEXPECTED allowed" | fixed | The checks now test `rm`'s own exit status (`if rm …`) instead of the pipeline's |
+| Label wait under the parent lock | measured, documented | See below |
+| `EXEC_LABELS` and snapshots | fixed | See below |
+
+**The label wait holds the parent directory's lock.** Every structural LSM
+hook runs inside `vfs_*` with the parent's `i_rwsem` held, and so do the
+`security_path_*` hooks. A pending caller's 50 ms spin therefore blocks any
+task that needs that lock. `TestLabelWaitParentLock` measures a lookup of an
+uncached name every 200 µs. With the caller resolved 10 ms late, the longest
+lookup in its parent folder was about 9 ms. With the caller never resolved,
+it was about 49–50 ms, the full wait cap. In another folder it was at most
+0.5 ms. A resolver that itself looks a name up in that folder cannot finish
+first, so the caller times out and is denied (fail closed, bounded by the
+cap). The real daemon's resolution does not depend on that folder: a fresh
+`rm` copy deleting next to itself was allowed 30/30 with no timeouts, while
+copies deleting from an unwatched folder were allowed 28/30 (2 timeouts, the
+known first-exec cost). There is no cheap fix. A wait without the lock needs
+a pre-lock attach point, such as a sleepable program at syscall entry, which
+is a redesign. The stall stays bounded by `WAIT_CAP_NS` per operation and by
+`max_waiters` concurrent waiters.
+
+**Subvolume-aware executable labels.** `ExecFile` gains `subvol` (32 bytes;
+`ExecLabelKey` 64, `RecordHeader` 120). The labelling programs read it
+exactly as the walk does: on `BTRFS_SUPER_MAGIC`, with the btrfs layout that
+the active table carries in `SETTINGS`. A btrfs file read without that layout
+gets `EXEC_SUBVOL_UNKNOWN`, and its exec is never labelled from `EXEC_LABELS`
+(it stays pending, so it fails closed). The daemon learns keys only from the
+records' own identities, so both sides agree by construction. `SameFile` also
+compares the subvolume when the kernel read one. `TestExecLabelsKeySubvolume`
+learns `a/rm` in a btrfs subvolume, then runs the snapshot's copy (same
+device, inode and generation). Before the fix it ran with the learned label
+(a wrong allow); now it is pending, and `a/rm` keeps its label.
+
+**Not covered here (core code).** After an Allow on an Open prompt, the rule
+was persisted to the profile's `readRules`, yet the same app's next open of
+the same file waited on a prompt again, in all three structural modes. This is
+fanotify-side and unrelated to BPF.
+
+Verified instructions (structural programs unchanged; the labelling programs
+read the subvolume):
+
+| Hook | Arch 7.1.9 | Debian 6.12.107 | Arch before | Debian before |
+|---|---:|---:|---:|---:|
+| `inode_unlink` | 6,996 | 6,559 | 6,996 | 6,559 |
+| `inode_rmdir` | 7,040 | 6,565 | 7,040 | 6,565 |
+| `inode_mkdir` | 6,555 | 6,073 | 6,555 | 6,073 |
+| `inode_link` | 12,039 | 11,288 | 12,039 | 11,288 |
+| `inode_rename` | 18,857 | 18,361 | 18,857 | 18,361 |
+| `bprm_check_security` | 302 | 298 | 143 | 146 |
+| `bprm_committed_creds` | 568 | 552 | 395 | 417 |
+| `sched_process_exec` | 1,348 | 1,394 | 1,247 | 1,245 |
+
+The fork and exit programs did not change in substance (Arch 234 and 205;
+Debian 275 and 188).
+
+The full regression set passed on Arch 7.1.9 (lazy preemption) and on Debian
+6.12.107 (voluntary), and Debian also passed with `preempt=full`:
+
+- the `bpflsm` suite, including the new lifecycle, ring, parent-lock and
+  snapshot-label tests;
+- the differential (8 × 505, 0 mismatches), with the mount and
+  unrepresentable tests, on btrfs, ext4 and tmpfs;
+- the subvolume tests (kernel object and `bpflsm-live -subvol-only`);
+- live enforce/off;
+- the `bpflsm-live` M3/wait, M4 and M5 matrices on btrfs and tmpfs.
+
+The contention results:
+
+| Kernel | Preemptors | Operations | Wrong allows | Wrong denials | `state-contention` |
+|---|---:|---:|---:|---:|---:|
+| Arch 7.1 | 4 | 8,757 | 0 | 160 | 292 |
+| Debian 6.12, voluntary | 4 | 8,975 | 0 | 0 | 0 |
+| Debian 6.12, `preempt=full` | 4 | 9,237 | 0 | 350 | 637 |
+| Debian 6.12, `preempt=full` | 0 | 8,657 | 0 | 0 | 0 |
+| Debian 6.12, `preempt=full` | 12 | 9,373 | 0 | 296 | 525 |
+
+Exec-label contention deleted nothing: 0 of 3,000 execs on Arch (4,197
+recursion misses) and on Debian voluntary, and 0 of 1,000 with
+`preempt=full`. The M4 bursts dropped 8,208 and 8,272 records on Arch and
+8,110 and 8,208 on Debian, and the `suppressed` totals equalled the drops.
+
+On Debian voluntary the label wait is off. The M5 matrix accounts for that:
+
+- A pending first exec is denied (fail closed) and then learned. Examples are
+  the upgraded `tar`, which was denied once and then allowed, and the `perl`
+  first-action script, 17–18 of 20 allowed with the rest denied as pending.
+- Helpers are learned before their profile verdict is checked.
+
 ## 5. Risks and fallbacks
 
 1. **The kernel matcher diverges from the Go engine on some rule shape.**
@@ -1258,6 +1387,16 @@ the actual coverage:
 5. **Overlayfs or bind-mount identity mismatch on the mutation hooks.**
    - *If it fails:* treat that mount as not covered and say so. Do not key on
      overlay inodes without proof.
+   - *As built (M5 stage 3):* bind mounts, including binds made in a private
+     mount namespace, decide by the shared dentry and pass. Overlayfs folder
+     inode numbers have no provable identity (`ovl_map_ino`/`ovl_getattr`
+     in v6.12.107 and v7.1.9: an indexed origin, `verify_lower` and the
+     non-persistent counter let `st_ino` and `i_ino` differ), so nothing on an
+     overlay superblock is keyed: its walks end at its unregistered root (not
+     covered, counted), and a covered overlay mount raises the
+     `overlay-not-covered` error. The changes overlayfs makes in its upper
+     layer are still decided under the upper layer's own path (see "As built
+     in M5: hardening matrix").
 6. **Restart window self-denial.** The old generation denies the restarted
    daemon's structural writes.
    - *If observed:* include the exe in `SELF`'s key with a generation-agnostic
@@ -1272,9 +1411,9 @@ the actual coverage:
    `(s_dev, ino, subvolume)`, with the btrfs root objectid read by both sides;
    a filesystem whose subvolumes the kernel cannot tell apart fails closed
    with a warning (see "As built in M5: subvolume-aware object identity").
-   Executable labels (`EXEC_LABELS`) are still keyed by
+   Executable labels (`EXEC_LABELS`) were still keyed by
    `(s_dev, ino, generation)`, so a snapshot's copy of a learned executable
-   shares its label (a known limit of that section).
+   shared its label; M5 stage 3 adds the subvolume to that key too.
 
 ## Estimate check
 

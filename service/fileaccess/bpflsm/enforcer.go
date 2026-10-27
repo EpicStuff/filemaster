@@ -73,6 +73,13 @@ type Status struct {
 	// OrphanedGenerations are older pinned generations that could not be
 	// removed, so their programs may still be enforcing.
 	OrphanedGenerations []string
+	// Retained are older pinned generations still attached after this
+	// generation failed to start; they keep enforcing their last policy.
+	Retained []string
+	// Unpinned reports an active generation whose pins are gone (bpffs was
+	// unmounted or the pins removed): it enforces only while the daemon holds
+	// its links.
+	Unpinned bool
 	// WouldDeny is the per-operation total read from the per-CPU AUDIT map.
 	WouldDeny map[string]uint64
 	// Undecided counts, per reason and hook, the cases the kernel could not
@@ -210,6 +217,7 @@ func (e *Enforcer) Status() Status {
 	status.Hooks = slices.Clone(status.Hooks)
 	status.Problems = slices.Clone(status.Problems)
 	status.OrphanedGenerations = slices.Clone(status.OrphanedGenerations)
+	status.Retained = slices.Clone(status.Retained)
 	status.CompileWarnings = cloneCompileWarnings(status.CompileWarnings)
 	if counters, err := auditCounters(e.collection); err == nil {
 		status.WouldDeny = counters
@@ -227,6 +235,11 @@ func (e *Enforcer) Status() Status {
 		status.Error = joinStatusError(status.Error, "read decision drops: "+err.Error())
 	}
 	status.DecisionSuppressed = e.suppressed.Load()
+	if e.collection != nil && status.Generation != "" {
+		if _, err := os.Stat(filepath.Join(e.pinRoot, status.Generation)); err != nil {
+			status.Unpinned = true
+		}
+	}
 	status.Labelling.Programs = slices.Clone(status.Labelling.Programs)
 	if full, drops, unreadable, err := labelCounterTotals(e.collection); err == nil {
 		status.Labelling.MapFull, status.Labelling.RecordDrops, status.Labelling.Unreadable = full, drops, unreadable
@@ -315,6 +328,7 @@ func (e *Enforcer) setModeLocked(mode Mode, table Table, replaceTable bool) erro
 	}
 	e.status = e.start(mode, table)
 	if e.status.State != StateActive {
+		e.status.Retained = attachedGenerations(e.pinRoot)
 		return errors.New(e.status.Error)
 	}
 	return nil
@@ -412,7 +426,7 @@ func (e *Enforcer) start(mode Mode, table Table) Status {
 		hookStatus := HookStatus{Program: hook.Program, Operation: hook.Operation}
 		if reason, missing := missingHooks[hook.Program]; missing {
 			hookStatus.Error = reason
-		} else if l, err := link.AttachLSM(link.LSMOptions{Program: collection.Programs[hook.Program]}); err != nil {
+		} else if l, err := attachLSM(link.LSMOptions{Program: collection.Programs[hook.Program]}); err != nil {
 			hookStatus.Error = err.Error()
 		} else {
 			links = append(links, l)
@@ -882,6 +896,33 @@ func waitDetached(ids []link.ID) error {
 		ids = remaining
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// attachedGenerations lists the generations under root with a pinned link
+// that is still attached.
+func attachedGenerations(root string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var attached []string
+	for _, entry := range entries {
+		links, err := os.ReadDir(filepath.Join(root, entry.Name()))
+		if err != nil {
+			continue
+		}
+		for _, pin := range links {
+			if !strings.HasPrefix(pin.Name(), "link-") {
+				continue
+			}
+			if l, err := link.LoadPinnedLink(filepath.Join(root, entry.Name(), pin.Name()), nil); err == nil {
+				_ = l.Close()
+				attached = append(attached, entry.Name())
+				break
+			}
+		}
+	}
+	return attached
 }
 
 // teardown removes every pinned generation and the pin root.

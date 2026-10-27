@@ -68,11 +68,11 @@ const (
 	contextSize             = 24 + contextScopes*scopeRefSize
 	ruleListSize            = 8 + contextRules*ruleRefSize
 	policyListKey           = 12
-	execFileSize            = 24
+	execFileSize            = 32
 	execLabelKey            = 2 * execFileSize
 	procValueSize           = 24
 	resolvedSize            = 24
-	recordHeader            = 104
+	recordHeader            = 120
 	decisionRecordSize      = 16496
 	decisionPathMax         = 8192
 	decisionSuppressEntries = 4096
@@ -315,15 +315,21 @@ func encodePolicyListKey(bank, policy, context uint32) []byte {
 	return b
 }
 
-// ExecFile: dev@0, ino@8, generation@16, padding@20.
+// ExecFile: dev@0, ino@8, generation@16, padding@20, subvol@24.
 func putExecFile(b []byte, f ExecFile) {
 	binary.LittleEndian.PutUint64(b[0:], f.Dev)
 	binary.LittleEndian.PutUint64(b[8:], f.Ino)
 	binary.LittleEndian.PutUint32(b[16:], f.Generation)
+	binary.LittleEndian.PutUint64(b[24:], f.Subvol)
 }
 
 func readExecFile(b []byte) ExecFile {
-	return ExecFile{Dev: binary.LittleEndian.Uint64(b[0:]), Ino: binary.LittleEndian.Uint64(b[8:]), Generation: binary.LittleEndian.Uint32(b[16:])}
+	return ExecFile{
+		Dev:        binary.LittleEndian.Uint64(b[0:]),
+		Ino:        binary.LittleEndian.Uint64(b[8:]),
+		Generation: binary.LittleEndian.Uint32(b[16:]),
+		Subvol:     binary.LittleEndian.Uint64(b[24:]),
+	}
 }
 
 func encodeExecLabelKey(exe, script ExecFile) []byte {
@@ -404,16 +410,16 @@ func decodeRecord(b []byte) (Record, error) {
 		Start:      binary.LittleEndian.Uint64(b[8:]),
 		Seq:        binary.LittleEndian.Uint64(b[16:]),
 		Exe:        readExecFile(b[24:]),
-		Script:     readExecFile(b[48:]),
-		ParentSeq:  binary.LittleEndian.Uint64(b[72:]),
-		ParentTGID: binary.LittleEndian.Uint32(b[80:]),
+		Script:     readExecFile(b[56:]),
+		ParentSeq:  binary.LittleEndian.Uint64(b[88:]),
+		ParentTGID: binary.LittleEndian.Uint32(b[96:]),
 	}
-	flags := binary.LittleEndian.Uint32(b[84:])
+	flags := binary.LittleEndian.Uint32(b[100:])
 	r.ArgsTruncated = flags&recordArgsTruncated != 0
 	r.EnvTruncated = flags&recordEnvTruncated != 0
-	argsLen := int(binary.LittleEndian.Uint32(b[88:]))
-	envLen := int(binary.LittleEndian.Uint32(b[92:]))
-	pathLen := int(binary.LittleEndian.Uint32(b[96:]))
+	argsLen := int(binary.LittleEndian.Uint32(b[104:]))
+	envLen := int(binary.LittleEndian.Uint32(b[108:]))
+	pathLen := int(binary.LittleEndian.Uint32(b[112:]))
 	if recordHeader+argsLen+envLen+pathLen > len(b) {
 		return Record{}, fmt.Errorf("record strings (%d+%d+%d bytes) exceed its %d bytes", argsLen, envLen, pathLen, len(b))
 	}

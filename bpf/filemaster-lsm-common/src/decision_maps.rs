@@ -421,7 +421,12 @@ mod tests {
 			(
 				"ExecFile",
 				size_of::<ExecFile>(),
-				&[("dev", offset_of!(ExecFile, dev)), ("ino", offset_of!(ExecFile, ino)), ("generation", offset_of!(ExecFile, generation))],
+				&[
+						("dev", offset_of!(ExecFile, dev)),
+						("ino", offset_of!(ExecFile, ino)),
+						("generation", offset_of!(ExecFile, generation)),
+						("subvol", offset_of!(ExecFile, subvol)),
+					],
 			),
 			("ExecLabelKey", size_of::<ExecLabelKey>(), &[("exe", offset_of!(ExecLabelKey, exe)), ("script", offset_of!(ExecLabelKey, script))]),
 			(

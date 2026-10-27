@@ -123,46 +123,60 @@ func objectSubvolume(fsType string, st pathStat, btrfs btrfsLayout) (subvol uint
 
 // markUnknownSubvolumes makes every context on a covered filesystem in
 // unknown deny: its inode numbers may repeat across subvolumes, so a walk may
-// stop at an object of another subvolume and take its path. A filesystem is
-// covered when a scope or rule anchors on it (anchored), or when one of its
-// mounts lies inside a scope or below a rule's literal prefix: a target a
-// scope or rule can decide is then on it. The warning names the mounts and
-// why btrfs's layout was not read, if it was not.
+// stop at an object of another subvolume and take its path. The warning names
+// the mounts and why btrfs's layout was not read, if it was not.
 func markUnknownSubvolumes(table *Table, unknown, anchored map[uint64]bool, mounts []*mountinfo.Info, scopes []ScopeInput, literals []string, btrfsErr error, warnings warningSet) {
-	covered := make(map[uint64]bool)
-	for _, mount := range mounts {
-		dev := deviceID(mount)
-		if !unknown[dev] {
-			continue
-		}
-		inside := anchored[dev]
-		for _, scope := range scopes {
-			inside = inside || !scope.Exclude && pathContains(scope.Path, mount.Mountpoint)
-		}
-		for _, literal := range literals {
-			inside = inside || strings.HasPrefix(mount.Mountpoint, literal)
-		}
-		covered[dev] = covered[dev] || inside
-	}
+	mountpoints := coveredMountpoints(unknown, anchored, mounts, scopes, literals)
 	for _, object := range table.Objects {
-		if !covered[object.File.dev] {
+		if !unknown[object.File.dev] || !coveredDevice(object.File.dev, anchored, mounts, scopes, literals) {
 			continue
 		}
 		for index := object.FirstContext; index < object.FirstContext+object.ContextCount; index++ {
 			table.Contexts[index].Subvolume = true
 		}
 	}
-	var mountpoints []string
-	for _, mount := range mounts {
-		if covered[deviceID(mount)] {
-			mountpoints = append(mountpoints, mount.Mountpoint+" ("+mount.FSType+")")
-		}
-	}
-	sort.Strings(mountpoints)
 	for _, mountpoint := range mountpoints {
 		warnings.add("subvolume-identity-unknown", mountpoint)
 	}
 	if len(mountpoints) > 0 && btrfsErr != nil {
 		warnings.add("subvolume-identity-unknown", "btrfs layout: "+btrfsErr.Error())
 	}
+}
+
+// coveredMountpoints lists, sorted and with their filesystem type, the mounts
+// of the superblocks in devs that a scope or rule can decide a target on.
+func coveredMountpoints(devs, anchored map[uint64]bool, mounts []*mountinfo.Info, scopes []ScopeInput, literals []string) []string {
+	var mountpoints []string
+	for _, mount := range mounts {
+		if dev := deviceID(mount); devs[dev] && coveredDevice(dev, anchored, mounts, scopes, literals) {
+			mountpoints = append(mountpoints, mount.Mountpoint+" ("+mount.FSType+")")
+		}
+	}
+	sort.Strings(mountpoints)
+	return mountpoints
+}
+
+// coveredDevice reports whether a scope or rule can decide a target on the
+// superblock dev: one anchors on it (anchored), or one of its mounts lies
+// inside a scope or below a rule's literal prefix.
+func coveredDevice(dev uint64, anchored map[uint64]bool, mounts []*mountinfo.Info, scopes []ScopeInput, literals []string) bool {
+	if anchored[dev] {
+		return true
+	}
+	for _, mount := range mounts {
+		if deviceID(mount) != dev {
+			continue
+		}
+		for _, scope := range scopes {
+			if !scope.Exclude && pathContains(scope.Path, mount.Mountpoint) {
+				return true
+			}
+		}
+		for _, literal := range literals {
+			if strings.HasPrefix(mount.Mountpoint, literal) {
+				return true
+			}
+		}
+	}
+	return false
 }

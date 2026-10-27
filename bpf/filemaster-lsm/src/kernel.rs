@@ -28,7 +28,9 @@
 //! ([`FileId`]).
 
 use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_get_current_task, bpf_probe_read_kernel};
-use filemaster_lsm_common::{Dev, ExecFile, FileId, Ino, Offsets, Pid};
+use filemaster_lsm_common::decision_maps::BTRFS_SUPER_MAGIC;
+use filemaster_lsm_common::label_maps::EXEC_SUBVOL_UNKNOWN;
+use filemaster_lsm_common::{Dev, ExecFile, Ino, Offsets, Pid};
 
 /// Running-kernel field offsets, injected into `.rodata` by the daemon
 /// (`override_global("OFFSETS", …)`) after it parses the kernel BTF. The initializer
@@ -152,10 +154,6 @@ impl Inode {
     pub fn super_block(self) -> Option<SuperBlock> {
         Some(SuperBlock(ptr_at(self.0, offset!(inode_i_sb))?))
     }
-    /// The inode's `(dev, inode)` identity.
-    pub fn file_id(self) -> Option<FileId> {
-        Some(FileId::new(self.super_block()?.dev()?, self.ino()?))
-    }
     /// A btrfs inode's subvolume, `BTRFS_I(inode)->root->root_key.objectid`,
     /// which is what btrfs's getattr reports as `STATX_SUBVOL`. `root` is the
     /// `btrfs_inode.root` offset relative to the embedded `struct inode`, and
@@ -266,10 +264,19 @@ impl Inode {
 }
 
 impl File {
-    /// The file's `(dev, ino, generation)` identity.
-    pub fn exec_file(self) -> Option<ExecFile> {
+    /// The file's `(dev, ino, generation, subvolume)` identity. `btrfs` is the
+    /// layout the active table keys btrfs with; without it a btrfs file's
+    /// subvolume is `EXEC_SUBVOL_UNKNOWN`.
+    pub fn exec_file(self, btrfs: Option<(i32, u32)>) -> Option<ExecFile> {
         let inode = self.inode()?;
-        let id = inode.file_id()?;
-        Some(ExecFile { dev: id.dev.0, ino: id.ino.0, generation: inode.generation()?, _pad: 0 })
+        let sb = inode.super_block()?;
+        let subvol = if sb.magic()? != BTRFS_SUPER_MAGIC {
+            0
+        } else if let Some((root, root_id)) = btrfs {
+            inode.btrfs_subvolume(root, root_id)?
+        } else {
+            EXEC_SUBVOL_UNKNOWN
+        };
+        Some(ExecFile { dev: sb.dev()?.0, ino: inode.ino()?.0, generation: inode.generation()?, _pad: 0, subvol })
     }
 }

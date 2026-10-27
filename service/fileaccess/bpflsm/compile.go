@@ -401,6 +401,15 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 		literals = append(literals, rule.literal)
 	}
 	markUnknownSubvolumes(&table, unknownSubvolumes, anchored, mounts, scopes, literals, btrfsErr, warnings)
+	overlays := make(map[uint64]bool)
+	for _, mount := range mounts {
+		if mount.FSType == "overlay" {
+			overlays[deviceID(mount)] = true
+		}
+	}
+	for _, mountpoint := range coveredMountpoints(overlays, anchored, mounts, scopes, literals) {
+		warnings.add("overlay-not-covered", mountpoint)
+	}
 	if _, _, err := layoutArena(table); err != nil {
 		return Table{}, warnings.list(), err
 	}
@@ -513,7 +522,12 @@ func existingDirectory(path string) (string, bool) {
 // visible: the same filesystem path under every mount of the superblock whose
 // root contains it, confirmed by statx. A superblock whose subvolumes the
 // kernel cannot tell apart is added to unknown. A btrfs placeholder is not an
-// object, but its identity still names its superblock.
+// object, but its identity still names its superblock. Neither is an overlayfs
+// directory: overlayfs derives a directory's i_ino from a layer's inode, its
+// copy-up origin or a non-persistent counter, under rules that let statx's
+// st_ino differ from the i_ino the kernel walk reads, so nothing on an overlay
+// superblock is keyed and its walks end at its unregistered root (not
+// covered).
 func reachablePaths(candidate string, mounts []*mountinfo.Info, byID map[int]*mountinfo.Info, btrfs btrfsLayout, unknown map[uint64]bool) (fileID, []string, bool) {
 	real, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
@@ -530,7 +544,7 @@ func reachablePaths(candidate string, mounts []*mountinfo.Info, byID map[int]*mo
 	// Every empty placeholder btrfs shows for a subvolume nested in a
 	// snapshot is inode 2 of the snapshot's own subvolume, and nothing can be
 	// created below one, so a placeholder is never an object.
-	if mount.FSType == "btrfs" && st.ino == btrfsEmptySubvolumeDir {
+	if mount.FSType == "btrfs" && st.ino == btrfsEmptySubvolumeDir || mount.FSType == "overlay" {
 		return fileID{dev: deviceID(mount)}, nil, false
 	}
 	inFS := joinBelow(mount.Root, strings.TrimPrefix(real, mount.Mountpoint))

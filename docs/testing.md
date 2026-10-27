@@ -150,6 +150,29 @@ descriptors, detaches the temporary bind mount, cancels workers, and waits for
 the reader to exit. The child process is also isolated from the invoking
 process's mount namespace, so cleanup failure cannot leave a host mount marked.
 
+## BPF LSM structural enforcement (VM)
+
+The structural BPF LSM tests need root and a kernel with `bpf` in its LSM
+list, so they run in the dev VM (`vmctl`), not on the host. Build the test
+binaries on the host with `make bpf`, then `go test -c` for
+`./service/fileaccess` and `./service/fileaccess/bpflsm`, and `go build` for
+`./cmds/bpflsm-live` and `./cmds/portmaster-core`. Use
+`TMPDIR=/root/filemaster/tmp/gotmp`, because the host's `/tmp` is small.
+
+- `bpflsm.test -test.v`: load and verifier counts, lifecycle (handover,
+  SIGKILL between bank fill and flip, attach and verifier failures), ring
+  overflow, labelling, label wait and its parent-lock stall. Set
+  `FM_BPF_SUBVOLUMES=1` for the btrfs loop-device tests.
+- `fileaccess.test` with `FM_BPF_DIFFERENTIAL=1`: the generated-rule
+  differential. With `FM_BPF_MOUNTS=1`: the mount matrix (ext4, tmpfs, bind,
+  private namespace, overlayfs) and the unrepresentable-policy test.
+  `FM_BPF_DIFFERENTIAL_ROOT` selects the filesystem the scope lives on.
+  `FM_BPF_CONTENTION=1` enables the preemption stress tests.
+- `bpflsm-live -core ./filemaster-core -scope <dir>` drives a real daemon
+  through the labelling and label-wait matrix. `-m4-only`, `-subvol-only` and
+  `-m5-only` select the decision-record, btrfs-subvolume and hardening
+  (coexistence, labelling, workflows, pressure) matrices.
+
 ## Legacy Protractor
 
 Legacy Angular E2E target:

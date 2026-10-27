@@ -1,6 +1,7 @@
 package fileaccess
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/safing/portmaster/service/fileaccess/bpflsm"
@@ -51,5 +52,34 @@ func TestStructuralUndecidedAndOverflowWarnings(t *testing.T) {
 	}
 	if _, ok := got["bpf-lsm-undecided-path-too-long"]; ok {
 		t.Error("zero counter produced a warning")
+	}
+}
+
+func TestStructuralCoverageWarnings(t *testing.T) {
+	warningsOf := func(status bpflsm.Status) map[string]DegradedWarning {
+		var diagnostics FileAccessDiagnostics
+		diagnostics.Structural = status
+		got := make(map[string]DegradedWarning)
+		for _, warning := range diagnosticsWarnings(diagnostics) {
+			got[warning.ID] = warning
+		}
+		return got
+	}
+	failed := warningsOf(bpflsm.Status{Mode: bpflsm.ModeEnforce, State: bpflsm.StateFailed, Error: "load BPF LSM object: verifier", Retained: []string{"42"}})
+	if warning := failed["bpf-lsm-failed"]; !strings.Contains(warning.Message, "older generation") || !strings.Contains(warning.Details, "generations=42") {
+		t.Errorf("failed start with a retained generation: %+v", warning)
+	}
+	if warning := warningsOf(bpflsm.Status{Mode: bpflsm.ModeEnforce, State: bpflsm.StateFailed})["bpf-lsm-failed"]; !strings.Contains(warning.Message, "unprotected") {
+		t.Errorf("failed start without a retained generation: %+v", warning)
+	}
+	active := warningsOf(bpflsm.Status{
+		Mode: bpflsm.ModeEnforce, State: bpflsm.StateActive, Generation: "7", Unpinned: true,
+		CompileWarnings: []bpflsm.CompileWarning{{ID: "overlay-not-covered", Patterns: []string{"/srv/ovl (overlay)"}}},
+	})
+	if active["bpf-lsm-generation-unpinned"].Severity != "warning" {
+		t.Errorf("unpinned generation: %+v", active)
+	}
+	if warning := active["bpf-lsm-overlay-not-covered"]; warning.Severity != "error" || !strings.Contains(warning.Details, "/srv/ovl (overlay)") {
+		t.Errorf("overlay not covered: %+v", warning)
 	}
 }
