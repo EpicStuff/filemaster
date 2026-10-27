@@ -172,6 +172,10 @@ binaries on the host with `make bpf`, then `go test -c` for
   through the labelling and label-wait matrix. `-m4-only`, `-subvol-only` and
   `-m5-only` select the decision-record, btrfs-subvolume and hardening
   (coexistence, labelling, workflows, pressure) matrices.
+- `cmds/bpflsm-live/live-test.sh` (enforce, SIGKILL persistence, restart, off)
+  and `cmds/bpflsm-live/flatpak.sh` (Flathub micro's labelling and mkdir
+  verdicts) drive the daemon from the shell; set `CORE` to the
+  `filemaster-core` binary.
 
 ## Legacy Protractor
 
