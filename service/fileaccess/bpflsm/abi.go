@@ -27,7 +27,7 @@ const (
 	arenaSize     = 1 << 20
 	maxString     = 4095
 	auditSlots    = 5
-	hookCount     = 5
+	hookCount     = 7
 	reasonCount   = 11
 
 	maxLabels       = 16384
@@ -57,6 +57,11 @@ const (
 	recordDecision      = 3
 	recordArgsTruncated = 1
 	recordEnvTruncated  = 2
+
+	decisionSourceValid     = 1
+	decisionTargetValid     = 2
+	decisionTargetText      = 4
+	decisionTargetTruncated = 8
 
 	settingsSize            = 40
 	waitSettingsSize        = 16
@@ -389,15 +394,20 @@ func decodeRecord(b []byte) (Record, error) {
 			Reason:        binary.LittleEndian.Uint32(b[12:]),
 			Label:         binary.LittleEndian.Uint32(b[20:]),
 			Bank:          binary.LittleEndian.Uint32(b[24:]),
-			SourceValid:   flags&1 != 0,
-			TargetValid:   flags&2 != 0,
+			SourceValid:   flags&decisionSourceValid != 0,
+			TargetValid:   flags&decisionTargetValid != 0,
 			Source:        decodeFileID(b[40:]),
 			Target:        decodeFileID(b[64:]),
 			SourceContext: binary.LittleEndian.Uint32(b[88:]),
 			TargetContext: binary.LittleEndian.Uint32(b[92:]),
 			SourcePath:    string(b[112 : 112+sourceLen]),
-			TargetPath:    string(b[8304 : 8304+targetLen]),
 			Suppressed:    binary.LittleEndian.Uint32(b[104:]),
+		}
+		if flags&decisionTargetText != 0 {
+			decision.TargetText = string(b[8304 : 8304+targetLen])
+			decision.TargetTruncated = flags&decisionTargetTruncated != 0
+		} else {
+			decision.TargetPath = string(b[8304 : 8304+targetLen])
 		}
 		return Record{Kind: recordDecision, TGID: binary.LittleEndian.Uint32(b[16:]), Start: binary.LittleEndian.Uint64(b[32:]), Decision: decision}, nil
 	}

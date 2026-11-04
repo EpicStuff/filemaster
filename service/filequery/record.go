@@ -11,11 +11,14 @@ type FileAccessRecord struct {
 	Exe      string    `sqlite:"exe"`
 	Path     string    `sqlite:"path"`
 	DestPath string    `sqlite:"dest_path"`
-	IsDir    bool      `sqlite:"is_dir,integer"`
-	Op       string    `sqlite:"op"`
-	Verdict  string    `sqlite:"verdict"`
-	Profile  string    `sqlite:"profile"`
-	AppName  string    `sqlite:"app_name"`
+	// LinkTarget is a created symlink's target text, possibly relative or
+	// dangling; it is not a decided path.
+	LinkTarget string `sqlite:"link_target"`
+	IsDir      bool   `sqlite:"is_dir,integer"`
+	Op         string `sqlite:"op"`
+	Verdict    string `sqlite:"verdict"`
+	Profile    string `sqlite:"profile"`
+	AppName    string `sqlite:"app_name"`
 
 	// MountID / MountPath attribute the record to the protected mount that was
 	// active when the decision occurred. A zero

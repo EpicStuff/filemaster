@@ -72,9 +72,18 @@ func TestStructuralBPFSubvolumes(t *testing.T) {
 		op     DecisionOp
 		path   string
 		folder bool
+		create func(string) error
 	}
-	unlink := func(path string) operation { return operation{"unlink " + path, DecisionDelete, path, false} }
-	mkdir := func(path string) operation { return operation{"mkdir " + path, DecisionCreate, path, true} }
+	unlink := func(path string) operation { return operation{"unlink " + path, DecisionDelete, path, false, nil} }
+	mkdir := func(path string) operation {
+		return operation{"mkdir " + path, DecisionCreate, path, true, func(path string) error { return os.Mkdir(path, 0o700) }}
+	}
+	mkfifo := func(path string) operation {
+		return operation{"mkfifo " + path, DecisionCreate, path, false, func(path string) error { return unix.Mkfifo(path, 0o600) }}
+	}
+	symlink := func(path string) operation {
+		return operation{"symlink " + path, DecisionCreate, path, false, func(path string) error { return os.Symlink("keep", path) }}
+	}
 	allowWrite := func(pattern string) PathRule { return PathRule{Pattern: pattern, Verdict: VerdictAllow} }
 	denyWrite := func(pattern string) PathRule { return PathRule{Pattern: pattern, Verdict: VerdictDeny} }
 
@@ -95,8 +104,12 @@ func TestStructuralBPFSubvolumes(t *testing.T) {
 				unlink(filepath.Join(second, "x", "victim")),
 				unlink(filepath.Join(snap, "d", "victim")),
 				mkdir(filepath.Join(b, "new")),
+				mkfifo(filepath.Join(b, "fifo")),
+				symlink(filepath.Join(second, "x", "link")),
 				unlink(filepath.Join(a, "d", "victim")),
 				mkdir(filepath.Join(a, "new")),
+				mkfifo(filepath.Join(a, "fifo")),
+				symlink(filepath.Join(a, "d", "link")),
 			},
 		},
 		{
@@ -109,6 +122,10 @@ func TestStructuralBPFSubvolumes(t *testing.T) {
 				unlink(filepath.Join(a, "d", "victim")),
 				unlink(filepath.Join(snap, "d", "victim")),
 				mkdir(filepath.Join(a, "d", "new")),
+				mkfifo(filepath.Join(snap, "d", "fifo")),
+				symlink(filepath.Join(a, "d", "link2")),
+				mkfifo(filepath.Join(b, "x", "fifo")),
+				symlink(filepath.Join(second, "x", "link2")),
 				unlink(filepath.Join(b, "x", "victim")),
 				unlink(filepath.Join(second, "x", "victim")),
 			},
@@ -122,8 +139,11 @@ func TestStructuralBPFSubvolumes(t *testing.T) {
 			operations: []operation{
 				unlink(filepath.Join(snap, "d", "victim")),
 				mkdir(filepath.Join(snap, "d", "new")),
+				symlink(filepath.Join(snap, "d", "link")),
+				mkfifo(filepath.Join(snap, "d", "fifo2")),
 				unlink(filepath.Join(b, "x", "victim")),
 				unlink(filepath.Join(a, "d", "victim")),
+				mkfifo(filepath.Join(a, "d", "fifo2")),
 			},
 		},
 		{
@@ -209,7 +229,7 @@ func TestStructuralBPFSubvolumes(t *testing.T) {
 				mustWriteFile(t, operation.path)
 				got = os.Remove(operation.path)
 			} else {
-				got = os.Mkdir(operation.path, 0o700)
+				got = operation.create(operation.path)
 			}
 			kernel := VerdictAllow
 			if errors.Is(got, unix.EPERM) {

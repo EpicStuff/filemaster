@@ -6,14 +6,16 @@
 now presents truthful file-access information. The empty Features card is
 deleted, the News widget remains for future Filemaster news, and the dashboard
 uses fanotify for Open and Execute and the BPF LSM backend for structural
-Delete, Create, Rename, and Link decisions. Read and Write are not dashboard
-metrics; the Write rule list controls structural operations when BPF LSM is active.
+Delete, Create (folders, special files and symlinks), Rename, and Link
+decisions. Read and Write are not dashboard metrics; the Write rule list
+controls structural operations when BPF LSM is active.
 
 ## Current backend contract
 
 - Fanotify emits Open (`FAN_OPEN_PERM`) and Execute (`FAN_OPEN_EXEC_PERM`)
-  decisions. The BPF LSM backend emits Delete, Create, Rename, and Link decisions
-  when structural protection is active. `FAN_ACCESS_PERM`, the `InterceptReads`
+  decisions. The BPF LSM backend emits Delete, Create (folders, special files
+  and symlinks), Rename, and Link decisions when structural protection is
+  active. `FAN_ACCESS_PERM`, the `InterceptReads`
   setting, and byte-write events remain unsupported.
 - `echo test > somefile` is an Open decision. It may open for writing, but
   fanotify does not reveal that mode, so the same Open rule covers opens for

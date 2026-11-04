@@ -35,7 +35,7 @@ func CurrentRuleModel() []RuleCategoryStatus {
 	if cfgOptionStructural != nil {
 		switch cfgOptionStructural() {
 		case "enforce":
-			write = RuleCategoryStatus{"Write", true, "BPF LSM enforces Write rules for delete, create folder, rename, and hard link. File content writes remain governed by Open rules."}
+			write = RuleCategoryStatus{"Write", true, "BPF LSM enforces Write rules for delete, create folder, create special file or symlink, rename, and hard link. File content writes remain governed by Open rules."}
 		case "audit":
 			write.Note = "Structural operations are allowed; Write rules record would-denies in Monitor while audit mode is on."
 		}

@@ -166,7 +166,7 @@ func registerConfiguration() error { //nolint:maintidx
 		// via FAN_OPEN_PERM and cannot tell read from write; the list governs any
 		// open of a file or folder.
 		{"Access Rules", CfgOptionFileAccessReadRulesKey, "Rules governing whether this application may open files and folders — for reading, writing, or both." + ruleSyntax, cfgOptionFileAccessReadRulesOrder, &cfgOptionFileAccessReadRules},
-		{"Write Rules", CfgOptionFileAccessWriteRulesKey, "Rules governing file and folder entry changes such as delete, create, rename, and hard link. Structural enforcement applies these rules in enforce mode; audit mode records would-denies." + ruleSyntax, cfgOptionFileAccessWriteRulesOrder, &cfgOptionFileAccessWriteRules},
+		{"Write Rules", CfgOptionFileAccessWriteRulesKey, "Rules governing file and folder entry changes such as delete, create (folders, special files and symlinks), rename, and hard link. Structural enforcement applies these rules in enforce mode; audit mode records would-denies." + ruleSyntax, cfgOptionFileAccessWriteRulesOrder, &cfgOptionFileAccessWriteRules},
 		// Files and folders share one Execute list, so folder entries are accepted,
 		// but folder Execute (traversal) is not enforceable by the current backend
 		// and has no effect in the current release.

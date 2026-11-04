@@ -74,12 +74,14 @@ pub const EVAL_BUDGET: u32 = 1 << 23;
 pub const AUDIT_COUNTERS: usize = 5;
 
 /// The structural hooks, as indexes of the per-hook counters.
-pub const HOOKS: usize = 5;
+pub const HOOKS: usize = 7;
 pub const HOOK_UNLINK: u32 = 0;
 pub const HOOK_RMDIR: u32 = 1;
 pub const HOOK_MKDIR: u32 = 2;
 pub const HOOK_LINK: u32 = 3;
 pub const HOOK_RENAME: u32 = 4;
+pub const HOOK_MKNOD: u32 = 5;
+pub const HOOK_SYMLINK: u32 = 6;
 
 /// Cases the kernel cannot decide exactly, and labelling denials. Each is
 /// counted per hook.

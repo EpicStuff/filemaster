@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -18,7 +19,7 @@ import (
 
 // TestStructuralBPFDifferential generates random policies and operations and
 // requires the kernel verdict to equal DecideOperation/DecideRename/
-// DecideHardLink for every one. It loads BPF LSM and mutates a real
+// DecideHardLink/DecideSymlink for every one. It loads BPF LSM and mutates a real
 // filesystem, so the VM gate enables it with FM_BPF_DIFFERENTIAL=1 and selects
 // the filesystem with FM_BPF_DIFFERENTIAL_ROOT.
 func TestStructuralBPFDifferential(t *testing.T) {
@@ -34,8 +35,11 @@ func TestStructuralBPFDifferential(t *testing.T) {
 	// decides two seeds.
 	defaults := []uint8{profile.DefaultActionNotSet, profile.DefaultActionBlock, profile.DefaultActionAsk, profile.DefaultActionPermit}
 	grandTotal, grandAllow, grandDeny := 0, 0, 0
+	// Per operation, the expected allow and deny counts, so a new operation
+	// is seen to be checked both ways.
+	perOperation := make(map[string]*[2]int)
 	for i, seed := range seeds {
-		allow, deny := runDifferentialSeed(t, seed, defaults[i%len(defaults)])
+		allow, deny := runDifferentialSeed(t, seed, defaults[i%len(defaults)], perOperation)
 		grandTotal += allow + deny
 		grandAllow += allow
 		grandDeny += deny
@@ -45,9 +49,17 @@ func TestStructuralBPFDifferential(t *testing.T) {
 		t.Fatalf("only %d/%d (%.0f%%) cases expected a deny, want at least 30%%", grandDeny, grandTotal, float64(grandDeny)*100/float64(grandTotal))
 	}
 	t.Logf("differential total=%d allow=%d deny=%d mismatches=0", grandTotal, grandAllow, grandDeny)
+	names := make([]string, 0, len(perOperation))
+	for name := range perOperation {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		t.Logf("differential op=%s allow=%d deny=%d", name, perOperation[name][0], perOperation[name][1])
+	}
 }
 
-func runDifferentialSeed(t *testing.T, seed int64, defaultAction uint8) (allow, deny int) {
+func runDifferentialSeed(t *testing.T, seed int64, defaultAction uint8, perOperation map[string]*[2]int) (allow, deny int) {
 	t.Helper()
 	random := rand.New(rand.NewSource(seed))
 	root := differentialRoot(t, seed)
@@ -131,6 +143,14 @@ func runDifferentialSeed(t *testing.T, seed int64, defaultAction uint8) (allow, 
 	})
 
 	for _, operation := range operations {
+		if perOperation[operation.name] == nil {
+			perOperation[operation.name] = new([2]int)
+		}
+		if operation.reference == VerdictAllow {
+			perOperation[operation.name][0]++
+		} else {
+			perOperation[operation.name][1]++
+		}
 		got := operation.run()
 		if operation.reference == VerdictAllow {
 			if got != nil {
@@ -294,6 +314,25 @@ func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, o
 	}
 	exchangeRef := func() Verdict { return exchange(exchangeLeft, exchangeRight, false, false) }
 
+	// FIFOs, device nodes and Unix sockets bound to a path are created through
+	// inode_mknod, symlinks through inode_symlink: each is a Create of a file
+	// entry, and a symlink's target (relative, absolute or dangling) is never
+	// decided.
+	symlink := func(destination string) Verdict { return snapshot.DecideSymlink(LinkRequest{Dest: destination}) }
+	fifoA := filepath.Join(liveA, "fifo-"+tag)
+	fifoGlob := filepath.Join(liveA, "a-fifo-"+tag)
+	fifoTxt := filepath.Join(liveB, "fifo-"+tag+".txt")
+	fifoOutside := filepath.Join(outside, "fifo-"+tag)
+	fifoFuture := filepath.Join(scopeA, "future", "fifo-"+tag)
+	socketA, socketOutside := "sock-"+tag, "sock-"+tag
+	symlinkRelative := filepath.Join(liveA, "symlink-rel-"+tag)
+	symlinkAbsolute := filepath.Join(liveB, "symlink-abs-"+tag)
+	symlinkDangling := filepath.Join(outside, "symlink-dangling-"+tag)
+	symlinkIntoScope := filepath.Join(outside, "symlink-in-"+tag)
+	symlinkTxt := filepath.Join(liveA, "symlink-"+tag+".txt")
+	symlinkFuture := filepath.Join(scopeA, "future", "symlink-"+tag)
+	symlinkAt := "symlink-at-" + tag
+
 	return []differentialOperation{
 		{"unlink", ref(unlinkTarget, DecisionDelete, false), func() error { return os.Remove(unlinkTarget) }},
 		{"rmdir", ref(rmdirTarget, DecisionDelete, true), func() error { return os.Remove(rmdirTarget) }},
@@ -342,6 +381,35 @@ func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, o
 			defer mustWriteFile(t, filepath.Join(liveA, "exact"))
 			return os.Remove(filepath.Join(liveA, "exact"))
 		}},
+		{"mkfifo", ref(fifoA, DecisionCreate, false), func() error { return unix.Mkfifo(fifoA, 0o600) }},
+		{"mkfifo-glob", ref(fifoGlob, DecisionCreate, false), func() error { return unix.Mkfifo(fifoGlob, 0o600) }},
+		{"mkfifo-txt", ref(fifoTxt, DecisionCreate, false), func() error { return unix.Mkfifo(fifoTxt, 0o600) }},
+		{"mkfifo-outside", ref(fifoOutside, DecisionCreate, false), func() error { return unix.Mkfifo(fifoOutside, 0o600) }},
+		{"mkfifo-future-glob", ref(fifoFuture, DecisionCreate, false), func() error { return unix.Mkfifo(fifoFuture, 0o600) }},
+		{"mknodat-fifo", ref(filepath.Join(liveB, "fifo-at-"+tag), DecisionCreate, false), func() error {
+			return withDirFD(liveB, func(fd int) error { return unix.Mknodat(fd, "fifo-at-"+tag, unix.S_IFIFO|0o600, 0) })
+		}},
+		{"mknod-char", ref(filepath.Join(liveA, "char-"+tag), DecisionCreate, false), func() error {
+			return unix.Mknod(filepath.Join(liveA, "char-"+tag), unix.S_IFCHR|0o600, int(unix.Mkdev(1, 3)))
+		}},
+		{"socket-bind", ref(filepath.Join(liveA, socketA), DecisionCreate, false), func() error { return bindUnixSocket(filepath.Join(liveA, socketA)) }},
+		{"socket-bind-outside", ref(filepath.Join(outside, socketOutside), DecisionCreate, false), func() error { return bindUnixSocket(filepath.Join(outside, socketOutside)) }},
+		{"symlink-relative", symlink(symlinkRelative), func() error { return os.Symlink("../outside/x", symlinkRelative) }},
+		{"symlink-absolute", symlink(symlinkAbsolute), func() error { return os.Symlink(unlinkTarget, symlinkAbsolute) }},
+		{"symlink-dangling", symlink(symlinkDangling), func() error { return os.Symlink("/nonexistent/"+tag, symlinkDangling) }},
+		{"symlink-into-scope", symlink(symlinkIntoScope), func() error { return os.Symlink(filepath.Join(liveA, "exact"), symlinkIntoScope) }},
+		{"symlink-txt", symlink(symlinkTxt), func() error { return os.Symlink("note.txt", symlinkTxt) }},
+		{"symlink-future-glob", symlink(symlinkFuture), func() error { return os.Symlink("..", symlinkFuture) }},
+		{"symlinkat", symlink(filepath.Join(liveA, symlinkAt)), func() error {
+			return withDirFD(liveA, func(fd int) error { return unix.Symlinkat("exact", fd, symlinkAt) })
+		}},
+		{"symlink-existing", VerdictAllow, func() error {
+			err := os.Symlink("x", filepath.Join(liveA, "exact"))
+			if errors.Is(err, unix.EEXIST) {
+				return nil
+			}
+			return fmt.Errorf("symlink onto an existing file: %v, want EEXIST", err)
+		}},
 	}
 }
 
@@ -351,6 +419,20 @@ func createFile(path string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// bindUnixSocket binds a Unix socket at path, which bind(2) creates through
+// inode_mknod. sun_path holds 108 bytes, so it binds through the folder's
+// descriptor.
+func bindUnixSocket(path string) error {
+	return withDirFD(filepath.Dir(path), func(fd int) error {
+		socket, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(socket)
+		return unix.Bind(socket, &unix.SockaddrUnix{Name: "/proc/self/fd/" + strconv.Itoa(fd) + "/" + filepath.Base(path)})
+	})
 }
 
 func withDirFD(path string, run func(int) error) error {

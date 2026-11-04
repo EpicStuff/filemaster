@@ -29,6 +29,8 @@ var Hooks = []Hook{
 	{"inode_mkdir", "create folder"},
 	{"inode_link", "hard link"},
 	{"inode_rename", "rename/move"},
+	{"inode_mknod", "create special file"},
+	{"inode_symlink", "create symlink"},
 }
 
 // attachLSM is link.AttachLSM, replaceable by tests that fail an attach.

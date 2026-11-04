@@ -11,18 +11,20 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 type m4Record struct {
-	Path     string `json:"path"`
-	DestPath string `json:"dest_path"`
-	Op       string `json:"op"`
-	Verdict  string `json:"verdict"`
-	Profile  string `json:"profile"`
-	AppName  string `json:"app_name"`
+	Path       string `json:"path"`
+	DestPath   string `json:"dest_path"`
+	LinkTarget string `json:"link_target"`
+	Op         string `json:"op"`
+	Verdict    string `json:"verdict"`
+	Profile    string `json:"profile"`
+	AppName    string `json:"app_name"`
 }
 
 type m4Notice struct {
@@ -60,6 +62,23 @@ func m4Helper(args []string) error {
 	case "link":
 		if len(args) == 3 {
 			return os.Link(args[1], args[2])
+		}
+	case "fifo":
+		if len(args) == 2 {
+			return syscall.Mkfifo(args[1], 0o644)
+		}
+	case "socket":
+		if len(args) == 2 {
+			socket, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+			if err != nil {
+				return err
+			}
+			defer syscall.Close(socket)
+			return syscall.Bind(socket, &syscall.SockaddrUnix{Name: args[1]})
+		}
+	case "symlink":
+		if len(args) == 3 {
+			return os.Symlink(args[1], args[2])
 		}
 	case "gated-delete":
 		if len(args) == 3 {
@@ -182,7 +201,7 @@ func m4Matrix() {
 				fmt.Printf("    record %+v\n", record)
 			}
 			if tc.op == "delete" && !variant.allowed {
-				m4AllowRetry(denyExe, args[0], denyName, record.Profile)
+				m4AllowRetry(denyExe, denyName, record.Profile, args[0], []string{"delete", args[0]}, "delete", "")
 			}
 		}
 	}
@@ -419,7 +438,10 @@ func m4Notices() ([]m4Notice, error) {
 	}
 }
 
-func m4AllowRetry(exe, path, app, scopedID string) {
+// m4AllowRetry finds the deny notice for path, checks it is deduplicated,
+// selects Allow and retries the helper operation retry until it succeeds and
+// is recorded as op with linkTarget.
+func m4AllowRetry(exe, app, scopedID, path string, retry []string, op, linkTarget string) {
 	var notice m4Notice
 	found := false
 	for i := 0; i < 40; i++ {
@@ -443,7 +465,7 @@ func m4AllowRetry(exe, path, app, scopedID string) {
 	if !found {
 		return
 	}
-	report(!m4Run(exe, "delete", path), "repeated deny still blocks")
+	report(!m4Run(exe, retry...), "repeated deny still blocks")
 	rows, err := m4Notices()
 	if err != nil {
 		report(false, fmt.Sprintf("query repeated deny notices: %v", err))
@@ -480,7 +502,7 @@ func m4AllowRetry(exe, path, app, scopedID string) {
 	}
 	allowed := false
 	for i := 0; i < 40; i++ {
-		if m4Run(exe, "delete", path) {
+		if m4Run(exe, retry...) {
 			allowed = true
 			break
 		}
@@ -488,7 +510,10 @@ func m4AllowRetry(exe, path, app, scopedID string) {
 	}
 	report(allowed, "retry after Allow succeeds")
 	if allowed {
-		_, err := m4WaitRecord("delete", "allow", path, "", app)
+		record, err := m4WaitRecord(op, "allow", path, "", app)
+		if err == nil && record.LinkTarget != linkTarget {
+			err = fmt.Errorf("link target %q, want %q", record.LinkTarget, linkTarget)
+		}
 		report(err == nil, fmt.Sprintf("Monitor records allowed retry: %v", err))
 	}
 }

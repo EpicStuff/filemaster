@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import { FileAccessRecord } from '@safing/portmaster-api';
+import { operationLabels } from '../filequery-viewer.component';
 
 /**
  * File-event row following Portmaster's sfng-netquery-connection-row layout.
@@ -39,6 +40,10 @@ export class FileEventRowComponent {
 			case 'exec': return 'text-orange-400';
 			default: return '';
 		}
+	}
+
+	get opLabel(): string {
+		return operationLabels[this.event?.op] || this.event?.op || '';
 	}
 
 	get verdictClass(): string {

@@ -13,7 +13,8 @@ import (
 const CfgOptionWatchPathsKey = "fileaccess/watchPaths"
 
 // CfgOptionStructuralEnforcementKey selects whether the BPF LSM backend gates
-// delete, folder create, hard link and rename operations.
+// delete, folder, special file and symlink create, hard link and rename
+// operations.
 const CfgOptionStructuralEnforcementKey = "fileaccess/structuralEnforcement"
 
 // CfgOptionStructuralLabelWaitKey selects whether a structural operation by a
@@ -124,7 +125,7 @@ func registerConfig() error {
 	err = config.Register(&config.Option{
 		Name:         "Structural Enforcement",
 		Key:          CfgOptionStructuralEnforcementKey,
-		Description:  "Whether delete, folder create, hard link and rename operations are checked against file rules before they happen, using the kernel's BPF LSM. Audit records operations that would be blocked without blocking them; Enforce blocks them; Off leaves them unprotected.",
+		Description:  "Whether delete, folder, special file and symlink create, hard link and rename operations are checked against file rules before they happen, using the kernel's BPF LSM. Audit records operations that would be blocked without blocking them; Enforce blocks them; Off leaves them unprotected.",
 		OptType:      config.OptTypeString,
 		DefaultValue: "audit",
 		PossibleValues: []config.PossibleValue{
@@ -146,7 +147,7 @@ func registerConfig() error {
 	err = config.Register(&config.Option{
 		Name:         "Structural Label Wait",
 		Key:          CfgOptionStructuralLabelWaitKey,
-		Description:  "Whether a delete, folder create, hard link or rename by a process whose profile Filemaster is still identifying waits up to 50 ms for it instead of being blocked at once. The wait is used only where the kernel can preempt it; otherwise such operations are blocked.",
+		Description:  "Whether a delete, folder, special file or symlink create, hard link or rename by a process whose profile Filemaster is still identifying waits up to 50 ms for it instead of being blocked at once. The wait is used only where the kernel can preempt it; otherwise such operations are blocked.",
 		OptType:      config.OptTypeBool,
 		DefaultValue: true,
 		Annotations: config.Annotations{

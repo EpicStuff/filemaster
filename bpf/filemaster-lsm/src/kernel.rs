@@ -5,7 +5,8 @@
 // negative-versus-unreadable inode read and the `d_name` reader for the path walk.
 // M3 replaces `caller_exe` with the task, mm, binprm and inode-generation
 // readers for labelling. The race fix reads hook arguments as plain integers.
-// M5 adds the superblock magic and btrfs subvolume readers.
+// M5 adds the superblock magic and btrfs subvolume readers. M6 reads
+// `inode_symlink`'s target-string pointer as a plain argument.
 //! The unsafe boundary: every read of kernel memory lives here, behind safe typed
 //! handles, so the decision flow in `main.rs` is `unsafe`-free.
 //!
@@ -79,6 +80,14 @@ impl File {
     }
 }
 
+/// The nth LSM hook argument as a plain integer, 0 when unreadable. Read with
+/// a probe rather than a context load, which the verifier types as a BTF
+/// pointer that a global BPF function cannot take as a `u64`.
+pub fn arg(ctx: &aya_ebpf::programs::LsmContext, n: usize) -> u64 {
+    let slot = (aya_ebpf::EbpfContext::as_ptr(ctx) as *const u64).wrapping_add(n);
+    unsafe { bpf_probe_read_kernel(slot) }.unwrap_or(0)
+}
+
 /// A `struct dentry *`. `PartialEq` compares the pointer (a dentry that is its own
 /// parent is the mount root — the walk's stop condition).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,8 +106,7 @@ impl Dentry {
     /// Read with a probe rather than a context load: the verifier types a context
     /// load as a BTF pointer, which a global BPF function cannot take as a `u64`.
     pub fn from_arg(ctx: &aya_ebpf::programs::LsmContext, n: usize) -> Dentry {
-        let slot = (aya_ebpf::EbpfContext::as_ptr(ctx) as *const u64).wrapping_add(n);
-        Dentry(unsafe { bpf_probe_read_kernel(slot) }.unwrap_or(0) as *const u8)
+        Dentry(arg(ctx, n) as *const u8)
     }
     /// The dentry's inode, or `None` when the dentry is **negative** — `d_inode` is NULL,
     /// i.e. the name does not exist yet.

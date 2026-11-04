@@ -166,14 +166,18 @@ binaries on the host with `make bpf`, then `go test -c` for
   overflow, labelling, label wait and its parent-lock stall. Set
   `FM_BPF_SUBVOLUMES=1` for the btrfs loop-device tests.
 - `fileaccess.test` with `FM_BPF_DIFFERENTIAL=1`: the generated-rule
-  differential. With `FM_BPF_MOUNTS=1`: the mount matrix (ext4, tmpfs, bind,
+  differential (unlink, rmdir, mkdir, mkfifo, Unix socket bind, symlink, hard
+  link and rename against the engine; it logs expected allow/deny counts per
+  operation). With `FM_BPF_MOUNTS=1`: the mount matrix (ext4, tmpfs, bind,
   private namespace, overlayfs) and the unrepresentable-policy test.
   `FM_BPF_DIFFERENTIAL_ROOT` selects the filesystem the scope lives on.
   `FM_BPF_CONTENTION=1` enables the preemption stress tests.
 - `bpflsm-live -core ./filemaster-core -scope <dir>` drives a real daemon
-  through the labelling and label-wait matrix. `-m4-only`, `-subvol-only` and
-  `-m5-only` select the decision-record, btrfs-subvolume and hardening
-  (coexistence, labelling, workflows, pressure) matrices.
+  through the labelling and label-wait matrix. `-m4-only`, `-subvol-only`,
+  `-m5-only` and `-m6-only` select the decision-record, btrfs-subvolume,
+  hardening (coexistence, labelling, workflows, pressure) and special
+  file/symlink (FIFO, socket, symlink records with link targets, deny notice
+  Allow and retry, audit) matrices.
 - `cmds/bpflsm-live/live-test.sh` (enforce, SIGKILL persistence, restart, off)
   and `cmds/bpflsm-live/flatpak.sh` (Flathub micro's labelling and mkdir
   verdicts) drive the daemon from the shell; set `CORE` to the

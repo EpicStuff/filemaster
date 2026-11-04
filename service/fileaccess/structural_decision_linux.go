@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,6 +91,12 @@ func (l *structuralLabeller) observeDecision(record bpflsm.Record) {
 		Profile:  scopedID,
 		AppName:  appName,
 	}
+	if decision.Operation == bpflsm.DecisionSymlink {
+		rec.LinkTarget = decision.TargetText
+		if decision.TargetTruncated {
+			rec.LinkTarget += "…"
+		}
+	}
 	if source, ok := l.fa.source.(*fanotifySource); ok {
 		rec.MountID, rec.MountPath = source.attributeMount(path)
 	}
@@ -111,8 +118,31 @@ func structuralOperation(operation uint32) string {
 		return "rename"
 	case bpflsm.DecisionLink:
 		return "link"
+	case bpflsm.DecisionMknod:
+		return "special"
+	case bpflsm.DecisionSymlink:
+		return "symlink"
 	default:
 		return ""
+	}
+}
+
+func structuralVerb(operation string) string {
+	switch operation {
+	case "delete":
+		return "deleting"
+	case "create":
+		return "creating the folder"
+	case "rename":
+		return "renaming"
+	case "link":
+		return "hard-linking"
+	case "special":
+		return "creating the special file"
+	case "symlink":
+		return "creating the symlink"
+	default:
+		return operation
 	}
 }
 
@@ -177,7 +207,10 @@ func (l *structuralLabeller) notifyStructuralDeny(profileID string, rec filequer
 	if rec.DestPath != "" {
 		path += " → " + rec.DestPath
 	}
-	message := fmt.Sprintf("%s was blocked from %s %s by %s. Retry the operation after allowing it.", rec.AppName, rec.Op, path, structuralReason(reason))
+	if rec.LinkTarget != "" {
+		path += " (pointing to " + strconv.Quote(rec.LinkTarget) + ")"
+	}
+	message := fmt.Sprintf("%s was blocked from %s %s by %s. Retry the operation after allowing it.", rec.AppName, structuralVerb(rec.Op), path, structuralReason(reason))
 	n := &notifications.Notification{
 		EventID: id,
 		Type:    notifications.Info,

@@ -229,6 +229,8 @@ pub const DECISION_DELETE: u32 = 1;
 pub const DECISION_CREATE: u32 = 2;
 pub const DECISION_RENAME: u32 = 3;
 pub const DECISION_LINK: u32 = 4;
+pub const DECISION_MKNOD: u32 = 5;
+pub const DECISION_SYMLINK: u32 = 6;
 pub const DECISION_ALLOW: u32 = 0;
 pub const DECISION_DENY: u32 = 1;
 pub const DECISION_AUDIT: u32 = 2;
@@ -237,6 +239,11 @@ pub const DECISION_REASON_DEFAULT: u32 = 12;
 pub const DECISION_REASON_NONE: u32 = 13;
 pub const DECISION_SOURCE_VALID: u32 = 1;
 pub const DECISION_TARGET_VALID: u32 = 2;
+/// `target_path` holds a symlink's target text as the kernel received it, not
+/// an object-relative path.
+pub const DECISION_TARGET_TEXT: u32 = 4;
+/// The target text filled `target_path`, so it may be cut short.
+pub const DECISION_TARGET_TRUNCATED: u32 = 8;
 pub const DECISION_PATH_MAX: usize = crate::decision_maps::MAX_REL as usize;
 pub const DECISION_RECORD_SIZE: usize = core::mem::size_of::<DecisionRecord>();
 pub const MAP_DECISION_DROPS: &str = "DECISION_DROPS";

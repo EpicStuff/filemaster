@@ -3,7 +3,8 @@
 // policy evaluation to the custom `decide` module; the M2 fix-up drops the
 // nonexistent `inode_rename` flags argument and passes each hook's counter index.
 // M3 adds the observe-only labelling programs, which delegate to `label`; the
-// race fix moves the exec relabel to `bprm_committed_creds`.
+// race fix moves the exec relabel to `bprm_committed_creds`. M6 adds the
+// `inode_mknod` and `inode_symlink` creation hooks.
 //! Filemaster's eBPF LSM hook boundary for structural mutations.
 
 #![no_std]
@@ -19,7 +20,8 @@ mod matcher;
 
 use aya_ebpf::macros::{btf_tracepoint, lsm};
 use aya_ebpf::programs::{BtfTracePointContext, LsmContext};
-use filemaster_lsm_common::decision_maps::{HOOK_LINK, HOOK_MKDIR, HOOK_RENAME, HOOK_RMDIR, HOOK_UNLINK};
+use filemaster_lsm_common::decision_maps::{HOOK_LINK, HOOK_MKDIR, HOOK_MKNOD, HOOK_RENAME, HOOK_RMDIR, HOOK_SYMLINK, HOOK_UNLINK};
+use filemaster_lsm_common::label_maps::{DECISION_CREATE, DECISION_MKNOD, DECISION_SYMLINK};
 
 /// `inode_link(struct dentry *old_dentry, struct inode *dir, struct dentry *new_dentry)`.
 #[lsm(hook = "inode_link")]
@@ -55,8 +57,25 @@ pub fn inode_rmdir(ctx: LsmContext) -> i32 {
 /// `inode_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)`.
 #[lsm(hook = "inode_mkdir")]
 pub fn inode_mkdir(ctx: LsmContext) -> i32 {
-	let source = kernel::Dentry::from_arg(&ctx, 1);
-	decide::clamped(decide::mkdir(source, HOOK_MKDIR))
+	let target = kernel::Dentry::from_arg(&ctx, 1);
+	decide::clamped(decide::create(target, true, 0, DECISION_CREATE, HOOK_MKDIR))
+}
+
+/// `inode_mknod(struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev)`:
+/// FIFOs, sockets bound to a path, device nodes and overlayfs whiteouts.
+/// `mknod(S_IFREG)` reaches `inode_create` instead.
+#[lsm(hook = "inode_mknod")]
+pub fn inode_mknod(ctx: LsmContext) -> i32 {
+	let target = kernel::Dentry::from_arg(&ctx, 1);
+	decide::clamped(decide::create(target, false, 0, DECISION_MKNOD, HOOK_MKNOD))
+}
+
+/// `inode_symlink(struct inode *dir, struct dentry *dentry, const char *old_name)`.
+/// Only the new link is decided; `old_name` is recorded as text.
+#[lsm(hook = "inode_symlink")]
+pub fn inode_symlink(ctx: LsmContext) -> i32 {
+	let target = kernel::Dentry::from_arg(&ctx, 1);
+	decide::clamped(decide::create(target, false, kernel::arg(&ctx, 2), DECISION_SYMLINK, HOOK_SYMLINK))
 }
 
 /// `bprm_check_security(struct linux_binprm *bprm)`. Observes only.

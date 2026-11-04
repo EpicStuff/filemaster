@@ -10,16 +10,17 @@
 use core::ffi::c_void;
 use core::intrinsics::{AtomicOrdering, atomic_xadd, atomic_xsub};
 
-use aya_ebpf::helpers::r#gen::{bpf_ktime_get_ns, bpf_loop, bpf_probe_read_kernel};
+use aya_ebpf::helpers::r#gen::{bpf_ktime_get_ns, bpf_loop, bpf_probe_read_kernel, bpf_probe_read_kernel_str};
 use filemaster_lsm_common::decision_maps::{
-	EVAL_BUDGET, HOOKS, HOOK_LINK, HOOK_MKDIR, LIST_EXECUTE, LIST_READ, LIST_WRITE, MAX_REL, REASON_BUDGET,
+	EVAL_BUDGET, HOOKS, HOOK_RENAME, HOOK_RMDIR, HOOK_UNLINK, LIST_EXECUTE, LIST_READ, LIST_WRITE, MAX_REL, REASON_BUDGET,
 	BTRFS_SUPER_MAGIC, REASON_CONTEXT_OVERFLOW, REASON_DEPTH, REASON_PATH_TOO_LONG, REASON_SUBVOLUME, REASON_UNREADABLE,
 	REASON_PENDING, REASON_STATE_CONTENTION, REASON_UNREGISTERED_ROOT, REASON_WAIT_TIMEOUT, REL_END, SCRATCH_MASK, SCRATCH_SLOTS,
 	STATE_SLOTS, WALK_LIMIT,
 };
 use filemaster_lsm_common::label_maps::{
-	MAX_POLICIES, RECORD_DECISION, DECISION_DELETE, DECISION_CREATE, DECISION_RENAME, DECISION_LINK, DECISION_REASON_DEFAULT, DECISION_REASON_NONE,
-	DECISION_ALLOW, DECISION_DENY, DECISION_AUDIT, DECISION_SOURCE_VALID, DECISION_TARGET_VALID,
+	MAX_POLICIES, RECORD_DECISION, DECISION_DELETE, DECISION_RENAME, DECISION_LINK, DECISION_REASON_DEFAULT, DECISION_REASON_NONE,
+	DECISION_ALLOW, DECISION_DENY, DECISION_AUDIT, DECISION_SOURCE_VALID, DECISION_TARGET_VALID, DECISION_TARGET_TEXT,
+	DECISION_TARGET_TRUNCATED,
 	DECISION_PATH_MAX, DECISION_SUPPRESS_LIMIT, DECISION_SUPPRESS_WINDOW_NS, DecisionRecord,
 	DecisionSuppressKey, DecisionSuppressValue, SETTINGS_BTRFS,
 };
@@ -112,9 +113,12 @@ pub fn remove(dentry: kernel::Dentry, folder: bool, hook: u32) -> Option<Decisio
 	with_wait(hook, |flags| filemaster_remove(dentry.raw(), folder as u32, hook, DECISION_DELETE | flags))
 }
 
-/// `inode_mkdir`: Filemaster's `DecisionCreate` on a negative dentry.
-pub fn mkdir(dentry: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
-	with_wait(hook, |flags| filemaster_mkdir(dentry.raw(), hook, DECISION_CREATE | flags))
+/// `inode_mkdir`, `inode_mknod` and `inode_symlink`: Filemaster's
+/// `DecisionCreate` on a negative dentry, recorded as `operation`. `text`, when
+/// not 0, is a symlink's target string, which is recorded but never decided.
+#[inline(always)]
+pub fn create(dentry: kernel::Dentry, folder: bool, text: u64, operation: u32, hook: u32) -> Option<DecisionResult> {
+	with_wait(hook, |flags| filemaster_create(dentry.raw(), folder as u32, text, hook, operation | flags))
 }
 
 /// `inode_link`: `DecisionSnapshot.DecideHardLink`'s source read/write/execute
@@ -195,7 +199,7 @@ fn unpack(hook: u32, packed: u64) -> Option<DecisionResult> {
 	increment(&DECISION_DROPS, 0);
 	Some(DecisionResult {
 		verdict: Verdict::DENY,
-		operation: if hook == HOOK_MKDIR || hook == HOOK_LINK { DecisionOp::CREATE } else { DecisionOp::DELETE },
+		operation: if hook == HOOK_UNLINK || hook == HOOK_RMDIR || hook == HOOK_RENAME { DecisionOp::DELETE } else { DecisionOp::CREATE },
 		audit: SETTINGS.get(0).is_some_and(|settings| settings.audit != 0) as u32,
 		covered: 1,
 		reason: REASON_STATE_CONTENTION,
@@ -211,13 +215,13 @@ fn unpack(hook: u32, packed: u64) -> Option<DecisionResult> {
 /// each claims a different state, so none ever writes another's. The claim is
 /// held from before the first walk until the record is out.
 #[inline(always)]
-fn owned(record: u32, once: impl FnOnce(&Owner) -> Option<DecisionResult>) -> u64 {
+fn owned(record: u32, text: u64, once: impl FnOnce(&Owner) -> Option<DecisionResult>) -> u64 {
 	let state = filemaster_claim_state();
 	// `STATE_SLOTS` (none free) is past the end of `STATE_CLAIMS`.
 	let Some(claim) = STATE_CLAIMS.get_ptr_mut(state) else {
 		return PACKED_NO_STATE;
 	};
-	let packed = match once(&Owner { state, record }) {
+	let packed = match once(&Owner { state, record, text }) {
 		None => 0,
 		Some(result) => {
 			PACKED_DECIDED
@@ -261,10 +265,12 @@ pub extern "C" fn filemaster_claim_state() -> u32 {
 	STATE_SLOTS as u32
 }
 
-/// A running decision's claimed state and its record request.
+/// A running decision's claimed state, its record request and a symlink's
+/// target text (0 for none).
 struct Owner {
 	state: u32,
 	record: u32,
+	text: u64,
 }
 
 impl Owner {
@@ -287,6 +293,7 @@ impl Owner {
 				| (destination as u64) << 52
 				| ((result.bank & 0xFF) as u64) << 56,
 			self.state,
+			self.text,
 		);
 		result
 	}
@@ -298,25 +305,25 @@ impl Owner {
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn filemaster_remove(dentry: u64, folder: u32, hook: u32, record: u32) -> u64 {
-	owned(record, |owner| remove_once(owner, kernel::Dentry::from_raw(dentry), folder != 0, hook))
+	owned(record, 0, |owner| remove_once(owner, kernel::Dentry::from_raw(dentry), folder != 0, hook))
 }
 
 #[unsafe(no_mangle)]
 #[inline(never)]
-pub extern "C" fn filemaster_mkdir(dentry: u64, hook: u32, record: u32) -> u64 {
-	owned(record, |owner| mkdir_once(owner, kernel::Dentry::from_raw(dentry), hook))
+pub extern "C" fn filemaster_create(dentry: u64, folder: u32, text: u64, hook: u32, record: u32) -> u64 {
+	owned(record, text, |owner| create_once(owner, kernel::Dentry::from_raw(dentry), folder != 0, hook))
 }
 
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn filemaster_hard_link(source: u64, destination: u64, hook: u32, record: u32) -> u64 {
-	owned(record, |owner| hard_link_once(owner, kernel::Dentry::from_raw(source), kernel::Dentry::from_raw(destination), hook))
+	owned(record, 0, |owner| hard_link_once(owner, kernel::Dentry::from_raw(source), kernel::Dentry::from_raw(destination), hook))
 }
 
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn filemaster_rename(source: u64, destination: u64, hook: u32, record: u32) -> u64 {
-	owned(record, |owner| rename_once(owner, kernel::Dentry::from_raw(source), kernel::Dentry::from_raw(destination), hook))
+	owned(record, 0, |owner| rename_once(owner, kernel::Dentry::from_raw(source), kernel::Dentry::from_raw(destination), hook))
 }
 
 #[inline(always)]
@@ -330,11 +337,11 @@ fn remove_once(owner: &Owner, dentry: kernel::Dentry, folder: bool, hook: u32) -
 }
 
 #[inline(always)]
-fn mkdir_once(owner: &Owner, dentry: kernel::Dentry, hook: u32) -> Option<DecisionResult> {
+fn create_once(owner: &Owner, dentry: kernel::Dentry, folder: bool, hook: u32) -> Option<DecisionResult> {
 	let (bank, caller, audit, btrfs) = live_settings(hook)?;
 	let target = walk(bank, caller.policy, btrfs, owner.state * 2, dentry, hook)?;
 	let mut decision = Decision::new(owner.state, bank, caller, audit, hook);
-	decision.side(&target, DecisionOp::CREATE, TargetKind::FOLDER, hook);
+	decision.side(&target, DecisionOp::CREATE, if folder { TargetKind::FOLDER } else { TargetKind::FILE }, hook);
 	Some(owner.conclude(decision.finish(), false))
 }
 
@@ -806,11 +813,14 @@ static WALKS: PerCpuArray<Walk> = PerCpuArray::with_max_entries(SCRATCH_SLOTS as
 /// state that decided it, which the decision still holds. `decision` packs the
 /// label (bits 0..32), reason (32..40), `DECISION_*` operation (40..48), record
 /// verdict (48..52), whether the state's second walk is a destination (52)
-/// and bank (56..64). Returns 1 once a record is submitted. A global function,
-/// so it is verified once per program rather than once per decision path.
+/// and bank (56..64). `text`, when not 0, is a symlink's target string, copied
+/// into the target path with `DECISION_TARGET_TEXT`; one that fills the array
+/// is marked `DECISION_TARGET_TRUNCATED`. Returns 1 once a record is
+/// submitted. A global function, so it is verified once per program rather
+/// than once per decision path.
 #[unsafe(no_mangle)]
 #[inline(never)]
-pub extern "C" fn filemaster_record(decision: u64, state: u32) -> u64 {
+pub extern "C" fn filemaster_record(decision: u64, state: u32, text: u64) -> u64 {
 	let label = decision as u32;
 	let reason = (decision >> 32) as u32 & 0xFF;
 	let operation = (decision >> 40) as u32 & 0xFF;
@@ -899,6 +909,16 @@ pub extern "C" fn filemaster_record(decision: u64, state: u32) -> u64 {
 			(*record).target_context = context;
 			(*record).target_len = len;
 			(*record).flags |= DECISION_TARGET_VALID;
+		}
+	}
+	if text != 0 {
+		// SAFETY: at most DECISION_PATH_MAX bytes into the reserved target array.
+		let read = unsafe { bpf_probe_read_kernel_str(target_bytes as *mut c_void, DECISION_PATH_MAX as u32, text as *const c_void) };
+		if read > 0 {
+			unsafe {
+				(*record).target_len = (read as u32 - 1) & (MAX_REL - 1);
+				(*record).flags |= DECISION_TARGET_TEXT | if read as usize >= DECISION_PATH_MAX { DECISION_TARGET_TRUNCATED } else { 0 };
+			}
 		}
 	}
 	entry.submit(0);

@@ -12,6 +12,8 @@ export interface FileAccessRecord {
 	exe: string;
 	path: string;
 	dest_path?: string;
+	// A created symlink's target text; it may be relative or dangling.
+	link_target?: string;
 	op: string;
 	verdict: string;
 	profile: string;

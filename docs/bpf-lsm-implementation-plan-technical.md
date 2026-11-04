@@ -19,6 +19,8 @@
 | Create folder | `inode_mkdir` | `DecisionCreate` |
 | Hard link | `inode_link` | `DecideHardLink`: source Read+Write+Execute, then destination Create |
 | Rename / move / replace | `inode_rename` | `DecideRename`: source Delete, then destination Create, or Write then Delete if the destination exists |
+| Create special file (FIFO, Unix socket bound to a path, device node), M6 | `inode_mknod` | `DecisionCreate` on a file |
+| Create symlink, M6 | `inode_symlink` | `DecideSymlink`: destination Create; the target is recorded, not decided |
 
 The decision semantics are the ones already written for future backends in
 `service/fileaccess/rule_decision.go`:
@@ -28,7 +30,8 @@ The decision semantics are the ones already written for future backends in
 - the parent-folder rule for entry operations, `:122-145`;
 - `DecideOperation`, `:150`;
 - `DecideRename`, `:201`;
-- `DecideHardLink`, `:228`.
+- `DecideHardLink`, `:228`;
+- `DecideSymlink`, `:251`.
 
 The BPF side must reproduce these decisions, not Cordon's own model (§2.4).
 
@@ -40,8 +43,9 @@ reported, and the user can allow and retry
 
 **Non-goals for this plan:**
 
-- regular-file create (`inode_create`), `symlink`, `mknod`, truncate, metadata,
-  and listing;
+- regular-file create (`inode_create`, which `mknod(S_IFREG)` also reaches),
+  truncate, metadata, and listing (`mknod` and `symlink` were non-goals until
+  M6);
 - prompting for any structural operation;
 - any change to Open or Execute.
 
@@ -694,7 +698,7 @@ A resumes with B's verdict.
   `preempt=full` — 9,203 operations, **372 and 412**; Debian 6.12 default
   (`preempt=voluntary`, no kernel preemption) — 8,639 operations, 0 and 0.
 - **The fix (`decide.rs`; its sequence ticket is replaced in M5, below).** Each decision is a global BPF function
-  (`filemaster_remove`, `filemaster_mkdir`, `filemaster_hard_link`,
+  (`filemaster_remove`, `filemaster_mkdir` (`filemaster_create` since M6), `filemaster_hard_link`,
   `filemaster_rename`) wrapped in `owned`: it takes a ticket by atomically
   incrementing this CPU's `STATE_SEQUENCE` before its first walk, runs the whole
   operation (walks plus every evaluation), packs the verdict into a returned
@@ -1139,6 +1143,170 @@ reuses of a bank can outlive the retained path snapshots. A short-lived
 process that exits before its profile is resolved can leave a deny notice
 without an **Allow** action, because there is no app profile to edit.
 
+### 2.8 Special files and symlinks (M6)
+
+M6 adds `inode_mknod` and `inode_symlink`. Both reproduce decisions the rule
+engine already makes; no semantics changed.
+
+- **mknod** is `DecideOperation(dest, DecisionCreate, isDir=false)`: mkdir's
+  evaluation with target kind file. It covers FIFOs, Unix sockets bound to a
+  path, character and block devices, and overlayfs whiteouts. In the v6.12.107
+  and v7.1.9 `fs/namei.c`, `do_mknodat`/`filename_mknodat` send `S_IFIFO`,
+  `S_IFSOCK`, `S_IFCHR` and `S_IFBLK` to `vfs_mknod`, which calls
+  `security_inode_mknod`. `0` and `S_IFREG` go to `vfs_create`, so
+  `mknod(S_IFREG)` reaches `inode_create`, which is still not covered. A
+  socket bind reaching the hook is observed, not read: the af_unix source was
+  not checked, but bind returns `EPERM` under a deny in the differential, the
+  mount matrix and the real daemon. `vfs_whiteout` calls `vfs_mknod` (read in
+  the 7.1.9 `include/linux/fs.h` from the Arch headers; Debian ships no
+  headers). So when overlayfs makes a whiteout in its work folder, that is now
+  a Create there, decided under the upper filesystem's path. This is the same
+  rule as M5's other upper-layer changes.
+- **symlink** is `DecideSymlink`, which is destination Create only. The
+  target is never decided, because a symlink grants no access to it. The
+  destination is always negative at the hook. `filename_create` returns
+  `EEXIST` for a positive dentry before `vfs_symlink` runs (6.12.107
+  `filename_create`; 7.1.9 `lookup_one_qstr_excl` with `LOOKUP_EXCL`).
+  `DecideSymlink`'s Delete-first branch for an existing destination therefore
+  never applies, and the differential's `symlink-existing` case checks for
+  `EEXIST`.
+- **One code path.** `filemaster_mkdir` became the global
+  `filemaster_create(dentry, folder, text, hook, record)`. mknod and symlink
+  therefore get mkdir's label wait, pending deny, subvolume-aware walk,
+  claimed decision state, suppressor, records, deny notice and audit
+  would-deny unchanged. The self-bypass and "audit never waits" also apply as
+  before.
+  - New hook IDs: `HOOK_MKNOD` = 5 and `HOOK_SYMLINK` = 6. `HOOKS` goes from
+    5 to 7, so `COUNTERS` has 77 slots.
+  - New record operations: `DECISION_MKNOD` = 5 and `DECISION_SYMLINK` = 6.
+  - `decide::create` must be `#[inline(always)]`. As an out-of-line function
+    with five arguments, LLVM spilled one through `r11`, and the verifier
+    rejected it with "R11 is invalid".
+- **Record target text.** The record layout is unchanged (16,496 bytes).
+  - For a symlink, `filemaster_record` copies `old_name` into `target_path`
+    with `bpf_probe_read_kernel_str` and sets `DECISION_TARGET_TEXT` (4).
+    `target_len` is the length without the NUL. `old_name` is always kernel
+    memory: `getname` copies the caller's string, and in-kernel callers such
+    as overlayfs pass their own.
+  - The array holds 8,192 bytes, so text of up to 8,191 bytes is complete. A
+    string that fills the array is marked `DECISION_TARGET_TRUNCATED` (8),
+    and the daemon appends "…". A syscall's target is at most 4,095 bytes
+    (`PATH_MAX` with its NUL), so only an in-kernel caller can be truncated.
+  - An unreadable string leaves the flag unset, and the record is still sent.
+  - The daemon keeps the text apart from object-relative paths: it is never
+    joined to a context and never becomes a rule. It is stored in filequery's
+    new `link_target` column (existing databases gain the column through
+    `ensureColumns`).
+  - Monitor shows the text in the row and as "Link target" in the details.
+    The deny notice says "pointing to "…"". The notice's **Allow** adds a
+    Write rule for the link path only.
+- **Names.** The filequery operations are `special` and `symlink`. Monitor
+  labels them "Create special file" and "Create symlink" ("Create folder" and
+  "Hard link" for the older ones). The hook list calls them "create special
+  file" and "create symlink". The settings, diagnostics and rule-model texts
+  list the new operations.
+
+**Tests.**
+
+- **Self-test.** A generation's self-test now checks `mkfifo` and `symlink`
+  in the vault, under both the deny table and the allow table.
+- **Differential.** 8 seeds × 533 operations, 4,264 per filesystem, with 0
+  mismatches on btrfs, ext4 and tmpfs, on Arch and on Debian `preempt=full`.
+  Debian voluntary ran the same set without the character device (8 × 519),
+  also with 0 mismatches. It gained these operations:
+  - `mkfifo`, `mknodat` of a FIFO, and `mknod` of a character device;
+  - a Unix socket bound in and outside a scope, through `/proc/self/fd/N/`
+    because `sun_path` holds only 108 bytes;
+  - symlinks with relative, absolute, dangling and into-scope targets, and
+    `symlinkat`;
+  - glob (`*.txt`, `[ab]*`, `future/**`) and outside-scope destinations;
+  - a symlink onto an existing file (`EEXIST`).
+
+  The test now logs the expected allow/deny counts per operation. Every new
+  operation was checked both ways, for example `mkfifo` 56/56, `mknod-char`
+  56/56, `socket-bind` 56/56 and `symlink-dangling` 56/56.
+- **Mount matrix.** `TestStructuralBPFMounts` gained FIFOs, sockets and
+  symlinks on the scope's filesystem, through the bind view, and on the ext4
+  loop and tmpfs inside the scope. It also covers the overlay merged view (not
+  covered, allowed) and the overlay whose upper layer is in the scope (denied
+  by default, allowed by a rule on the layer). All agree on both kernels.
+- **Subvolumes.** `TestStructuralBPFSubvolumes` gained 11 FIFO and symlink
+  operations across subvolumes `a` and `b`, the snapshot and the second
+  mount. All 33 verdicts agree on both kernels.
+- **Real daemon.** `bpflsm-live -m6-only` passed on btrfs and tmpfs scopes,
+  on both kernels. Its checks:
+  - a FIFO, a socket and relative and absolute symlinks are allowed by a
+    `+ …/allowed-*` Write rule and denied by a Block default;
+  - each decision has a Monitor row with the op, the path, the app and the
+    link target (`../dangling/target`, `/etc/hostname`);
+  - the symlink deny notice names the link and its target;
+  - for the FIFO, socket and relative symlink, the deny notice is
+    deduplicated, and **Allow** followed by a retry succeeds and is recorded;
+  - in audit, a FIFO, a socket and a symlink each give a would-deny row and
+    no notice.
+- **UI.** The Monitor screenshots show Special and Symlink rows, the "Create
+  special file" and "Create symlink" filters, and an expanded symlink with
+  "Link target ../etc/hostname".
+
+Verified instructions (labelling programs unchanged):
+
+| Hook | Arch 7.1.9 | Debian 6.12.107 | Arch M5 | Debian M5 |
+|---|---:|---:|---:|---:|
+| `inode_unlink` | 7,013 | 6,591 | 6,996 | 6,559 |
+| `inode_rmdir` | 7,013 | 6,591 | 7,040 | 6,565 |
+| `inode_mkdir` | 7,167 | 6,703 | 6,555 | 6,073 |
+| `inode_link` | 12,066 | 11,325 | 12,039 | 11,288 |
+| `inode_rename` | 18,874 | 18,394 | 18,857 | 18,361 |
+| `inode_mknod` | 7,167 | 6,703 | | |
+| `inode_symlink` | 7,182 | 6,718 | | |
+| `bprm_check_security` | 302 | 298 | 302 | 298 |
+| `bprm_committed_creds` | 568 | 552 | 568 | 552 |
+| `sched_process_fork` | 234 | 275 | 234 | 275 |
+| `sched_process_exec` | 1,348 | 1,394 | 1,348 | 1,394 |
+| `sched_process_exit` | 205 | 188 | 205 | 188 |
+
+The largest structural frame is still 192 B (link and rename). mkdir costs
+about 600 more instructions because its record now carries the text argument.
+
+**Regression set.** It passed on Arch 7.1.9 (lazy preemption) and on Debian
+6.12.107 (voluntary). On Debian with `preempt=full`, the `bpflsm` suite
+(label wait on, its self-test passed), the differential and mount tests, both
+contention tests and every `bpflsm-live` matrix passed again. The set:
+
+- the `bpflsm` suite;
+- the differential, mount and unrepresentable tests on btrfs, ext4 and
+  tmpfs;
+- the subvolume tests (kernel object and `bpflsm-live -subvol-only`);
+- live enforce/off;
+- the `bpflsm-live` M3/wait, M4, M5 and M6 matrices on btrfs and tmpfs.
+
+Contention results:
+
+| Kernel | Operations | Wrong allows | Wrong denials | `state-contention` | Exec stress |
+|---|---:|---:|---:|---:|---|
+| Arch 7.1 | 8,957 | 0 | 289 | 497 | 3,000 execs, 0 deleted |
+| Debian 6.12, voluntary | 9,297 | 0 | 0 | 0 | 3,000 execs, 0 deleted |
+| Debian 6.12, `preempt=full` | 9,708 | 0 | 643 | 1,162 | 1,000 execs, 0 deleted |
+
+The contention test still checks unlink, mkdir/rmdir, rename and link only.
+mknod and symlink run the same `filemaster_create` decision as mkdir.
+
+**Test environment notes (not product changes).** Two `bpflsm` tests assume
+that the Go test temp folder is not on the btrfs root:
+`TestEnforcerLifecycle` writes `SETTINGS` without the btrfs layout, and
+`TestSubvolumeIdentityUnknownFailsClosed` expects no covered btrfs. With
+`TMPDIR=/var/tmp` on the VM's btrfs root, both fail, and they fail the same
+way with the pre-M6 binary. With the default tmpfs `/tmp` they pass.
+`TestABImanifestMatchesGoLayout` reads the manifest at the path the binary
+was built from, so the VM bind-mounts the share there.
+
+**Known limits.**
+
+- Regular-file create (`open(O_CREAT)`, `mknod(S_IFREG)`; `inode_create`) is
+  still not covered.
+- A symlink target longer than 8,191 bytes is recorded truncated and marked
+  as truncated. It can come only from an in-kernel caller.
+
 ## 3. Milestones
 
 Each milestone is one coherent commit with a VM-observed exit test (CLAUDE.md
@@ -1164,6 +1332,7 @@ The load, lifecycle and startup daemon checks also passed on Debian 6.12
 | M3 ✅ | Labelling: fork/exec/exit programs, argv/envp capture, `EXE_LABEL`/`SCRIPT_LABEL`, `process` boundary override, script-open labelling, `PENDING` deny, `(tgid, start_time)` self-bypass, `/proc` seeding, per-label kernel rule lookup | Observed on Arch 7.1 and Debian 6.12, tmpfs and btrfs: `python a.py` (allow) vs `python b.py` (deny) get distinct verdicts; `./x.py`, `./s.sh`, `./s.js`, `./s.pl` env-shebang scripts labelled by their script arg; `python -m fmmod` resolves to the module profile and `python -c` to the interpreter profile; a child `rm` spawned by a deny-profile script gets `rm`'s allow label; an unresolved process stays `PENDING` and denies; a fork storm against an 8-entry label map denies and increments the map-full counter; argv rewrite after start does not change the label. The real daemon (`cmds/bpflsm-live`: profiles via the database API, real processes) reproduces the distinct verdicts, scripts, `-m`/`-c`, child `rm` and a live rule edit, and the PENDING window is measured (see As built in M3). No regressions: self-test, lifecycle, handover, the Gate B/differential (8×505, 0 mismatches) and live-daemon enforce/off all pass on both kernels and filesystems | 2–2.5 |
 | M4 ✅ | Decision records for covered allow/deny/audit would-deny; bounded suppressor and drop count; filequery paths/app/mount; informational deny notice with Allow-and-retry; active Write list and structural Monitor UI | Observed on Arch 7.1 and Debian 6.12: all four operations allowed/denied with full source/destination paths and app; deduplicated notice and successful Allow/retry; audit would-deny without notice; 10,000-delete burst with counted drops and healthy daemon. Full regression matrix passes on both kernels; verifier counts remain below 1,000,000 (see As built in M4). Dashboard, Monitor, settings, and app Write-list screenshots inspected; file-access Playwright E2E 2/2 passed with system Chromium | 1.5–2 |
 | M5 ✅ | Hardening matrix (§4) and fixes; **btrfs subvolume/snapshot identity** (risk 7) — key objects by a subvolume-aware id, not just `(s_dev, ino)`. Stage 1 ✅: claimed per-CPU decision states replace the sequence ticket, closing the preempted-writer gap (see As built in M5). Stage 2 ✅: objects keyed by `(s_dev, ino, btrfs subvolume)`, fail closed where the kernel cannot read the subvolume (see As built in M5: subvolume-aware object identity). Stage 3 ✅: §4 matrix run; fixed: failed starts now report a still-enforcing older generation, lost pins are reported, executable labels are subvolume-aware, overlay mounts are reported not covered instead of keyed on unproven inodes; the label wait's parent-lock stall measured and documented (see As built in M5: hardening matrix). Flatpak was run once the VM could reach Flathub | §4 matrix green; coverage warnings correct for every injected failure; multi-subvolume btrfs no longer collides objects. Stage 1: the gap reproduced on the M4 object (wrong allows under stress); after it 0 wrong allows on Arch 7.1 and Debian 6.12, full regression set passes on both. Stage 2: 12 wrong verdicts (2 wrong allows) on the kernel object and 18 failed real-daemon checks before; 0 after on Arch 7.1 and Debian 6.12, full regression set passes on both. Stage 3: every matrix item passes, is fixed, or is reported degraded (overlay merged view not covered); a snapshot's executable inheriting its source's label reproduced before and fixed; full regression set plus the new matrix tests pass on both kernels | 1–1.5 |
+| M6 ✅ | `inode_mknod` (FIFOs, sockets, device nodes, overlay whiteouts) as file Create and `inode_symlink` as `DecideSymlink` (destination Create; target recorded as text, not decided), sharing mkdir's global decision, label wait, records, notice and audit; filequery `link_target`; Monitor Special/Symlink | Observed on Arch 7.1 and Debian 6.12: self-test covers both hooks; the differential (with mkfifo, mknodat, char device, socket bind, relative/absolute/dangling/into-scope symlinks, symlinkat, `EEXIST`) has 0 mismatches on btrfs, ext4 and tmpfs; mount and subvolume matrices agree; the real daemon denies FIFO, socket and symlink under a Block default, allows them by a Write rule, records the link target, Allow-and-retry succeeds, and audit records would-deny without a notice; full regression set passes (see §2.8) | 0.5 |
 | | **Total** | | **8.5–11.5** |
 
 ## 4. Test plan
@@ -1298,10 +1467,11 @@ learns `a/rm` in a btrfs subvolume, then runs the snapshot's copy (same
 device, inode and generation). Before the fix it ran with the learned label
 (a wrong allow); now it is pending, and `a/rm` keeps its label.
 
-**Not covered here (core code).** After an Allow on an Open prompt, the rule
-was persisted to the profile's `readRules`, yet the same app's next open of
-the same file waited on a prompt again, in all three structural modes. This is
-fanotify-side and unrelated to BPF.
+**Found here, fixed in core code.** After an Allow on an Open prompt, the
+same app's next open of the same file prompted again, in all three structural
+modes: the file decision lookup kept the process's outdated layered profile
+after the rule was saved. Fixed in `10965e06`; `m5Coexistence` now requires a
+silent second Open and Execute.
 
 Verified instructions (structural programs unchanged; the labelling programs
 read the subvolume):
@@ -1414,6 +1584,55 @@ On Debian voluntary the label wait is off. The M5 matrix accounts for that:
    Executable labels (`EXEC_LABELS`) were still keyed by
    `(s_dev, ino, generation)`, so a snapshot's copy of a learned executable
    shared its label; M5 stage 3 adds the subvolume to that key too.
+
+## 6. Known limitations
+
+Open after M6. Each one fails closed or is reported unless it says otherwise.
+
+1. **Label wait stalls the parent folder.** The 50 ms wait runs inside the
+   structural hook, under the parent's `i_rwsem`, so lookups in that folder
+   stall for the wait. A daemon resolution that must look up a name in the
+   same folder cannot finish first, so the caller times out and is denied.
+   - *Possible fix (medium):* wait at syscall entry (`unlink`, `rmdir`,
+     `mkdir`, `rename`, `link` families), before any lock, and decide in the
+     hook without waiting. Costs: no path yet at syscall entry, so a pending
+     process waits on uncovered operations too; operations that do not enter
+     through those syscalls (io_uring, unverified) still need the in-hook wait.
+2. **First launch of a never-seen app can be denied.** `/app`, `/snap`,
+   AppImage and interpreter paths are never learned exe-only, so every launch
+   waits for its label. For a never-seen app the daemon also creates a profile
+   and publishes a table, which can outlast the 50 ms cap. Flatpak always hits
+   this; any never-seen executable can.
+   - *Possible fixes (small to medium, Go only):* create profiles when
+     Flatpak apps are installed (watch the Flatpak install folders), or bind
+     the new label to an existing equivalent policy without a full re-publish
+     (unverified). Measure where the time goes first.
+3. **Overlayfs merged views are not covered.** Folder inode numbers on an
+   overlay have no provable identity (risk 5), so operations through a merged
+   view are allowed, counted, and a covered overlay mount raises
+   `overlay-not-covered`. overlayfs's own changes in its upper layer are still
+   decided under the upper layer's path.
+   - *Possible fix (large):* key merged-view objects by path from the overlay
+     superblock root instead of by inode.
+4. **Operations not covered.** Regular-file create (`inode_create`, including
+   `mknod(S_IFREG)`), truncate and metadata changes are allowed without a
+   decision.
+5. **Voluntary-preemption kernels have no label wait.** The wait needs a
+   preemptible spinner; Debian 6.12's default (voluntary) turns it off with
+   `bpf-lsm-label-wait-unavailable`, so a pending process's first structural
+   operation is denied at once. Booting with `preempt=full` restores it.
+6. **Resolver throughput.** More pending processes than the daemon labels in
+   50 ms are denied (32 at once: 17–18 skipped busy), and so is any process
+   started while the 65,536-entry label map is full (tested only with an
+   8-entry map).
+7. **Spoofable identity (as upstream Portmaster).** A disguised argv[0], or a
+   caller-set `APPIMAGE`/`APPDIR`/`SNAP` environment, can make the daemon
+   resolve a profile the process should not get. A learned exe's kernel label
+   follows the file, so this mainly affects cmdline and env fingerprints.
+8. **Unregistered mounts.** Filesystems the daemon has not registered, such as
+   a tmpfs a sandbox mounts in its own namespace or Flatpak's private mounts,
+   are not covered and are counted as `unregistered-root`.
+9. **Untested workflow.** VS Code was not installed in the test VM.
 
 ## Estimate check
 

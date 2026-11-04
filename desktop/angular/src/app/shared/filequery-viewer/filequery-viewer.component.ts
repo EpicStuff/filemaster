@@ -26,6 +26,14 @@ export const keyTranslation: { [key: string]: string } = {
 	exe: 'Executable',
 };
 
+// Structural operations whose op value does not read as a label on its own.
+export const operationLabels: { [operation: string]: string } = {
+	create: 'Create folder',
+	special: 'Create special file',
+	symlink: 'Create symlink',
+	link: 'Hard link',
+};
+
 export interface ActiveFilter {
 	key: string;
 	value: string;
@@ -122,6 +130,7 @@ export class FilequeryViewerComponent implements OnInit {
 	selectedMounts: string[] = [];
 	selectedApps: string[] = [];
 	selectedOperations: string[] = [];
+	readonly operationLabels = operationLabels;
 	selectedGroupBy: string[] = [];
 	selectedOrderBy: string[] = [];
 	selectedAdditionalFilters: ActiveFilter[] = [];

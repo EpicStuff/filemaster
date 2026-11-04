@@ -122,6 +122,22 @@ func TestStructuralBPFMounts(t *testing.T) {
 			return err
 		}}
 	}
+	// A FIFO or socket (inode_mknod) and a symlink (inode_symlink) are each a
+	// Create of a file entry.
+	special := func(name string, create func(string) error) func(string, ...string) mountOperation {
+		return func(path string, aliases ...string) mountOperation {
+			return mountOperation{name: name + " " + path, paths: append([]string{path}, aliases...), op: DecisionCreate, run: func() error {
+				err := create(path)
+				if err == nil {
+					_ = os.Remove(path)
+				}
+				return err
+			}}
+		}
+	}
+	mkfifo := special("mkfifo", func(path string) error { return unix.Mkfifo(path, 0o600) })
+	socket := special("bind", bindUnixSocket)
+	symlink := special("symlink", func(path string) error { return os.Symlink("../dangling", path) })
 	expect := func(operation mountOperation, verdict *Verdict) mountOperation {
 		operation.expect = verdict
 		return operation
@@ -170,6 +186,15 @@ func TestStructuralBPFMounts(t *testing.T) {
 				remove(filepath.Join(tmp, "victim")),
 				remove(filepath.Join(tmp, "allowed", "victim")),
 				mkdir(filepath.Join(tmp, "allowed", "new")),
+				mkfifo(filepath.Join(plain, "covered", "fifo"), view(filepath.Join(plain, "covered", "fifo"))),
+				symlink(view(filepath.Join(plain, "allowed", "link")), filepath.Join(plain, "allowed", "link")),
+				socket(view(filepath.Join(plain, "covered", "sock")), filepath.Join(plain, "covered", "sock")),
+				mkfifo(filepath.Join(ext4, "allowed", "fifo")),
+				symlink(filepath.Join(ext4, "link")),
+				socket(filepath.Join(ext4, "allowed", "sock")),
+				mkfifo(filepath.Join(tmp, "fifo")),
+				symlink(filepath.Join(tmp, "allowed", "link")),
+				socket(filepath.Join(tmp, "sock")),
 				inNamespace("private namespace: bind of the scope, unlink a covered file", &deny,
 					"touch "+coveredVictim+" && mount --bind "+plain+" "+nsView+" && rm -f "+filepath.Join(nsView, "covered", "victim")),
 				inNamespace("private namespace: bind of the scope, unlink an allowed file", &allow,
@@ -181,6 +206,8 @@ func TestStructuralBPFMounts(t *testing.T) {
 				expect(remove(filepath.Join(ovl, "upper-file")), &allow),
 				expect(remove(filepath.Join(ovl, "lower-file")), &allow),
 				expect(mkdir(filepath.Join(ovl, "new")), &allow),
+				expect(mkfifo(filepath.Join(ovl, "fifo")), &allow),
+				expect(symlink(filepath.Join(ovl, "link")), &allow),
 				// The second overlay's merged view is outside every scope, but
 				// its upper and work folders are in the scope: overlayfs's own
 				// unlink, whiteout rename and mkdir there are decided under the
@@ -188,6 +215,8 @@ func TestStructuralBPFMounts(t *testing.T) {
 				expect(remove(filepath.Join(merged2, "upper-file")), &deny),
 				expect(remove(filepath.Join(merged2, "lower-file")), &deny),
 				expect(mkdir(filepath.Join(merged2, "new")), &deny),
+				expect(mkfifo(filepath.Join(merged2, "fifo")), &deny),
+				expect(symlink(filepath.Join(merged2, "link")), &deny),
 				// The layers themselves are ordinary folders.
 				remove(filepath.Join(upperScoped, "upper", "direct")),
 			},
@@ -202,6 +231,8 @@ func TestStructuralBPFMounts(t *testing.T) {
 				expect(remove(filepath.Join(merged2, "upper-file")), &allow),
 				expect(remove(filepath.Join(merged2, "lower-file")), &allow),
 				expect(mkdir(filepath.Join(merged2, "new")), &allow),
+				expect(mkfifo(filepath.Join(merged2, "fifo")), &allow),
+				expect(symlink(filepath.Join(merged2, "link")), &allow),
 				remove(filepath.Join(upperScoped, "upper", "direct")),
 				remove(filepath.Join(plain, "covered", "victim"), view(filepath.Join(plain, "covered", "victim"))),
 			},

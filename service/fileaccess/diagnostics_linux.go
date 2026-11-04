@@ -45,8 +45,9 @@ type FileAccessDiagnostics struct {
 	PermanentRules      map[string]RulePersistenceDiagnostics
 	Shutdown            ShutdownDiagnostics
 	LifecycleState      string
-	// Structural reports the BPF LSM backend for delete, folder create, hard
-	// link and rename. It is empty when the module runs without configuration.
+	// Structural reports the BPF LSM backend for delete, folder, special file
+	// and symlink create, hard link and rename. It is empty when the module runs
+	// without configuration.
 	Structural bpflsm.Status
 	Warnings   []DegradedWarning
 	// RuleModel reports which user-facing rule categories the current release
@@ -227,7 +228,7 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 	case bpflsm.StateOff:
 		if structural.Mode == bpflsm.ModeOff {
 			appendWarning("structural-enforcement-off", "warning",
-				"Structural enforcement is off, so delete, folder create, hard link and rename operations are unprotected.")
+				"Structural enforcement is off, so delete, folder, special file and symlink create, hard link and rename operations are unprotected.")
 		}
 	case bpflsm.StateUnavailable:
 		// Only the user can fix this, by rebooting with bpf in lsm=, so it is
@@ -237,16 +238,16 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 			severity = "error"
 		}
 		appendWarning("bpf-lsm-unavailable", severity,
-			"Delete, folder create, hard link and rename operations are unprotected because this kernel cannot run the BPF LSM. To enable it, add bpf to the lsm= kernel boot parameter and reboot.",
+			"Delete, folder, special file and symlink create, hard link and rename operations are unprotected because this kernel cannot run the BPF LSM. To enable it, add bpf to the lsm= kernel boot parameter and reboot.",
 			structural.Problems...)
 	case bpflsm.StateFailed:
 		if len(structural.Retained) > 0 {
 			appendWarning("bpf-lsm-failed", "error",
-				"The BPF LSM failed to start, so delete, folder create, hard link and rename operations are still decided by an older generation's last published policy, and rule changes are not applied.",
+				"The BPF LSM failed to start, so delete, folder, special file and symlink create, hard link and rename operations are still decided by an older generation's last published policy, and rule changes are not applied.",
 				structural.Error, "generations="+strings.Join(structural.Retained, ","))
 		} else {
 			appendWarning("bpf-lsm-failed", "error",
-				"Delete, folder create, hard link and rename operations are unprotected because the BPF LSM failed to start.",
+				"Delete, folder, special file and symlink create, hard link and rename operations are unprotected because the BPF LSM failed to start.",
 				structural.Error)
 		}
 	case bpflsm.StateActive:
@@ -278,15 +279,15 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 		switch warning.ID {
 		case "context-rule-overflow":
 			severity = "error"
-			message = "Delete, folder create, hard link and rename operations are denied in some folders because more rules can apply there than the structural BPF table holds."
+			message = "Delete, folder, special file and symlink create, hard link and rename operations are denied in some folders because more rules can apply there than the structural BPF table holds."
 		case "pattern-never-matches":
 			message = "A rule pattern can never match, because filepath.Match rejects it, so the structural BPF table leaves it out."
 		case "subvolume-identity-unknown":
 			severity = "error"
-			message = "Delete, folder create, hard link and rename operations are denied on these filesystems, because their inode numbers repeat across subvolumes and snapshots and the kernel cannot read which subvolume a folder belongs to."
+			message = "Delete, folder, special file and symlink create, hard link and rename operations are denied on these filesystems, because their inode numbers repeat across subvolumes and snapshots and the kernel cannot read which subvolume a folder belongs to."
 		case "overlay-not-covered":
 			severity = "error"
-			message = "Delete, folder create, hard link and rename operations through these overlay mounts are not protected, because overlayfs folder inode numbers are not a stable identity the kernel can match. The changes overlayfs then makes in its upper layer are still decided under the upper layer's own path."
+			message = "Delete, folder, special file and symlink create, hard link and rename operations through these overlay mounts are not protected, because overlayfs folder inode numbers are not a stable identity the kernel can match. The changes overlayfs then makes in its upper layer are still decided under the upper layer's own path."
 		}
 		appendWarning("bpf-lsm-"+warning.ID, severity, message,
 			"patterns="+strings.Join(warning.Patterns, ","))

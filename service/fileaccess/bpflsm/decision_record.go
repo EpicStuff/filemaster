@@ -13,10 +13,12 @@ import (
 const (
 	RecordDecision = 3
 
-	DecisionDelete = 1
-	DecisionCreate = 2
-	DecisionRename = 3
-	DecisionLink   = 4
+	DecisionDelete  = 1
+	DecisionCreate  = 2
+	DecisionRename  = 3
+	DecisionLink    = 4
+	DecisionMknod   = 5
+	DecisionSymlink = 6
 
 	DecisionAllow     = 0
 	DecisionDeny      = 1
@@ -41,7 +43,11 @@ type DecisionRecord struct {
 	TargetContext uint32
 	SourcePath    string
 	TargetPath    string
-	Suppressed    uint32
+	// TargetText is a symlink's target as the kernel received it, possibly
+	// relative or dangling; TargetTruncated means it filled the record.
+	TargetText      string
+	TargetTruncated bool
+	Suppressed      uint32
 }
 
 func (e *Enforcer) DecisionPaths(record *DecisionRecord) (string, string, error) {
