@@ -113,9 +113,10 @@ func TestStructuralBPFSubvolumes(t *testing.T) {
 			},
 		},
 		{
-			// b/x anchors an allow rule; a/d and a-snap/d share its inode number.
+			// b/x is a scope inside top, so it is an object, and has an allow
+			// rule; a/d and a-snap/d share its inode number.
 			name:          "rule-in-other-subvolume",
-			scopes:        []string{top, second},
+			scopes:        []string{filepath.Join(b, "x"), top, second},
 			defaultAction: profile.DefaultActionBlock,
 			write:         []PathRule{allowWrite(filepath.Join(b, "x", "**"))},
 			operations: []operation{
@@ -211,15 +212,10 @@ func TestStructuralBPFSubvolumes(t *testing.T) {
 
 		for _, operation := range c.operations {
 			// The kernel decides a target at every path it is reachable at and
-			// denies if any covered path denies; a path outside every scope
-			// that no rule matches is not covered.
+			// denies if any path in a scope denies.
 			reference := VerdictAllow
 			for _, path := range []string{operation.path, aliasPath(operation.path, b, second)} {
-				_, covered := snapshot.Write.decideOperation(path, operation.op, operation.folder)
-				for _, scope := range c.scopes {
-					covered = covered || pathContains(scope, path)
-				}
-				if covered && snapshot.DecideOperation(path, operation.op, operation.folder) == VerdictDeny {
+				if snapshot.DecideInScope(path, operation.op, operation.folder, watch.matches) == VerdictDeny {
 					reference = VerdictDeny
 				}
 			}

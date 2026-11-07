@@ -164,10 +164,11 @@ that reaches an unregistered filesystem root is **not covered and counted**.
 device comes from `/proc/self/mountinfo` via `statx`'s `STATX_MNT_ID`, never
 `stat`'s `st_dev` (btrfs minors differ), and the subvolume is the btrfs root
 objectid (`STATX_SUBVOL`), 0 on every other filesystem (see "As built in M5:
-subvolume-aware object identity" in §2.6). The object set is: every watch
-scope root; the deepest existing ancestor of each rule's literal prefix; and
-**every mount root** in `/proc/self/mountinfo` (including bind mounts whose root
-is a subdirectory). Because mount roots are objects, the walk stops at them, so
+subvolume-aware object identity" in §2.6). The object set is: the deepest
+existing directory at or above every included watch scope, and **every mount
+root** in `/proc/self/mountinfo` (including bind mounts whose root is a
+subdirectory). Rules anchor no objects: only targets in a scope are decided
+(see "Coverage" below). Because mount roots are objects, the walk stops at them, so
 nested mounts are covered with no separate splice step. A filesystem root
 mounted at several paths produces several **contexts** (below), one per absolute
 path, and the operation is denied if any denies.
@@ -178,8 +179,9 @@ scopes that could contain a target under it (stored as strings, so scopes that
 don't exist yet still decide by string); and its ordered list of rule
 references, each carrying its list (Read/Write/Execute), verdict and ObjectKind.
 A rule is included in a context's list if it could match the context path or
-anything at or below it — over-inclusion is always safe because the kernel
-matches exactly. The per-context cap is 256 rules / 32 scopes; past it the
+anything at or below it, and could match something inside an included scope —
+over-inclusion is always safe because the kernel matches exactly. A context
+under which no included scope can contain a target gets no rule list. The per-context cap is 256 rules / 32 scopes; past it the
 context's operations are denied, an `error` warning lists the patterns, and it
 is counted. The kernel evaluates every context and denies if any denies.
 
@@ -211,14 +213,33 @@ decision claims one of the CPU's `STATE_SLOTS` decision states for itself (see
 "As built: the per-CPU state race" and "As built in M5: claimed decision
 states" in §2.6).
 
-**Destinations with no object (owner decision).** "Not covered → allow" applies
-only when *every* object an operation touches is uncovered. A rename or hard
-link whose source is covered still decides its destination: the destination's
-context evaluates it, and with no matching rule the in-scope profile default
-(`NOMATCH[(bank, operation, target_kind)]`, from `verdictFromDefaultAction`)
-applies, matching `DecideRename`/`DecideHardLink` exactly. A hard link's target
-is always a negative dentry (the VFS returns `EEXIST` before the hook), so the
-link-over case does not arise.
+**Coverage: watch scopes only (owner decision, option C).** File rules apply
+only inside watched folders (`fileaccess/watchPaths`, default `["+ /home"]`),
+as with fanotify, which allows every event outside an active scope before it
+looks at any rule (`fanotifySource.handleEvent`). In each context the kernel
+first finds the first watch rule, in configured order, whose path contains the
+target's full path (`pathContains`, as `watchRuleSnapshot.matches`). If there
+is none, or it is an exclusion, the context does not decide the target. Only
+inside a scope does it run the ordered rule list; with no matching rule the
+profile default (`NOMATCH[(bank, operation, target_kind)]`, from
+`verdictFromDefaultAction`) applies. A rule that matches only outside every
+scope is ignored, and the compiler leaves it out of the table.
+
+Each evaluation of a rename or hard link is decided on its own target in the
+same way. Evaluations of targets outside every scope take no part, the
+operation is denied if any in-scope evaluation denies, and an operation with
+no target in a scope is allowed and records nothing. The Go reference is
+`DecideInScope`, `DecideRename`, `DecideHardLink` and `DecideSymlink`, called
+with the watch rules' `matches`. fanotify sees only opens, so it has no rename
+or link sides to compare with; each side is treated like a fanotify event on
+its own path. A hard link's target is always a negative dentry (the VFS
+returns `EEXIST` before the hook), so the link-over case does not arise.
+
+Some states deny before the scope check, because the scope cannot be checked
+reliably: a context on a filesystem whose subvolumes cannot be told apart, a
+context whose scope list overflowed, a path too long for the buffer, and a
+walk past its depth limit. A context whose rule list overflowed denies only
+targets inside a scope.
 
 **Operations.** Unlink, rmdir and mkdir are single evaluations. Rename and hard
 link combine evaluations in `DecideRename`/`DecideHardLink` order; `evaluate` is
@@ -941,9 +962,10 @@ the target under that object's path. (btrfs gives userspace a different
   without a readable layout (no BTF, a changed struct) or without
   `STATX_SUBVOL`, and any other filesystem that reports `STATX_SUBVOL`
   (bcachefs, a module on Debian 6.12). Its objects are keyed with subvolume 0,
-  as the kernel computes, and if the filesystem is covered — a scope or rule
-  anchors on it, or one of its mounts lies inside a scope or below a rule's
-  literal prefix — every context on it carries `CONTEXT_SUBVOLUME` and denies
+  as the kernel computes, and if the filesystem is covered — a scope anchors
+  on it, or one of its mounts lies inside a scope (rule prefixes counted too
+  until scope-only coverage, §2.9) — every context on it carries
+  `CONTEXT_SUBVOLUME` and denies
   under the new counted reason `subvolume-identity` (`REASON_SUBVOLUME` = 6;
   the later reasons and the record reasons moved up by one). The compile
   warning `subvolume-identity-unknown` (diagnostics error) names the mounts and
@@ -1077,15 +1099,16 @@ check:
   unresolved app's denials would have had in the same window (drops are still
   counted, and denials are still enforced).
 - **Profile-default denials (checked, no change).** `Decision::finish` denies
-  only when some evaluation is covered (a rule matched or the object is in a
-  watch scope), and every covered decision records, so no denial goes
-  unrecorded. An in-scope target with no matching rule under a block default
-  is denied with reason `default`, recorded, and noticed (the matrix's denied
-  app). An operation that touches only objects outside every scope is allowed
-  ("not covered → allow") and, correctly, records nothing. A rename by an app
-  whose Write rule allows the source, into a folder outside every scope under a
-  block default, is denied by the destination's `NOMATCH` default; the record
-  has both full paths and the denial raises a notice.
+  only when some evaluation is covered, and every covered decision records, so
+  no denial goes unrecorded. An in-scope target with no matching rule under a
+  block default is denied with reason `default`, recorded, and noticed (the
+  matrix's denied app). An operation that touches only objects outside every
+  scope is allowed ("not covered → allow") and, correctly, records nothing.
+  Since scope-only coverage (§2.9), "covered" means the target is in a watch
+  scope; a matching rule outside every scope no longer covers it. A rename
+  into a scope by an app with a block default and no rule there is denied by
+  the destination's default, with both full paths in the record and a notice.
+  A rename out of a scope is decided on the source alone.
 
 Verifier results (verified instructions, stock kernels):
 
@@ -1306,6 +1329,78 @@ was built from, so the VM bind-mounts the share there.
   still not covered.
 - A symlink target longer than 8,191 bytes is recorded truncated and marked
   as truncated. It can come only from an in-kernel caller.
+
+### 2.9 Scope-only coverage (as built)
+
+Owner decision (option C): structural decisions apply only inside watch
+scopes, as fanotify's do (§2.4, "Coverage"). Before, a target was covered when
+a rule matched it *or* it was in a scope. So the seeded `_systemd` profile,
+which has Read and Execute rules on `/run/systemd/**` but no Write rules,
+was denied hard links and renames under unwatched `/run`: `hard_link_once`
+evaluates the source for Read, Write and Execute, the Read rule made the
+operation covered, and Write fell to the block default.
+
+- **Kernel.** In each context the matcher checks the scopes first (`E_SCOPE`
+  right after the context is set up) and runs the rule list only when the
+  first containing scope is an inclusion. With no matching rule the profile
+  default decides there (`step_rule`, reason `default`). A target in no scope
+  in any context is `SIDE_NOT_COVERED`, and `Decision::side` now ignores such
+  an evaluation instead of applying the default. A rule-list overflow is
+  checked only once the target is known to be in a scope (`RULES_OVERFLOW`).
+- **Compiler.** Rule prefixes no longer anchor objects; only included scopes
+  and mount roots do. A rule that can match nothing inside an included scope
+  is left out, and a context under which no included scope can contain a
+  target gets no rule list. Subvolume and overlay coverage counts scopes only.
+  `anchorPath` and the rule-literal coverage inputs are gone.
+- **Go reference.** `DecideInScope` allows a path outside every scope without
+  consulting rules; `DecideRename`, `DecideHardLink` and `DecideSymlink` take
+  the scope predicate and decide each side through it. The differential,
+  contention, mount and subvolume tests pass the watch rules' `matches`.
+
+**Tests.**
+
+- Unit: `TestDecideStructuralOutsideScope` (a Read-only profile on an
+  unwatched folder: hard link and rename allowed; inside a scope denied; only
+  the in-scope side of a move across the boundary decided) and
+  `TestCompileBuildsContextsForScopes` (an out-of-scope rule anchors nothing
+  and is in no rule list).
+- Differential: 8 × 529 operations per filesystem. New: a hard link and a
+  replacing rename outside every scope, and an unlink, mkdir, hard link and
+  rename out of a folder excluded from the scope (`- scope-a/excluded`, with
+  an `excluded/**` rule in every list). All are expected allowed and are.
+- Unrepresentable: an unlink in a folder excluded from the scope, under a
+  context whose rule list overflowed, is allowed; the in-scope one still
+  denies. The rejected-pattern case now gets its own object from a scope
+  instead of a rule anchor, as does the subvolume test's `b/x`.
+- Real daemon (`bpflsm-live -m4-only`): a rename out of the scope by an app
+  whose Write rule allows the source is allowed and recorded; a rename into
+  the scope by a block-default app is denied with both paths and a notice; a
+  block-default app with only Read and Execute rules on an unwatched folder
+  hard-links and renames there, with no record.
+
+Verified instructions (labelling programs unchanged):
+
+| Hook | Arch 7.1.9 | Debian 6.12.107 | Arch M6 | Debian M6 |
+|---|---:|---:|---:|---:|
+| `inode_unlink` | 6,771 | 6,330 | 7,013 | 6,591 |
+| `inode_rmdir` | 6,771 | 6,330 | 7,013 | 6,591 |
+| `inode_mkdir` | 6,584 | 6,102 | 7,167 | 6,703 |
+| `inode_link` | 12,265 | 11,776 | 12,066 | 11,325 |
+| `inode_rename` | 15,825 | 15,327 | 18,874 | 18,394 |
+| `inode_mknod` | 6,584 | 6,102 | 7,167 | 6,703 |
+| `inode_symlink` | 6,599 | 6,117 | 7,182 | 6,718 |
+
+**Regression set** (as in §2.8): it passed on Arch 7.1.9 (lazy preemption)
+and on Debian 6.12.107, both voluntary and `preempt=full` (label wait on, its
+self-test passed). The differential had 0 mismatches in 4,232 operations on
+each of btrfs, ext4 and tmpfs on all three; the mount, unrepresentable and
+subvolume tests, live enforce/off and every `bpflsm-live` matrix passed.
+
+| Kernel | Operations | Wrong allows | Wrong denials | `state-contention` | Exec stress |
+|---|---:|---:|---:|---:|---|
+| Arch 7.1 | 9,013 | 0 | 458 | 815 | 3,000 execs, 0 deleted |
+| Debian 6.12, voluntary | 9,083 | 0 | 0 | 0 | 3,000 execs, 0 deleted |
+| Debian 6.12, `preempt=full` | 9,011 | 0 | 358 | 638 | 3,000 execs, 0 deleted |
 
 ## 3. Milestones
 

@@ -108,8 +108,9 @@ func TestStructuralBPFContention(t *testing.T) {
 		Exec:          PathRules{Rules: workerRules},
 	}
 
+	watch := &watchRuleSnapshot{Rules: []watchRule{{Path: scope}}}
 	table, warnings, err := bpflsm.Compile(bpflsm.Policy{
-		Scopes: scopesFromWatchRules(&watchRuleSnapshot{Rules: []watchRule{{Path: scope}}}),
+		Scopes: scopesFromWatchRules(watch),
 		Labels: []bpflsm.LabelPolicy{unidentifiedLabelPolicy(LookupResult{Snapshot: snapshot, DefaultAction: profile.DefaultActionBlock})},
 	})
 	if err != nil {
@@ -184,7 +185,7 @@ func TestStructuralBPFContention(t *testing.T) {
 				check("create", VerdictAllow, err)
 				return
 			}
-			reference := snapshot.DecideRename(RenameRequest{Source: source, Dest: destination, DestExists: exists(destination)})
+			reference := snapshot.DecideRename(RenameRequest{Source: source, Dest: destination, DestExists: exists(destination)}, watch.matches)
 			check("rename", reference, os.Rename(source, destination))
 		case 3:
 			source, destination := filepath.Join(dir, "l"), filepath.Join(dir, "k")
@@ -196,7 +197,7 @@ func TestStructuralBPFContention(t *testing.T) {
 				check("unlink", snapshot.DecideOperation(destination, DecisionDelete, false), os.Remove(destination))
 				return
 			}
-			check("link", snapshot.DecideHardLink(LinkRequest{Source: source, Dest: destination}), os.Link(source, destination))
+			check("link", snapshot.DecideHardLink(LinkRequest{Source: source, Dest: destination}, watch.matches), os.Link(source, destination))
 		}
 	}
 

@@ -80,7 +80,7 @@ func TestRuleInclusionIsSound(t *testing.T) {
 	}
 }
 
-func TestCompileBuildsContextsForScopeAndRules(t *testing.T) {
+func TestCompileBuildsContextsForScopes(t *testing.T) {
 	root := t.TempDir()
 	scope := filepath.Join(root, "scope")
 	other := filepath.Join(root, "other")
@@ -115,11 +115,13 @@ func TestCompileBuildsContextsForScopeAndRules(t *testing.T) {
 	if context := findContext(t, table, scope); len(context.Scopes) != 1 || context.Scopes[0].Path != scope {
 		t.Fatalf("scope entries = %+v, want only the containing scope", context.Scopes)
 	}
-	if otherRules := policyRules(t, table, policy, other); len(otherRules) != 1 || !table.Patterns[otherRules[0].Pattern].Recursive {
-		t.Fatalf("other rules = %+v", otherRules)
+	// A rule outside every scope decides nothing: it anchors no object and is
+	// in no rule list.
+	if slices.ContainsFunc(table.Contexts, func(c CompiledContext) bool { return c.Path == other }) {
+		t.Fatalf("the out-of-scope rule anchored %s", other)
 	}
-	if rootRules := policyRules(t, table, policy, "/"); len(rootRules) != 2 {
-		t.Fatalf("root rules = %+v, want both representable rules", rootRules)
+	if rootRules := policyRules(t, table, policy, "/"); len(rootRules) != 1 || table.Patterns[rootRules[0].Pattern].Text != rules[0].Pattern {
+		t.Fatalf("root rules = %+v, want only the in-scope rule", rootRules)
 	}
 	for _, rule := range policyRules(t, table, policyPending, "/") {
 		if rule.Allow {
@@ -128,6 +130,17 @@ func TestCompileBuildsContextsForScopeAndRules(t *testing.T) {
 	}
 	if table.Policies[policyPending].DefaultAllow {
 		t.Fatal("pending policy default allows")
+	}
+	// A context no included scope can contain a target under has no rule list.
+	for index, context := range table.Contexts {
+		if slices.ContainsFunc(context.Scopes, func(scope ScopeInput) bool { return !scope.Exclude }) {
+			continue
+		}
+		for policy, compiled := range table.Policies {
+			if _, ok := compiled.Lists[uint32(index)]; ok {
+				t.Fatalf("context %q outside every scope has a rule list for policy %d", context.Path, policy)
+			}
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package fileaccess
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/safing/portmaster/service/profile"
@@ -238,7 +239,7 @@ func TestDecideRename(t *testing.T) {
 		literalRule(VerdictDeny, "/src"),
 		literalRule(VerdictAllow, "/dst"),
 	}, nil)
-	if got := sourceDenied.DecideRename(RenameRequest{Source: "/src/a.txt", Dest: "/dst/a.txt"}); got != VerdictDeny {
+	if got := sourceDenied.DecideRename(RenameRequest{Source: "/src/a.txt", Dest: "/dst/a.txt"}, everywhere); got != VerdictDeny {
 		t.Errorf("rename with source-folder deny = %s, want deny", got)
 	}
 
@@ -247,7 +248,7 @@ func TestDecideRename(t *testing.T) {
 		literalRule(VerdictAllow, "/src/a.txt"),
 		literalRule(VerdictAllow, "/dst"),
 	}, nil)
-	if got := allowed.DecideRename(RenameRequest{Source: "/src/a.txt", Dest: "/dst/a.txt"}); got != VerdictAllow {
+	if got := allowed.DecideRename(RenameRequest{Source: "/src/a.txt", Dest: "/dst/a.txt"}, everywhere); got != VerdictAllow {
 		t.Errorf("rename allowed = %s, want allow", got)
 	}
 
@@ -258,7 +259,7 @@ func TestDecideRename(t *testing.T) {
 		literalRule(VerdictDeny, "/dst/a.txt"),
 		literalRule(VerdictAllow, "/dst"),
 	}, nil)
-	if got := replaceBlocked.DecideRename(RenameRequest{Source: "/src/a.txt", Dest: "/dst/a.txt", DestExists: true}); got != VerdictDeny {
+	if got := replaceBlocked.DecideRename(RenameRequest{Source: "/src/a.txt", Dest: "/dst/a.txt", DestExists: true}, everywhere); got != VerdictDeny {
 		t.Errorf("replace with destination Write deny = %s, want deny", got)
 	}
 }
@@ -277,10 +278,50 @@ func TestDecideLinks(t *testing.T) {
 		[]PathRule{literalRule(VerdictAllow, "/src/a.txt")},
 	)
 	req := LinkRequest{Source: "/src/a.txt", Dest: "/dst/link.txt"}
-	if got := snapshot.DecideHardLink(req); got != VerdictDeny {
+	if got := snapshot.DecideHardLink(req, everywhere); got != VerdictDeny {
 		t.Errorf("hard link with source write deny = %s, want deny", got)
 	}
-	if got := snapshot.DecideSymlink(req); got != VerdictAllow {
+	if got := snapshot.DecideSymlink(req, everywhere); got != VerdictAllow {
 		t.Errorf("symlink = %s, want allow (needs only destination create)", got)
+	}
+}
+
+func everywhere(string) bool { return true }
+
+// Structural operations are decided only inside a watch scope: a rule that
+// matches an object outside every scope is ignored, and so is the default.
+func TestDecideStructuralOutsideScope(t *testing.T) {
+	inHome := func(path string) bool { return path == "/home" || strings.HasPrefix(path, "/home/") }
+	// A Read-only profile on an unwatched folder, like the seeded _systemd one.
+	snapshot := decisionSnapshot(VerdictDeny,
+		[]PathRule{globRule(VerdictAllow, "/run/systemd/**")},
+		nil,
+		[]PathRule{globRule(VerdictAllow, "/run/systemd/**")},
+	)
+	link := LinkRequest{Source: "/run/systemd/a", Dest: "/run/systemd/b"}
+	if got := snapshot.DecideHardLink(link, inHome); got != VerdictAllow {
+		t.Errorf("hard link outside every scope = %s, want allow", got)
+	}
+	if got := snapshot.DecideHardLink(link, everywhere); got != VerdictDeny {
+		t.Errorf("hard link inside a scope with no Write rule = %s, want deny", got)
+	}
+	rename := RenameRequest{Source: "/run/systemd/a", Dest: "/run/systemd/b", DestExists: true}
+	if got := snapshot.DecideRename(rename, inHome); got != VerdictAllow {
+		t.Errorf("rename outside every scope = %s, want allow", got)
+	}
+	if got := snapshot.DecideInScope("/run/systemd/a", DecisionDelete, false, inHome); got != VerdictAllow {
+		t.Errorf("delete outside every scope = %s, want allow", got)
+	}
+
+	// Only the in-scope side of a move across the scope boundary is decided.
+	if got := snapshot.DecideRename(RenameRequest{Source: "/run/systemd/a", Dest: "/home/u/a"}, inHome); got != VerdictDeny {
+		t.Errorf("rename into a scope = %s, want deny by the destination's default", got)
+	}
+	if got := snapshot.DecideRename(RenameRequest{Source: "/home/u/a", Dest: "/run/systemd/a"}, inHome); got != VerdictDeny {
+		t.Errorf("rename out of a scope = %s, want deny by the source's default", got)
+	}
+	allowSource := decisionSnapshot(VerdictDeny, nil, []PathRule{globRule(VerdictAllow, "/home/u/**")}, nil)
+	if got := allowSource.DecideRename(RenameRequest{Source: "/home/u/a", Dest: "/tmp/a"}, inHome); got != VerdictAllow {
+		t.Errorf("rename out of a scope with the source allowed = %s, want allow", got)
 	}
 }

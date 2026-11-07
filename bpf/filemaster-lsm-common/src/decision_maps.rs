@@ -21,7 +21,7 @@ pub const MAP_SCRATCH: &str = "SCRATCH";
 
 /// The two generations used for atomic table publication.
 pub const NUM_BANKS: usize = 2;
-/// Inode-keyed walk stops (scope roots, rule anchors, mount roots) per bank.
+/// Inode-keyed walk stops (scope roots and mount roots) per bank.
 pub const MAX_OBJECTS: usize = 1024;
 /// Absolute paths at which those objects are reachable, per bank.
 pub const MAX_CONTEXTS: usize = 1024;

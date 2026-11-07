@@ -141,7 +141,8 @@ func m4Matrix() {
 	allowExe := filepath.Join(*outside, "m4-allow-helper")
 	denyExe := filepath.Join(*outside, "m4-deny-helper")
 	scopedExe := filepath.Join(*outside, "m4-scoped-helper")
-	for _, target := range []string{allowExe, denyExe, scopedExe} {
+	readOnlyExe := filepath.Join(*outside, "m4-read-only-helper")
+	for _, target := range []string{allowExe, denyExe, scopedExe, readOnlyExe} {
 		in, err := os.Open(self)
 		must(err)
 		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
@@ -206,33 +207,54 @@ func m4Matrix() {
 		}
 	}
 
-	// Profile-default (NOMATCH) denials on objects outside every scope. The
-	// unscoped folder shares the scope's mount, so a rename reaches the hook.
+	// Only objects inside a scope are decided. The unscoped folder shares the
+	// scope's mount, so a rename or link across the boundary reaches the hook.
 	unscoped := filepath.Join(filepath.Dir(*scope), "m4-unscoped")
 	must(os.RemoveAll(unscoped))
 	must(os.MkdirAll(unscoped, 0o755))
 	outsideDelete := filepath.Join(unscoped, "default-delete")
 	must(os.WriteFile(outsideDelete, []byte("m4"), 0o644))
 	report(m4Run(scopedExe, "delete", outsideDelete), "delete outside every scope allowed (not covered)")
-	renameSource := filepath.Join(base, "default-rename-source")
+	renameSource := filepath.Join(base, "out-rename-source")
 	must(os.WriteFile(renameSource, []byte("m4"), 0o644))
-	renameDest := filepath.Join(unscoped, "default-rename-destination")
-	report(!m4Run(scopedExe, "rename", renameSource, renameDest), "rename to outside every scope denied by the profile default")
-	row, err := m4WaitAny("rename", "deny", renameSource, scopedName)
-	report(err == nil, fmt.Sprintf("Monitor records the default-denied rename (dest %q): %v", row.DestPath, err))
+	renameDest := filepath.Join(unscoped, "out-rename-destination")
+	report(m4Run(scopedExe, "rename", renameSource, renameDest), "rename out of the scope allowed: only the source is decided")
+	_, err = m4WaitRecord("rename", "allow", renameSource, renameDest, scopedName)
+	report(err == nil, fmt.Sprintf("Monitor records the allowed rename out of the scope: %v", err))
+	inSource := filepath.Join(unscoped, "in-rename-source")
+	must(os.WriteFile(inSource, []byte("m4"), 0o644))
+	inDest := filepath.Join(base, "in-rename-destination")
+	report(!m4Run(denyExe, "rename", inSource, inDest), "rename into the scope denied by the destination's profile default")
+	_, err = m4WaitRecord("rename", "deny", inSource, inDest, denyName)
+	report(err == nil, fmt.Sprintf("Monitor records the default-denied rename with both paths: %v", err))
+
+	// A profile with only Read and Execute rules on an unwatched folder, like
+	// the seeded _systemd profile on /run/systemd: its links and renames there
+	// are not decided, so its block default does not deny them.
+	readOnlyName := "M4 read-only app"
+	readOnlyFP := []map[string]string{{"Type": "path", "Operation": "equals", "Value": readOnlyExe}}
+	putProfile(readOnlyName, readOnlyFP, map[string]any{
+		"filter":     map[string]any{"defaultAction": "block"},
+		"fileaccess": map[string]any{"readRules": []string{"+ " + unscoped + "/**"}, "execRules": []string{"+ " + unscoped + "/**"}},
+	})
+	report(m4Run(readOnlyExe, "noop"), "read-only helper learned")
+	linkSource := filepath.Join(unscoped, "read-only-link-source")
+	must(os.WriteFile(linkSource, []byte("m4"), 0o644))
+	report(m4Run(readOnlyExe, "link", linkSource, filepath.Join(unscoped, "read-only-link")), "hard link outside every scope allowed despite a Read-only rule set")
+	report(m4Run(readOnlyExe, "rename", linkSource, filepath.Join(unscoped, "read-only-renamed")), "rename outside every scope allowed despite a Read-only rule set")
 	time.Sleep(500 * time.Millisecond)
 	rows, err := m4Records()
 	must(err)
 	recorded := false
 	for _, row := range rows {
-		recorded = recorded || row.Path == outsideDelete
+		recorded = recorded || row.Path == outsideDelete || row.Path == linkSource
 	}
-	report(!recorded, "uncovered delete outside every scope has no Monitor record")
+	report(!recorded, "operations outside every scope have no Monitor record")
 	notices, err := m4Notices()
 	must(err)
 	noticed := false
 	for _, notice := range notices {
-		noticed = noticed || notice.Type == 0 && strings.Contains(notice.Message, renameSource)
+		noticed = noticed || notice.Type == 0 && strings.Contains(notice.Message, inSource)
 	}
 	report(noticed, "default-denied rename raises a deny notice")
 
@@ -381,24 +403,6 @@ func m4WaitRecord(op, verdict, path, dest, app string) (m4Record, error) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	return m4Record{}, fmt.Errorf("missing op=%s verdict=%s path=%s dest=%s app=%s in %d recent records", op, verdict, path, dest, app, len(rows))
-}
-
-// m4WaitAny waits for a record of op, verdict, source path and app, whatever
-// its destination.
-func m4WaitAny(op, verdict, path, app string) (m4Record, error) {
-	for i := 0; i < 40; i++ {
-		rows, err := m4Records()
-		if err != nil {
-			return m4Record{}, err
-		}
-		for _, row := range rows {
-			if row.Op == op && row.Path == path && row.Verdict == verdict && row.AppName == app {
-				return row, nil
-			}
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	return m4Record{}, fmt.Errorf("missing op=%s verdict=%s path=%s app=%s", op, verdict, path, app)
 }
 
 func m4Notices() ([]m4Notice, error) {

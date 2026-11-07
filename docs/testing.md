@@ -167,7 +167,8 @@ binaries on the host with `make bpf`, then `go test -c` for
   `FM_BPF_SUBVOLUMES=1` for the btrfs loop-device tests.
 - `fileaccess.test` with `FM_BPF_DIFFERENTIAL=1`: the generated-rule
   differential (unlink, rmdir, mkdir, mkfifo, Unix socket bind, symlink, hard
-  link and rename against the engine; it logs expected allow/deny counts per
+  link and rename against the engine, inside, across and outside the watch
+  scopes, including an excluded folder; it logs expected allow/deny counts per
   operation). With `FM_BPF_MOUNTS=1`: the mount matrix (ext4, tmpfs, bind,
   private namespace, overlayfs) and the unrepresentable-policy test.
   `FM_BPF_DIFFERENTIAL_ROOT` selects the filesystem the scope lives on.

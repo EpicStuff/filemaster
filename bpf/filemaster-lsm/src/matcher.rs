@@ -52,6 +52,10 @@ const KIND_FOLDER: u32 = 2;
 
 const RUNE_ERROR: u32 = 0xFFFD;
 
+/// `rule_count` of a context whose rule list overflowed: an in-scope target
+/// under it denies.
+const RULES_OVERFLOW: u32 = u32::MAX;
+
 /// Side results of one evaluation (an operation on one walked target).
 #[allow(dead_code)]
 pub const SIDE_NOT_COVERED: u32 = 0;
@@ -258,8 +262,9 @@ fn step_context(e: &mut EvalState, arena: *const u8, scratch: *const u8) -> i64 
 	};
 	e.rule = 0;
 	e.rule_count = 0;
+	e.scope = 0;
 	e.scope_count = context.scope_count;
-	e.phase = E_RULE;
+	e.phase = E_SCOPE;
 	let key = PolicyListKey { bank: e.bank, policy: e.policy, context: e.context };
 	// SAFETY: copied immediately.
 	if let Some(list) = unsafe { POLICY_LISTS.get(&key) }.copied() {
@@ -270,11 +275,7 @@ fn step_context(e: &mut EvalState, arena: *const u8, scratch: *const u8) -> i64 
 			return 1;
 		};
 		if rules.flags & RULELIST_OVERFLOW != 0 || rules.rule_count > CONTEXT_RULES as u32 {
-			e.overflow = 1;
-			e.denied = 1;
-			e.covered = 1;
-			e.context += 1;
-			e.phase = E_CONTEXT;
+			e.rule_count = RULES_OVERFLOW;
 			return 0;
 		}
 		e.rulelist = index;
@@ -284,9 +285,24 @@ fn step_context(e: &mut EvalState, arena: *const u8, scratch: *const u8) -> i64 
 }
 
 fn step_rule(e: &mut EvalState, _arena: *const u8, _scratch: *const u8) -> i64 {
+	if e.rule_count == RULES_OVERFLOW {
+		e.overflow = 1;
+		e.denied = 1;
+		e.covered = 1;
+		e.context += 1;
+		e.phase = E_CONTEXT;
+		return 0;
+	}
 	if e.rule >= e.rule_count {
-		e.scope = 0;
-		e.phase = E_SCOPE;
+		// In a scope and no rule applied: the profile default decides.
+		if e.nomatch_allows != 0 {
+			e.covered = 1;
+		} else {
+			e.denied = 1;
+			e.deny_reason = filemaster_lsm_common::label_maps::DECISION_REASON_DEFAULT;
+		}
+		e.context += 1;
+		e.phase = E_CONTEXT;
 		return 0;
 	}
 	let Some(rules) = RULELISTS.get(e.rulelist) else {
@@ -323,7 +339,7 @@ fn step_parent(e: &mut EvalState) -> i64 {
 
 fn step_scope(e: &mut EvalState) -> i64 {
 	if e.scope >= e.scope_count {
-		// No rule applied and not in any scope: this context does not cover it.
+		// Not in any scope: this context does not decide it.
 		e.context += 1;
 		e.phase = E_CONTEXT;
 		return 0;
@@ -599,16 +615,10 @@ fn finish(e: &mut EvalState, matched: bool) {
 			}
 		}
 		RET_SCOPE => {
-			if matched {
-				if e.scope_exclude == 0 {
-					if e.nomatch_allows != 0 {
-						e.covered = 1;
-					} else {
-						e.denied = 1;
-						e.deny_reason = filemaster_lsm_common::label_maps::DECISION_REASON_DEFAULT;
-					}
-				}
-				// Either way, the first containing scope decides this context.
+			// The first containing scope decides whether the rules run.
+			if matched && e.scope_exclude == 0 {
+				e.phase = E_RULE;
+			} else if matched {
 				e.context += 1;
 				e.phase = E_CONTEXT;
 			} else {

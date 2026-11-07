@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -182,6 +183,14 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 	}
 	warnings := newWarnings()
 
+	var scopes []ScopeInput
+	for _, scope := range policy.Scopes {
+		if !filepath.IsAbs(scope.Path) {
+			continue
+		}
+		scopes = append(scopes, ScopeInput{Path: filepath.Clean(scope.Path), Exclude: scope.Exclude})
+	}
+
 	// Each distinct rule set becomes one policy. Policy 0 is the pending policy
 	// and is never shared with a label's own.
 	type labelRules struct {
@@ -201,6 +210,13 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 			classified, ok := classifyRule(rule)
 			if !ok {
 				warnings.add("pattern-never-matches", rule.Pattern)
+				continue
+			}
+			// Only targets inside a scope are decided, so a rule that can match
+			// nothing in one is left out.
+			if !slices.ContainsFunc(scopes, func(scope ScopeInput) bool {
+				return !scope.Exclude && couldMatchAtOrBelow(classified.literal, scope.Path)
+			}) {
 				continue
 			}
 			rules = append(rules, classified)
@@ -226,26 +242,13 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 		return Table{}, warnings.list(), fmt.Errorf("compile structural table: %d distinct policies, more than %d", len(sets), maxPolicies)
 	}
 
-	var scopes []ScopeInput
-	for _, scope := range policy.Scopes {
-		if !filepath.IsAbs(scope.Path) {
-			continue
-		}
-		scopes = append(scopes, ScopeInput{Path: filepath.Clean(scope.Path), Exclude: scope.Exclude})
-	}
-
-	// A candidate is true when a scope or rule anchors on it.
+	// A candidate is true when a scope anchors on it.
 	candidates := make(map[string]bool)
 	for _, scope := range scopes {
 		if !scope.Exclude {
 			if anchor, ok := existingDirectory(scope.Path); ok {
 				candidates[anchor] = true
 			}
-		}
-	}
-	for _, rule := range pending {
-		if anchor, ok := existingDirectory(anchorPath(rule)); ok {
-			candidates[anchor] = true
 		}
 	}
 	for _, mount := range mounts {
@@ -334,6 +337,11 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 				context.Scopes = nil
 				warnings.add("context-scope-overflow", path)
 			}
+			// No target under a context without an included scope is decided.
+			if !slices.ContainsFunc(context.Scopes, func(scope ScopeInput) bool { return !scope.Exclude }) {
+				table.Contexts = append(table.Contexts, context)
+				continue
+			}
 			for policyIndex, set := range sets {
 				var list CompiledRuleList
 				var included []string
@@ -396,18 +404,14 @@ func Compile(policy Policy) (Table, []CompileWarning, error) {
 	for pattern := range overflowPatterns {
 		warnings.add("context-rule-overflow", pattern)
 	}
-	var literals []string
-	for _, rule := range pending {
-		literals = append(literals, rule.literal)
-	}
-	markUnknownSubvolumes(&table, unknownSubvolumes, anchored, mounts, scopes, literals, btrfsErr, warnings)
+	markUnknownSubvolumes(&table, unknownSubvolumes, anchored, mounts, scopes, btrfsErr, warnings)
 	overlays := make(map[uint64]bool)
 	for _, mount := range mounts {
 		if mount.FSType == "overlay" {
 			overlays[deviceID(mount)] = true
 		}
 	}
-	for _, mountpoint := range coveredMountpoints(overlays, anchored, mounts, scopes, literals) {
+	for _, mountpoint := range coveredMountpoints(overlays, anchored, mounts, scopes) {
 		warnings.add("overlay-not-covered", mountpoint)
 	}
 	if _, _, err := layoutArena(table); err != nil {
@@ -490,14 +494,6 @@ func internPattern(table *Table, index map[string]uint16, rule classifiedRule) (
 	index[rule.input.Pattern] = slot
 	table.Patterns = append(table.Patterns, pattern)
 	return slot, true, nil
-}
-
-// anchorPath is the directory whose deepest existing ancestor anchors rule.
-func anchorPath(rule classifiedRule) string {
-	if rule.recursive || rule.literal == rule.input.Pattern {
-		return rule.literal
-	}
-	return filepath.Dir(rule.literal + "x")
 }
 
 // existingDirectory returns the deepest existing directory at or above path.

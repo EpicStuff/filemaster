@@ -18,7 +18,7 @@ use filemaster_lsm_common::decision_maps::{
 	STATE_SLOTS, WALK_LIMIT,
 };
 use filemaster_lsm_common::label_maps::{
-	MAX_POLICIES, RECORD_DECISION, DECISION_DELETE, DECISION_RENAME, DECISION_LINK, DECISION_REASON_DEFAULT, DECISION_REASON_NONE,
+	MAX_POLICIES, RECORD_DECISION, DECISION_DELETE, DECISION_RENAME, DECISION_LINK, DECISION_REASON_NONE,
 	DECISION_ALLOW, DECISION_DENY, DECISION_AUDIT, DECISION_SOURCE_VALID, DECISION_TARGET_VALID, DECISION_TARGET_TEXT,
 	DECISION_TARGET_TRUNCATED,
 	DECISION_PATH_MAX, DECISION_SUPPRESS_LIMIT, DECISION_SUPPRESS_WINDOW_NS, DecisionRecord,
@@ -392,9 +392,9 @@ fn rename_once(owner: &Owner, source: kernel::Dentry, destination: kernel::Dentr
 	Some(owner.conclude(decision.finish(), true))
 }
 
-/// The engine-order combination of an operation's evaluations. An operation
-/// none of whose evaluations is covered is allowed; otherwise an uncovered
-/// evaluation takes the profile default, and the first deny decides.
+/// The engine-order combination of an operation's evaluations. An evaluation
+/// of a target outside every scope is not covered and does not take part; the
+/// first deny decides.
 struct Decision {
 	state: u32,
 	bank: u32,
@@ -403,44 +403,39 @@ struct Decision {
 	hook: u32,
 	covered: bool,
 	deny: Option<DecisionOp>,
-	covered_deny: bool,
 	deny_reason: u32,
 }
 
 impl Decision {
 	#[inline(always)]
 	fn new(state: u32, bank: u32, caller: label::Caller, audit: bool, hook: u32) -> Decision {
-		Decision { state, bank, caller, audit, hook, covered: false, deny: None, covered_deny: false, deny_reason: DECISION_REASON_NONE }
+		Decision { state, bank, caller, audit, hook, covered: false, deny: None, deny_reason: DECISION_REASON_NONE }
 	}
 
 	/// Adds one evaluation. Returns true once the verdict cannot change.
 	#[inline(always)]
 	fn side(&mut self, target: &Walk, operation: DecisionOp, kind: TargetKind, hook: u32) -> bool {
 		let side = evaluate(self.state, target, operation, kind, hook);
-		let denies = match side & 0xFF {
-			SIDE_NOT_COVERED => !nomatch(self.bank, self.caller.policy, operation, kind),
+		match side & 0xFF {
+			SIDE_NOT_COVERED => false,
 			SIDE_ALLOW => {
 				self.covered = true;
 				false
 			}
 			_ => {
 				self.covered = true;
-				self.covered_deny = true;
+				self.deny = Some(operation);
+				self.deny_reason = side >> 8;
 				true
 			}
-		};
-		if denies && self.deny.is_none() {
-			self.deny = Some(operation);
-			self.deny_reason = if side & 0xFF == SIDE_NOT_COVERED { DECISION_REASON_DEFAULT } else { side >> 8 };
 		}
-		self.covered_deny
 	}
 
 	#[inline(always)]
 	fn finish(&self) -> DecisionResult {
 		let (verdict, operation) = match self.deny {
-			Some(operation) if self.covered => (Verdict::DENY, operation),
-			_ => (Verdict::ALLOW, DecisionOp::READ),
+			Some(operation) => (Verdict::DENY, operation),
+			None => (Verdict::ALLOW, DecisionOp::READ),
 		};
 		DecisionResult {
 			verdict,
@@ -651,8 +646,8 @@ unsafe extern "C" fn walk_step(_index: u64, ctx: *mut c_void) -> i64 {
 }
 
 /// Evaluates one operation on a walked target: `SIDE_ALLOW` or `SIDE_DENY` when
-/// a rule matched or the target is in a watch scope, `SIDE_NOT_COVERED` when
-/// neither holds in any context.
+/// the target is in a watch scope (a rule or the profile default decides),
+/// `SIDE_NOT_COVERED` when it is in none in any context.
 // A subprogram (not inlined): hooks call it up to five times, and inlining it
 // would multiply the verifier's path exploration past the instruction limit.
 #[inline(never)]

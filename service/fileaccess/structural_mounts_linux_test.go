@@ -262,12 +262,12 @@ func runMountCases(t *testing.T, enforcer *bpflsm.Enforcer, cases []mountCase, r
 	var failures []string
 	for _, c := range cases {
 		snapshot := &DecisionSnapshot{DefaultAction: c.defaultAction, Write: PathRules{Rules: c.write}}
-		var watch watchRuleSnapshot
-		for _, scope := range c.scopes {
-			watch.Rules = append(watch.Rules, watchRule{Path: scope})
+		watch, err := parseWatchRules(c.scopes)
+		if err != nil {
+			t.Fatalf("%s: watch paths: %v", c.name, err)
 		}
 		table, warnings, err := bpflsm.Compile(bpflsm.Policy{
-			Scopes: scopesFromWatchRules(&watch),
+			Scopes: scopesFromWatchRules(watch),
 			Labels: []bpflsm.LabelPolicy{unidentifiedLabelPolicy(LookupResult{Snapshot: snapshot, DefaultAction: c.defaultAction})},
 		})
 		if err != nil {
@@ -303,11 +303,7 @@ func runMountCases(t *testing.T, enforcer *bpflsm.Enforcer, cases []mountCase, r
 				reference = *operation.expect
 			} else {
 				for _, path := range operation.paths {
-					_, covered := snapshot.Write.decideOperation(path, operation.op, operation.folder)
-					for _, scope := range c.scopes {
-						covered = covered || pathContains(scope, path)
-					}
-					if covered && snapshot.DecideOperation(path, operation.op, operation.folder) == VerdictDeny {
+					if snapshot.DecideInScope(path, operation.op, operation.folder, watch.matches) == VerdictDeny {
 						reference = VerdictDeny
 					}
 				}
@@ -373,7 +369,8 @@ func TestStructuralBPFUnrepresentable(t *testing.T) {
 	deep := filepath.Join(root, "deep")
 	long := filepath.Join(root, "long")
 	bad := filepath.Join(root, "bad")
-	for _, dir := range []string{over, deep, long, bad} {
+	skip := filepath.Join(over, "skip")
+	for _, dir := range []string{skip, deep, long, bad} {
 		mustMkdirAll(t, dir)
 	}
 	// Every walk step adds at least two bytes ("/" and a name), so the
@@ -393,8 +390,6 @@ func TestStructuralBPFUnrepresentable(t *testing.T) {
 	for i := range 300 {
 		rules = append(rules, PathRule{Pattern: filepath.Join(over, fmt.Sprintf("f%03d", i)), Verdict: VerdictAllow})
 	}
-	// The valid rule makes bad an object of its own, outside the overflowed
-	// contexts above it.
 	rules = append(rules, PathRule{Pattern: filepath.Join(bad, "["), Verdict: VerdictAllow}, PathRule{Pattern: filepath.Join(bad, "other"), Verdict: VerdictDeny})
 	allow, deny := VerdictAllow, VerdictDeny
 	inLeaf := func(leaf int, run func(fd int) error) func() error {
@@ -402,8 +397,10 @@ func TestStructuralBPFUnrepresentable(t *testing.T) {
 	}
 	badTarget := filepath.Join(bad, "[")
 	c := mountCase{
-		name:          "unrepresentable",
-		scopes:        []string{root},
+		name: "unrepresentable",
+		// The scope at bad makes it an object of its own, outside the
+		// overflowed contexts above it. skip is excluded from the scope.
+		scopes:        []string{bad, "- " + skip, root},
 		defaultAction: profile.DefaultActionPermit,
 		write:         rules,
 		warnings: map[string][]string{
@@ -424,6 +421,13 @@ func TestStructuralBPFUnrepresentable(t *testing.T) {
 		operations: []mountOperation{
 			{name: "unlink in an overflowed context (rule allows)", expect: &deny, run: func() error {
 				path := filepath.Join(over, "f001")
+				if err := createIfAbsent(path); err != nil {
+					return err
+				}
+				return os.Remove(path)
+			}},
+			{name: "unlink in an overflowed context, excluded from the scope", paths: []string{filepath.Join(skip, "f001")}, op: DecisionDelete, run: func() error {
+				path := filepath.Join(skip, "f001")
 				if err := createIfAbsent(path); err != nil {
 					return err
 				}

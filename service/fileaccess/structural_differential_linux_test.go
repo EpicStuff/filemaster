@@ -18,7 +18,7 @@ import (
 )
 
 // TestStructuralBPFDifferential generates random policies and operations and
-// requires the kernel verdict to equal DecideOperation/DecideRename/
+// requires the kernel verdict to equal DecideInScope/DecideRename/
 // DecideHardLink/DecideSymlink for every one. It loads BPF LSM and mutates a real
 // filesystem, so the VM gate enables it with FM_BPF_DIFFERENTIAL=1 and selects
 // the filesystem with FM_BPF_DIFFERENTIAL_ROOT.
@@ -66,9 +66,11 @@ func runDifferentialSeed(t *testing.T, seed int64, defaultAction uint8, perOpera
 	scopeA := filepath.Join(root, "scope-a")
 	scopeB := filepath.Join(root, "scope-b")
 	outside := filepath.Join(root, "outside")
-	for _, dir := range []string{scopeA, scopeB, outside} {
+	excluded := filepath.Join(scopeA, "excluded")
+	for _, dir := range []string{scopeA, scopeB, outside, excluded} {
 		mustMkdirAll(t, dir)
 	}
+	watch := &watchRuleSnapshot{Rules: []watchRule{{Path: excluded, Exclude: true}, {Path: scopeA}, {Path: scopeB}}}
 
 	snapshot := generateSnapshot(random, scopeA, scopeB, outside, defaultAction)
 
@@ -81,14 +83,14 @@ func runDifferentialSeed(t *testing.T, seed int64, defaultAction uint8, perOpera
 	}
 	var operations []differentialOperation
 	for len(operations) < 500 {
-		operations = append(operations, generateOperations(t, random, root, scopeA, scopeB, outside, snapshot)...)
+		operations = append(operations, generateOperations(t, random, root, scopeA, scopeB, outside, snapshot, watch)...)
 	}
 	// Pre-create the nested mountpoint (a hooked mkdir) before enforcing.
 	nested := filepath.Join(scopeA, "nested-mount")
 	mustMkdirAll(t, nested)
 
 	policy := bpflsm.Policy{
-		Scopes: scopesFromWatchRules(&watchRuleSnapshot{Rules: []watchRule{{Path: scopeA}, {Path: scopeB}}}),
+		Scopes: scopesFromWatchRules(watch),
 		Labels: []bpflsm.LabelPolicy{unidentifiedLabelPolicy(LookupResult{Snapshot: snapshot, DefaultAction: defaultAction})},
 	}
 	table, warnings, err := bpflsm.Compile(policy)
@@ -138,7 +140,7 @@ func runDifferentialSeed(t *testing.T, seed int64, defaultAction uint8, perOpera
 	}
 	operations = append(operations, differentialOperation{
 		name:      "nested-mount-unlink",
-		reference: snapshot.DecideOperation(nestedFile, DecisionDelete, false),
+		reference: snapshot.DecideInScope(nestedFile, DecisionDelete, false, watch.matches),
 		run:       func() error { return os.Remove(nestedFile) },
 	})
 
@@ -201,6 +203,7 @@ func generateSnapshot(random *rand.Rand, scopeA, scopeB, outside string, default
 			filepath.Join(scopeA, "future", "**"),
 			filepath.Join(scopeA, "future-exact"),
 			filepath.Join(outside, "**"),
+			filepath.Join(scopeA, "excluded", "**"),
 		}
 		random.Shuffle(len(patterns), func(i, j int) { patterns[i], patterns[j] = patterns[j], patterns[i] })
 		rules := make([]PathRule, 0, len(patterns))
@@ -227,10 +230,11 @@ type differentialOperation struct {
 	run       func() error
 }
 
-func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, outside string, snapshot *DecisionSnapshot) []differentialOperation {
+func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, outside string, snapshot *DecisionSnapshot, watch *watchRuleSnapshot) []differentialOperation {
 	t.Helper()
 	liveA := filepath.Join(scopeA, "live")
 	liveB := filepath.Join(scopeB, "live")
+	excluded := filepath.Join(scopeA, "excluded")
 	tag := strconv.Itoa(random.Int())
 
 	// Materialize the current matches a few generated rules anchor on.
@@ -257,12 +261,14 @@ func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, o
 	deepFile := filepath.Join(deepRoot, "leaf")
 	mustWriteFile(t, deepFile)
 
-	ref := func(path string, op DecisionOp, isDir bool) Verdict { return snapshot.DecideOperation(path, op, isDir) }
+	ref := func(path string, op DecisionOp, isDir bool) Verdict {
+		return snapshot.DecideInScope(path, op, isDir, watch.matches)
+	}
 	rename := func(source, destination string, sourceDir, destDir, destExists bool) Verdict {
-		return snapshot.DecideRename(RenameRequest{Source: source, SourceIsDir: sourceDir, Dest: destination, DestIsDir: destDir, DestExists: destExists})
+		return snapshot.DecideRename(RenameRequest{Source: source, SourceIsDir: sourceDir, Dest: destination, DestIsDir: destDir, DestExists: destExists}, watch.matches)
 	}
 	link := func(source, destination string, destExists bool) Verdict {
-		return snapshot.DecideHardLink(LinkRequest{Source: source, Dest: destination, DestExists: destExists})
+		return snapshot.DecideHardLink(LinkRequest{Source: source, Dest: destination, DestExists: destExists}, watch.matches)
 	}
 
 	unlinkTarget := file(liveA, "unlink-")
@@ -306,6 +312,21 @@ func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, o
 	noreplaceExistingSrc := file(liveA, "noreplace-existing-src-")
 	noreplaceExistingDest := file(liveB, "noreplace-existing-dst-")
 
+	// Outside every scope (an unwatched folder and an excluded one inside a
+	// scope) nothing is decided, although the generated outside/** rules match
+	// there: a hard link and renames there are allowed, like a profile that has
+	// only Read rules on an unwatched folder.
+	linkOutsideSrc := file(outside, "link-outside-src-")
+	linkOutsideDest := filepath.Join(outside, "link-outside-dst-"+tag)
+	renameOutsideSrc := file(outside, "rename-outside-src-")
+	renameOutsideDest := file(outside, "rename-outside-dst-")
+	excludedUnlink := file(excluded, "unlink-")
+	excludedLinkSrc := file(excluded, "link-src-")
+	excludedLinkDest := filepath.Join(excluded, "link-dst-"+tag)
+	excludedRenameSrc := file(excluded, "rename-src-")
+	excludedRenameDest := filepath.Join(liveA, "from-excluded-"+tag)
+	excludedMkdir := filepath.Join(excluded, "mkdir-"+tag)
+
 	exchange := func(left, right string, leftDir, rightDir bool) Verdict {
 		if rename(left, right, leftDir, rightDir, true) == VerdictDeny {
 			return VerdictDeny
@@ -318,7 +339,9 @@ func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, o
 	// inode_mknod, symlinks through inode_symlink: each is a Create of a file
 	// entry, and a symlink's target (relative, absolute or dangling) is never
 	// decided.
-	symlink := func(destination string) Verdict { return snapshot.DecideSymlink(LinkRequest{Dest: destination}) }
+	symlink := func(destination string) Verdict {
+		return snapshot.DecideSymlink(LinkRequest{Dest: destination}, watch.matches)
+	}
 	fifoA := filepath.Join(liveA, "fifo-"+tag)
 	fifoGlob := filepath.Join(liveA, "a-fifo-"+tag)
 	fifoTxt := filepath.Join(liveB, "fifo-"+tag+".txt")
@@ -381,6 +404,12 @@ func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, o
 			defer mustWriteFile(t, filepath.Join(liveA, "exact"))
 			return os.Remove(filepath.Join(liveA, "exact"))
 		}},
+		{"link-outside", link(linkOutsideSrc, linkOutsideDest, false), func() error { return os.Link(linkOutsideSrc, linkOutsideDest) }},
+		{"rename-over-outside", rename(renameOutsideSrc, renameOutsideDest, false, false, true), func() error { return os.Rename(renameOutsideSrc, renameOutsideDest) }},
+		{"unlink-excluded", ref(excludedUnlink, DecisionDelete, false), func() error { return os.Remove(excludedUnlink) }},
+		{"mkdir-excluded", ref(excludedMkdir, DecisionCreate, true), func() error { return os.Mkdir(excludedMkdir, 0o700) }},
+		{"link-excluded", link(excludedLinkSrc, excludedLinkDest, false), func() error { return os.Link(excludedLinkSrc, excludedLinkDest) }},
+		{"rename-from-excluded", rename(excludedRenameSrc, excludedRenameDest, false, false, false), func() error { return os.Rename(excludedRenameSrc, excludedRenameDest) }},
 		{"mkfifo", ref(fifoA, DecisionCreate, false), func() error { return unix.Mkfifo(fifoA, 0o600) }},
 		{"mkfifo-glob", ref(fifoGlob, DecisionCreate, false), func() error { return unix.Mkfifo(fifoGlob, 0o600) }},
 		{"mkfifo-txt", ref(fifoTxt, DecisionCreate, false), func() error { return unix.Mkfifo(fifoTxt, 0o600) }},

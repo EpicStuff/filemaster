@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/cilium/ebpf/btf"
@@ -125,10 +124,10 @@ func objectSubvolume(fsType string, st pathStat, btrfs btrfsLayout) (subvol uint
 // unknown deny: its inode numbers may repeat across subvolumes, so a walk may
 // stop at an object of another subvolume and take its path. The warning names
 // the mounts and why btrfs's layout was not read, if it was not.
-func markUnknownSubvolumes(table *Table, unknown, anchored map[uint64]bool, mounts []*mountinfo.Info, scopes []ScopeInput, literals []string, btrfsErr error, warnings warningSet) {
-	mountpoints := coveredMountpoints(unknown, anchored, mounts, scopes, literals)
+func markUnknownSubvolumes(table *Table, unknown, anchored map[uint64]bool, mounts []*mountinfo.Info, scopes []ScopeInput, btrfsErr error, warnings warningSet) {
+	mountpoints := coveredMountpoints(unknown, anchored, mounts, scopes)
 	for _, object := range table.Objects {
-		if !unknown[object.File.dev] || !coveredDevice(object.File.dev, anchored, mounts, scopes, literals) {
+		if !unknown[object.File.dev] || !coveredDevice(object.File.dev, anchored, mounts, scopes) {
 			continue
 		}
 		for index := object.FirstContext; index < object.FirstContext+object.ContextCount; index++ {
@@ -144,11 +143,11 @@ func markUnknownSubvolumes(table *Table, unknown, anchored map[uint64]bool, moun
 }
 
 // coveredMountpoints lists, sorted and with their filesystem type, the mounts
-// of the superblocks in devs that a scope or rule can decide a target on.
-func coveredMountpoints(devs, anchored map[uint64]bool, mounts []*mountinfo.Info, scopes []ScopeInput, literals []string) []string {
+// of the superblocks in devs that a scope can decide a target on.
+func coveredMountpoints(devs, anchored map[uint64]bool, mounts []*mountinfo.Info, scopes []ScopeInput) []string {
 	var mountpoints []string
 	for _, mount := range mounts {
-		if dev := deviceID(mount); devs[dev] && coveredDevice(dev, anchored, mounts, scopes, literals) {
+		if dev := deviceID(mount); devs[dev] && coveredDevice(dev, anchored, mounts, scopes) {
 			mountpoints = append(mountpoints, mount.Mountpoint+" ("+mount.FSType+")")
 		}
 	}
@@ -156,10 +155,9 @@ func coveredMountpoints(devs, anchored map[uint64]bool, mounts []*mountinfo.Info
 	return mountpoints
 }
 
-// coveredDevice reports whether a scope or rule can decide a target on the
-// superblock dev: one anchors on it (anchored), or one of its mounts lies
-// inside a scope or below a rule's literal prefix.
-func coveredDevice(dev uint64, anchored map[uint64]bool, mounts []*mountinfo.Info, scopes []ScopeInput, literals []string) bool {
+// coveredDevice reports whether a scope can decide a target on the superblock
+// dev: one anchors on it (anchored), or one of its mounts lies inside a scope.
+func coveredDevice(dev uint64, anchored map[uint64]bool, mounts []*mountinfo.Info, scopes []ScopeInput) bool {
 	if anchored[dev] {
 		return true
 	}
@@ -169,11 +167,6 @@ func coveredDevice(dev uint64, anchored map[uint64]bool, mounts []*mountinfo.Inf
 		}
 		for _, scope := range scopes {
 			if !scope.Exclude && pathContains(scope.Path, mount.Mountpoint) {
-				return true
-			}
-		}
-		for _, literal := range literals {
-			if strings.HasPrefix(mount.Mountpoint, literal) {
 				return true
 			}
 		}

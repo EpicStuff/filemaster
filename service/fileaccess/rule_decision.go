@@ -186,6 +186,16 @@ func (rs PathRules) decideOperation(path string, op DecisionOp, isDir bool) (Ver
 	return 0, false
 }
 
+// DecideInScope is DecideOperation for a structural operation, which is
+// decided only inside a watch scope: a path inScope rejects is allowed without
+// consulting any rule, as fanotify allows every event outside its active scopes.
+func (s *DecisionSnapshot) DecideInScope(path string, op DecisionOp, isDir bool, inScope func(string) bool) Verdict {
+	if !inScope(path) {
+		return VerdictAllow
+	}
+	return s.DecideOperation(path, op, isDir)
+}
+
 // RenameRequest bundles the two decisions a rename or move needs. Future
 // backend only.
 type RenameRequest struct {
@@ -200,24 +210,25 @@ type RenameRequest struct {
 
 // DecideRename evaluates a rename or move as Source Delete AND Destination
 // Create-or-Write; both must allow, and the first denying decision determines
-// the result.
+// the result. Each side is decided only if it is in a watch scope, so a rename
+// with neither side in scope is allowed.
 //
 // When the destination already exists the rename replaces it: this destroys the
 // existing object's data and rewrites the folder entry, so it needs both the
 // existing object's own Write (a parent-folder Allow does not by itself
 // authorize destroying it) and the folder-entry replacement (a parent-folder
 // Deny can still block it).
-func (s *DecisionSnapshot) DecideRename(req RenameRequest) Verdict {
-	if s.DecideOperation(req.Source, DecisionDelete, req.SourceIsDir) == VerdictDeny {
+func (s *DecisionSnapshot) DecideRename(req RenameRequest, inScope func(string) bool) Verdict {
+	if s.DecideInScope(req.Source, DecisionDelete, req.SourceIsDir, inScope) == VerdictDeny {
 		return VerdictDeny
 	}
 	if !req.DestExists {
-		return s.DecideOperation(req.Dest, DecisionCreate, req.DestIsDir)
+		return s.DecideInScope(req.Dest, DecisionCreate, req.DestIsDir, inScope)
 	}
-	if s.DecideOperation(req.Dest, DecisionWrite, req.DestIsDir) == VerdictDeny {
+	if s.DecideInScope(req.Dest, DecisionWrite, req.DestIsDir, inScope) == VerdictDeny {
 		return VerdictDeny
 	}
-	return s.DecideOperation(req.Dest, DecisionDelete, req.DestIsDir)
+	return s.DecideInScope(req.Dest, DecisionDelete, req.DestIsDir, inScope)
 }
 
 // LinkRequest bundles the decisions creating a link needs. Future backend only.
@@ -233,14 +244,15 @@ type LinkRequest struct {
 // for the same inode, so the new name grants every access the source already
 // has: it requires Source Read AND Write AND Execute, plus Destination Create
 // (and Destination Delete first if the destination already exists). The first
-// denying decision determines the result.
-func (s *DecisionSnapshot) DecideHardLink(req LinkRequest) Verdict {
+// denying decision determines the result. Each side is decided only if it is
+// in a watch scope.
+func (s *DecisionSnapshot) DecideHardLink(req LinkRequest, inScope func(string) bool) Verdict {
 	for _, op := range [...]DecisionOp{DecisionRead, DecisionWrite, DecisionExecute} {
-		if s.DecideOperation(req.Source, op, req.SourceIsDir) == VerdictDeny {
+		if s.DecideInScope(req.Source, op, req.SourceIsDir, inScope) == VerdictDeny {
 			return VerdictDeny
 		}
 	}
-	return s.decideDestinationCreate(req)
+	return s.decideDestinationCreate(req, inScope)
 }
 
 // DecideSymlink evaluates creating a symbolic link. A symlink is an independent
@@ -248,17 +260,17 @@ func (s *DecisionSnapshot) DecideHardLink(req LinkRequest) Verdict {
 // target and needs only Destination Create (and Destination Delete first if the
 // destination already exists). Access through the symlink is governed later by
 // the rules for the resolved target path.
-func (s *DecisionSnapshot) DecideSymlink(req LinkRequest) Verdict {
-	return s.decideDestinationCreate(req)
+func (s *DecisionSnapshot) DecideSymlink(req LinkRequest, inScope func(string) bool) Verdict {
+	return s.decideDestinationCreate(req, inScope)
 }
 
 // decideDestinationCreate is the shared destination decision for links: Delete
 // the existing destination first if present, then Create.
-func (s *DecisionSnapshot) decideDestinationCreate(req LinkRequest) Verdict {
+func (s *DecisionSnapshot) decideDestinationCreate(req LinkRequest, inScope func(string) bool) Verdict {
 	if req.DestExists {
-		if s.DecideOperation(req.Dest, DecisionDelete, req.DestIsDir) == VerdictDeny {
+		if s.DecideInScope(req.Dest, DecisionDelete, req.DestIsDir, inScope) == VerdictDeny {
 			return VerdictDeny
 		}
 	}
-	return s.DecideOperation(req.Dest, DecisionCreate, req.DestIsDir)
+	return s.DecideInScope(req.Dest, DecisionCreate, req.DestIsDir, inScope)
 }
