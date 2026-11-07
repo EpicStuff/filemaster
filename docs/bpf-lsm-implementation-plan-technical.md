@@ -1340,6 +1340,12 @@ was denied hard links and renames under unwatched `/run`: `hard_link_once`
 evaluates the source for Read, Write and Execute, the Read rule made the
 operation covered, and Write fell to the block default.
 
+This holds for every operation the backend decides: unlink, rmdir, mkdir,
+mknod, symlink, hard link and rename all go through the same evaluation.
+The exec hooks (`bprm_check_security`, `bprm_committed_creds`) only label and
+never deny, and opens are decided by fanotify, which also allows everything
+outside an active scope.
+
 - **Kernel.** In each context the matcher checks the scopes first (`E_SCOPE`
   right after the context is set up) and runs the rule list only when the
   first containing scope is an inclusion. With no matching rule the profile
@@ -1364,10 +1370,15 @@ operation covered, and Write fell to the block default.
   the in-scope side of a move across the boundary decided) and
   `TestCompileBuildsContextsForScopes` (an out-of-scope rule anchors nothing
   and is in no rule list).
-- Differential: 8 × 529 operations per filesystem. New: a hard link and a
-  replacing rename outside every scope, and an unlink, mkdir, hard link and
-  rename out of a folder excluded from the scope (`- scope-a/excluded`, with
-  an `excluded/**` rule in every list). All are expected allowed and are.
+- Differential: 8 × 501 operations per filesystem (4,008). New: unlink,
+  rmdir, mkdir, a hard link and a replacing rename outside every scope, and
+  unlink, rmdir, mkdir, mkfifo, symlink, hard link and a rename out of a
+  folder excluded from the scope (`- scope-a/excluded`, with an
+  `excluded/**` rule in every list). Together with the existing FIFO, socket
+  and symlink cases outside the scopes, every deciding hook is checked
+  outside every scope, and each such case is allowed (the rename out of the
+  excluded folder is decided on its in-scope destination). 0 mismatches on
+  btrfs, ext4 and tmpfs on Arch 7.1.9 and Debian 6.12.107.
 - Unrepresentable: an unlink in a folder excluded from the scope, under a
   context whose rule list overflowed, is allowed; the in-scope one still
   denies. The rejected-pattern case now gets its own object from a scope
@@ -1392,8 +1403,8 @@ Verified instructions (labelling programs unchanged):
 
 **Regression set** (as in §2.8): it passed on Arch 7.1.9 (lazy preemption)
 and on Debian 6.12.107, both voluntary and `preempt=full` (label wait on, its
-self-test passed). The differential had 0 mismatches in 4,232 operations on
-each of btrfs, ext4 and tmpfs on all three; the mount, unrepresentable and
+self-test passed). The differential (then 8 × 529) had 0 mismatches on each
+of btrfs, ext4 and tmpfs on all three; the mount, unrepresentable and
 subvolume tests, live enforce/off and every `bpflsm-live` matrix passed.
 
 | Kernel | Operations | Wrong allows | Wrong denials | `state-contention` | Exec stress |

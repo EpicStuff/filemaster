@@ -326,6 +326,12 @@ func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, o
 	excludedRenameSrc := file(excluded, "rename-src-")
 	excludedRenameDest := filepath.Join(liveA, "from-excluded-"+tag)
 	excludedMkdir := filepath.Join(excluded, "mkdir-"+tag)
+	unlinkOutside := file(outside, "unlink-")
+	rmdirOutside := dir(outside, "rmdir-")
+	mkdirOutside := filepath.Join(outside, "mkdir-"+tag)
+	rmdirExcluded := dir(excluded, "rmdir-")
+	mknodExcluded := filepath.Join(excluded, "fifo-"+tag)
+	symlinkExcluded := filepath.Join(excluded, "symlink-"+tag)
 
 	exchange := func(left, right string, leftDir, rightDir bool) Verdict {
 		if rename(left, right, leftDir, rightDir, true) == VerdictDeny {
@@ -406,6 +412,12 @@ func generateOperations(t *testing.T, random *rand.Rand, root, scopeA, scopeB, o
 		}},
 		{"link-outside", link(linkOutsideSrc, linkOutsideDest, false), func() error { return os.Link(linkOutsideSrc, linkOutsideDest) }},
 		{"rename-over-outside", rename(renameOutsideSrc, renameOutsideDest, false, false, true), func() error { return os.Rename(renameOutsideSrc, renameOutsideDest) }},
+		{"unlink-outside", ref(unlinkOutside, DecisionDelete, false), func() error { return os.Remove(unlinkOutside) }},
+		{"rmdir-outside", ref(rmdirOutside, DecisionDelete, true), func() error { return os.Remove(rmdirOutside) }},
+		{"mkdir-outside", ref(mkdirOutside, DecisionCreate, true), func() error { return os.Mkdir(mkdirOutside, 0o700) }},
+		{"rmdir-excluded", ref(rmdirExcluded, DecisionDelete, true), func() error { return os.Remove(rmdirExcluded) }},
+		{"mkfifo-excluded", ref(mknodExcluded, DecisionCreate, false), func() error { return unix.Mkfifo(mknodExcluded, 0o600) }},
+		{"symlink-excluded", symlink(symlinkExcluded), func() error { return os.Symlink("x", symlinkExcluded) }},
 		{"unlink-excluded", ref(excludedUnlink, DecisionDelete, false), func() error { return os.Remove(excludedUnlink) }},
 		{"mkdir-excluded", ref(excludedMkdir, DecisionCreate, true), func() error { return os.Mkdir(excludedMkdir, 0o700) }},
 		{"link-excluded", link(excludedLinkSrc, excludedLinkDest, false), func() error { return os.Link(excludedLinkSrc, excludedLinkDest) }},
