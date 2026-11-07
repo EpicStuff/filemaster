@@ -79,7 +79,19 @@ func TestSystemdSpecialProfileSeedsRulesWithoutDefaultAction(t *testing.T) {
 	if got := p.DefaultAction(); got != DefaultActionNotSet {
 		t.Fatalf("default action = %d, want unset", got)
 	}
-	want := systemdFileAccessRules()
+	want := []string{
+		"+ /run/systemd/**",
+		"+ /run/dbus/**",
+		"+ /var/lib/systemd/**",
+		"+ /etc/systemd/**",
+		"+ /usr/lib/systemd/**",
+		"+ /lib/systemd/**",
+		"+ /usr/lib64/systemd/**",
+		"+ /lib64/systemd/**",
+		"+ /proc/**",
+		"+ /sys/**",
+		"+ /dev/**",
+	}
 	for name, got := range map[string][]string{
 		"read": p.GetFileAccessReadRules(),
 		"exec": p.GetFileAccessExecRules(),
@@ -91,7 +103,6 @@ func TestSystemdSpecialProfileSeedsRulesWithoutDefaultAction(t *testing.T) {
 	if got := p.GetFileAccessWriteRules(); len(got) != 0 {
 		t.Fatalf("inactive systemd write seed rules = %#v, want none", got)
 	}
-
 }
 
 func TestFilemasterAppSpecialProfilesSeedRulesWithoutDefaultAction(t *testing.T) {
@@ -169,5 +180,67 @@ func TestSeededRuleDefaults(t *testing.T) {
 
 	if got := SeededRuleDefaults("_some-regular-app", "/usr/bin/app"); got != nil {
 		t.Errorf("unseeded profile defaults = %#v, want nil (inherits global)", got)
+	}
+}
+
+// TestSeededRuleExpansion covers placeholder expansion across several homes and
+// the dropping of rules whose placeholders are unset or resolve to "/".
+func TestSeededRuleExpansion(t *testing.T) {
+	requireProfileConfiguration(t)
+	previousHomes := userHomeDirsFunc
+	userHomeDirsFunc = func() []string { return []string{"/root", "/home/a"} }
+	SetFilemasterSeedPaths("/", "/var/lib/filemaster/")
+	t.Cleanup(func() {
+		userHomeDirsFunc = previousHomes
+		SetFilemasterSeedPaths("", "")
+	})
+
+	seed := SeededRuleDefaults(PortmasterAppProfileID, "/filemaster")
+	want := []string{
+		"+ /filemaster",
+		"+ /var/lib/filemaster/**",
+		"+ /root/.config/filemaster/**",
+		"+ /home/a/.config/filemaster/**",
+		"+ /root/.local/share/filemaster/**",
+		"+ /home/a/.local/share/filemaster/**",
+		"+ /root/.cache/filemaster/**",
+		"+ /home/a/.cache/filemaster/**",
+		"+ /root/.cache/mesa_shader_cache/**",
+		"+ /home/a/.cache/mesa_shader_cache/**",
+		"+ /root/.cache/dconf/**",
+		"+ /home/a/.cache/dconf/**",
+	}
+	if got := seed[CfgOptionFileAccessReadRulesKey]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("read seed rules = %#v, want %#v", got, want)
+	}
+	if got := seed[CfgOptionFileAccessExecRulesKey]; !reflect.DeepEqual(got, []string{"+ /filemaster"}) {
+		t.Fatalf("exec seed rules = %#v, want only the executable", got)
+	}
+}
+
+// TestRuleSeedsUseKnownKeysAndPlaceholders keeps typos in seeds.yaml from
+// silently dropping rules or seeding an option nothing reads.
+func TestRuleSeedsUseKnownKeysAndPlaceholders(t *testing.T) {
+	keys := map[string]bool{CfgOptionFileAccessReadRulesKey: true, CfgOptionFileAccessExecRulesKey: true}
+	placeholders := map[string]bool{"{exe}": true, "{exedir}": true, "{bindir}": true, "{datadir}": true, "{home}": true}
+	for id, seed := range ruleSeeds {
+		if !strings.HasPrefix(id, "_") {
+			t.Errorf("seed %q is not a special profile ID", id)
+		}
+		for key, rules := range seed {
+			if !keys[key] {
+				t.Errorf("%s: unknown rule option %q", id, key)
+			}
+			for _, rule := range rules {
+				for _, name := range seedPlaceholder.FindAllString(rule, -1) {
+					if !placeholders[name] {
+						t.Errorf("%s %s: unknown placeholder %s in %q", id, key, name, rule)
+					}
+				}
+				if strings.ContainsAny(seedPlaceholder.ReplaceAllString(rule, ""), "{}") {
+					t.Errorf("%s %s: malformed placeholder in %q", id, key, rule)
+				}
+			}
+		}
 	}
 }

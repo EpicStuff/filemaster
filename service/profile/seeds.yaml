@@ -1,0 +1,56 @@
+# Seeded file-access rules of the special profiles, keyed by profile ID and then
+# by config option. They are applied when a special profile is created and by
+# the UI "reset to default" action. Profiles not listed here have no seed, so
+# their reset clears the per-app override and inherits the global rules.
+#
+# Placeholders:
+#   {exe}      the profile's executable (presentation) path
+#   {exedir}   the directory containing {exe}
+#   {bindir}   Filemaster's binary directory
+#   {datadir}  Filemaster's data directory
+#   {home}     each user home under /home and /root; the rule repeats per home.
+#              Rule patterns match literal prefixes, so per-user paths cannot be
+#              a wildcard and have to be enumerated.
+# A rule is dropped when a placeholder in it has no value or resolves to "/",
+# and duplicate rules are kept once.
+
+_systemd:
+  fileaccess/readRules: &systemd
+    - + /run/systemd/**
+    - + /run/dbus/**
+    - + /var/lib/systemd/**
+    - + /etc/systemd/**
+    - + /usr/lib/systemd/**
+    - + /lib/systemd/**
+    - + /usr/lib64/systemd/**
+    - + /lib64/systemd/**
+    - + /proc/**
+    - + /sys/**
+    - + /dev/**
+  fileaccess/execRules: *systemd
+
+# Filemaster's own profiles. Execute is limited to the executable and the binary
+# directory.
+_portmaster: &filemaster
+  fileaccess/readRules:
+    - + {exe}
+    - + {exedir}/**
+    - + {bindir}/**
+    - + {datadir}/**
+    # The desktop's runtime state. Without it the desktop blocks on its own
+    # storage in prompt mode: the prompt that would decide the access is
+    # rendered by the process the access is blocking. WebKitGTK derives its
+    # directory names from the binary name, Tauri from the bundle identifier.
+    - + {home}/.config/filemaster/**       # window state
+    - + {home}/.local/share/filemaster/**  # mediakeys, storage, WebKit HSTS store
+    - + {home}/.cache/filemaster/**        # WebKitCache, CacheStorage
+    # Shared GTK/GPU runtime caches. Not Filemaster's, but the desktop cannot
+    # render without them, and a prompt for them cannot be answered.
+    - + {home}/.cache/mesa_shader_cache/**
+    - + {home}/.cache/dconf/**
+  fileaccess/execRules:
+    - + {exe}
+    - + {exedir}/**
+    - + {bindir}/**
+_portmaster-app: *filemaster
+_portmaster-notifier: *filemaster
