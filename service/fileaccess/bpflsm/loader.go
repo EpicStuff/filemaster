@@ -4,7 +4,6 @@ package bpflsm
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -66,7 +65,7 @@ func probe(kernel *btf.Spec) (problems []string, missingHooks map[string]string)
 }
 
 // loadSpec parses the embedded object and writes the running kernel's struct
-// offsets into its OFFSETS global, as raw .rodata bytes.
+// offsets into its OFFSETS global.
 func loadSpec(object []byte, kernel *btf.Spec) (*ebpf.CollectionSpec, error) {
 	if len(object) == 0 {
 		return nil, errors.New("no BPF object is embedded in this build")
@@ -118,27 +117,19 @@ func loadSpec(object []byte, kernel *btf.Spec) (*ebpf.CollectionSpec, error) {
 	if !ok {
 		return nil, errors.New("BPF object has no OFFSETS variable")
 	}
-	rodata, ok := spec.Maps[".rodata"]
-	if !ok || len(rodata.Contents) == 0 {
-		return nil, errors.New("BPF object has no .rodata contents")
-	}
-	data, ok := rodata.Contents[0].Value.([]byte)
-	if !ok {
-		return nil, fmt.Errorf("BPF .rodata has unexpected value type %T", rodata.Contents[0].Value)
-	}
 	if int(variable.Size()) != 4*len(fields) {
 		return nil, fmt.Errorf("OFFSETS is %d bytes, loader writes %d", variable.Size(), 4*len(fields))
 	}
+	offsets := make([]uint32, len(fields))
 	for index, field := range fields {
 		offset, err := memberOffset(kernel, field.structName, field.path...)
 		if err != nil {
 			return nil, err
 		}
-		start := int(variable.Offset()) + index*4
-		if start+4 > len(data) {
-			return nil, fmt.Errorf("OFFSETS member %d exceeds .rodata (%d bytes)", index, len(data))
-		}
-		binary.LittleEndian.PutUint32(data[start:], offset)
+		offsets[index] = offset
+	}
+	if err := variable.Set(offsets); err != nil {
+		return nil, fmt.Errorf("write OFFSETS: %w", err)
 	}
 	return spec, nil
 }

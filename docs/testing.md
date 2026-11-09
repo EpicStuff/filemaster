@@ -155,7 +155,12 @@ process's mount namespace, so cleanup failure cannot leave a host mount marked.
 ## BPF LSM structural enforcement (VM)
 
 The structural BPF LSM tests need root and a kernel with `bpf` in its LSM
-list, so they run in the dev VM (`vmctl`), not on the host. Build the test
+list, so they run in the dev VM (`vmctl`), not on the host. Run them on both
+VM kernels: stock Arch `7.2.14-arch1-1` (the default) and Debian 13's
+`6.12.107+deb13-amd64` (`vmctl kernel linux-debian`). 7.1 is no longer
+tested. `TestABImanifestMatchesGoLayout` reads the manifest from its
+build-time path, so the guest's `/root/filemaster/bpf` is a symlink to
+`/mnt/share/filemaster/bpf`; a stale copy there fails that test. Build the test
 binaries on the host with `make bpf`, then `go test -c` for
 `./service/fileaccess` and `./service/fileaccess/bpflsm`, and `go build` for
 `./cmds/bpflsm-live` and `./cmds/portmaster-core`. Use

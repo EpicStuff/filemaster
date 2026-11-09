@@ -113,8 +113,9 @@ The 2-line gate patch (`clamped()` R0 fix, plus `#[inline(always)]` on
 
 ### 2.3 Go loader (`bpflsm/loader.go`, `abi.go`)
 
-Pattern from `scratchpad/spike2/main.go` (cilium/ebpf v0.20.0, already a
-direct dependency in `go.mod:15`).
+Pattern from `scratchpad/spike2/main.go` (cilium/ebpf v0.20.0 then; now
+v0.22.0, because v0.20.0 rejects Linux 7.2's longer `.BTF` header with
+"header contains non-zero trailer" and so reported BPF LSM unavailable).
 
 1. **Probe.**
    - `bpf` is listed in `/sys/kernel/security/lsm`.
@@ -125,9 +126,12 @@ direct dependency in `go.mod:15`).
    Each failure becomes a `DegradedWarning` (`diagnostics_linux.go:23`) naming
    exactly which operations are unprotected (test requirement BPF-4).
 2. **Offsets.** Fill the `OFFSETS` `.rodata` global from vmlinux BTF using
-   `cilium/ebpf/btf`. Cordon's object has no BTF, so the spike wrote `.rodata`
-   bytes directly, because `VariableSpec.Set` refuses. Cordon's `btf.rs`
-   (235 lines) becomes about 40–80 lines of Go.
+   `cilium/ebpf/btf`. Under v0.20.0 the spike wrote `.rodata` bytes directly,
+   because `VariableSpec.Set` refused. v0.22.0 rebuilds `.rodata` from the
+   variable specs at load, so raw bytes would be overwritten; the loader now
+   calls `VariableSpec.Set`, and `TestLoadEmbeddedObject` reads the loaded
+   `.rodata` back to check the kernel holds the computed offsets. Cordon's
+   `btf.rs` (235 lines) becomes about 40–80 lines of Go.
 3. **Load and attach.** Order: load → seed bank 0 → attach the five `lsm/*`
    programs plus the labelling programs → self-test (§2.5) → pin → sweep older
    generations. This is Cordon's handover order (STATUS.md, M5).
@@ -1416,11 +1420,18 @@ subvolume tests, live enforce/off and every `bpflsm-live` matrix passed.
 ## 3. Milestones
 
 Each milestone is one coherent commit with a VM-observed exit test (CLAUDE.md
-"test before commit"), on both of the VM's kernels, stock Arch `7.1.9-arch1-2`
-and Debian 13's `6.12.107+deb13-amd64` (the dev host's kernel), using both
-tmpfs and btrfs. The stock Arch 7.1 kernel ships BPF LSM
-active, BTF and fanotify permission events, so the patched
-`7.1.0-filemaster-p1` kernel (built only for the kernel-hook prompt
+"test before commit"), on both of the VM's kernels, using both tmpfs and
+btrfs. M0–M6 were observed on stock Arch `7.1.9-arch1-2` and Debian 13's
+`6.12.107+deb13-amd64` (the dev host's kernel). Since 2026-11-09 the Arch
+kernel is `7.2.14-arch1-1` and 7.1 is no longer tested: a 7.2 user found
+that cilium/ebpf v0.20.0 could not parse 7.2's BTF header. After the
+upgrade to v0.22.0 the full regression set passed on 7.2 and Debian 6.12
+(differential 4,008 cases, 0 mismatches on tmpfs, btrfs and ext4). One
+difference, from a single run: 7.2's contention stress counted
+fail-closed 500 and state-contention 900, about 3× the 7.1 figures, still
+with 0 fail-open. The stock Arch
+kernel ships BPF LSM active, BTF and fanotify permission events, so the
+patched `7.1.0-filemaster-p1` kernel (built only for the kernel-hook prompt
 experiment) is not needed for this plan.
 
 M1 exit evidence: the `bpflsm` load and lifecycle tests passed on 6.18 and

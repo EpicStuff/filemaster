@@ -3,7 +3,9 @@
 package bpflsm
 
 import (
+	"bytes"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,9 +18,14 @@ func requireBPFLSM(t *testing.T) *btf.Spec {
 	if os.Geteuid() != 0 {
 		t.Skip("BPF LSM tests require root")
 	}
+	if _, err := os.Stat("/sys/kernel/btf/vmlinux"); err != nil {
+		t.Skipf("kernel BTF unavailable: %v", err)
+	}
+	// BTF the kernel provides but the loader cannot parse is a loader bug, not
+	// a missing prerequisite.
 	kernel, err := btf.LoadKernelSpec()
 	if err != nil {
-		t.Skipf("kernel BTF unavailable: %v", err)
+		t.Fatalf("parse kernel BTF: %v", err)
 	}
 	if problems, _ := probe(kernel); len(problems) > 0 {
 		t.Skipf("BPF LSM unavailable: %v", problems)
@@ -40,6 +47,20 @@ func TestLoadEmbeddedObject(t *testing.T) {
 		t.Fatalf("load embedded BPF object through verifier: %v", verifierError(err))
 	}
 	defer collection.Close()
+
+	// The kernel's .rodata must hold the offsets loadSpec computed, not the
+	// object's zeros.
+	offsets := spec.Variables["OFFSETS"]
+	if !slices.ContainsFunc(offsets.Value, func(b byte) bool { return b != 0 }) {
+		t.Fatal("loadSpec left OFFSETS zero")
+	}
+	rodata := make([]byte, spec.Maps[".rodata"].ValueSize)
+	if err := collection.Maps[".rodata"].Lookup(uint32(0), &rodata); err != nil {
+		t.Fatalf("read loaded .rodata: %v", err)
+	}
+	if loaded := rodata[offsets.Offset : offsets.Offset+offsets.Size()]; !bytes.Equal(loaded, offsets.Value) {
+		t.Fatalf("loaded OFFSETS = %x, want %x", loaded, offsets.Value)
+	}
 
 	if len(collection.Programs) != len(Hooks)+len(labelPrograms) {
 		t.Fatalf("loaded %d programs, want the %d structural hooks and %d labelling programs: %v",
