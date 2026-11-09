@@ -72,6 +72,10 @@ func TestStructuralCoverageWarnings(t *testing.T) {
 	if warning := warningsOf(bpflsm.Status{Mode: bpflsm.ModeEnforce, State: bpflsm.StateFailed})["bpf-lsm-failed"]; !strings.Contains(warning.Message, "unprotected") {
 		t.Errorf("failed start without a retained generation: %+v", warning)
 	}
+	unavailable := warningsOf(bpflsm.Status{Mode: bpflsm.ModeAudit, State: bpflsm.StateUnavailable, Problems: []string{"load kernel BTF: parsing .BTF header: header contains non-zero trailer"}})["bpf-lsm-unavailable"]
+	if !strings.Contains(unavailable.Message, "non-zero trailer") || strings.Contains(unavailable.Message, "lsm=") || unavailable.Severity != "warning" {
+		t.Errorf("unavailable for a reason other than lsm=: %+v", unavailable)
+	}
 	active := warningsOf(bpflsm.Status{
 		Mode: bpflsm.ModeEnforce, State: bpflsm.StateActive, Generation: "7", Unpinned: true,
 		CompileWarnings: []bpflsm.CompileWarning{{ID: "overlay-not-covered", Patterns: []string{"/srv/ovl (overlay)"}}},

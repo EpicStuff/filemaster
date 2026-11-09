@@ -31,9 +31,12 @@ type fanotifySource struct {
 	marks                    map[int]mountedMark
 	previousRequiredMountIDs map[int]struct{}
 	dynamicMountCoverageGaps map[int]mountInfo
-	markMask                 uint64
-	pending                  bool
-	marksRemoved             atomic.Bool
+	// loggedCoverageProblem is the last logged coverage failure, so a
+	// periodic reconcile logs a persistent failure once rather than each pass.
+	loggedCoverageProblem string
+	markMask              uint64
+	pending               bool
+	marksRemoved          atomic.Bool
 
 	activeScopes  atomic.Pointer[scopeSnapshot]
 	pendingScopes atomic.Pointer[scopeSnapshot]

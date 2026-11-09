@@ -117,3 +117,34 @@ func TestFullCoverageInIsolatedNamespaceStillWarns(t *testing.T) {
 
 	warningByID(t, diagnostics.Warnings, "mount-namespace-isolated")
 }
+
+// The warning itself must name the unmarked mounts, so it can be acted on
+// without the core's log, and say why a FUSE mount cannot be marked.
+func TestPartialCoverageWarningNamesMissingMounts(t *testing.T) {
+	source := &phase8DiagnosticSource{mount: MountDiagnostics{
+		ConfiguredScopes: []string{"+ /home"},
+		RequiredMounts: []RequiredMount{
+			{MountID: 46, MountPath: "/", FSType: "btrfs"},
+			{MountID: 407, MountPath: "/home/derek/.home/SeaDrive", FSType: "fuse.seadrive"},
+		},
+		ActiveMountIDs:  []int{46},
+		MissingMountIDs: []int{407},
+		PartialCoverage: true,
+		CoverageKnown:   true,
+	}}
+	diagnostics := (&FileAccess{
+		source:                  source,
+		effectivePipelineConfig: DefaultDecisionPipelineConfig(),
+	}).Diagnostics()
+
+	warning := warningByID(t, diagnostics.Warnings, "partial-mount-coverage")
+	if !strings.Contains(warning.Message, "/home/derek/.home/SeaDrive (fuse.seadrive)") {
+		t.Errorf("message %q does not name the missing mount", warning.Message)
+	}
+	if strings.Contains(warning.Message, "(btrfs)") {
+		t.Errorf("message %q names a marked mount", warning.Message)
+	}
+	if !strings.Contains(warning.Message, "Exclude") {
+		t.Errorf("message %q has no FUSE hint", warning.Message)
+	}
+}

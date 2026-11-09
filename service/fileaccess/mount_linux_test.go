@@ -17,13 +17,14 @@ import (
 )
 
 func TestParseMountInfo(t *testing.T) {
-	mounts, err := parseMountInfo("36 25 0:32 / / rw - tmpfs tmpfs rw\n37 36 0:33 / /work\\040space rw - ext4 /dev/sda rw\n")
+	mounts, err := parseMountInfo("36 25 0:32 / / rw - tmpfs tmpfs rw\n37 36 0:33 / /work\\040space rw - ext4 /dev/sda rw\n407 36 0:80 / /home/u/SeaDrive rw,nosuid shared:5 master:1 - fuse.seadrive seadrive rw\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []mountInfo{
-		{ID: 36, MountPoint: "/", Raw: "36 25 0:32 / / rw - tmpfs tmpfs rw"},
-		{ID: 37, MountPoint: "/work space", Raw: `37 36 0:33 / /work\040space rw - ext4 /dev/sda rw`},
+		{ID: 36, MountPoint: "/", FSType: "tmpfs", Raw: "36 25 0:32 / / rw - tmpfs tmpfs rw"},
+		{ID: 37, MountPoint: "/work space", FSType: "ext4", Raw: `37 36 0:33 / /work\040space rw - ext4 /dev/sda rw`},
+		{ID: 407, MountPoint: "/home/u/SeaDrive", FSType: "fuse.seadrive", Raw: "407 36 0:80 / /home/u/SeaDrive rw,nosuid shared:5 master:1 - fuse.seadrive seadrive rw"},
 	}
 	if !reflect.DeepEqual(mounts, want) {
 		t.Fatalf("mounts = %#v, want %#v", mounts, want)
@@ -45,16 +46,31 @@ func TestDiscoverRequiredMountsIncludesNestedAndBindMounts(t *testing.T) {
 	}
 	t.Cleanup(scope.close)
 
-	required, err := discoverRequiredMounts([]*policyScope{scope}, []mountInfo{
+	mounts := []mountInfo{
 		{ID: 1, MountPoint: "/"},
 		{ID: 2, MountPoint: nested},
 		{ID: 3, MountPoint: bind},
-	})
+	}
+	required, err := discoverRequiredMounts([]*policyScope{scope}, nil, mounts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := sortedMountIDs(required), []int{1, 2, 3}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("required IDs = %v, want %v", got, want)
+	}
+
+	// An excluded mount needs no mark, so an unmarkable one (another user's
+	// FUSE mount) can be excluded to restore full coverage.
+	rules, err := parseWatchRules([]string{"- " + bind, "+ " + root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	required, err = discoverRequiredMounts([]*policyScope{scope}, rules, mounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sortedMountIDs(required), []int{1, 2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("required IDs with %s excluded = %v, want %v", bind, got, want)
 	}
 }
 

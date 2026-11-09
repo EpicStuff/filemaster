@@ -20,6 +20,7 @@ import (
 type mountInfo struct {
 	ID         int
 	MountPoint string
+	FSType     string
 	// Raw is the originating /proc/self/mountinfo line, retained so coverage
 	// diagnostics can cite the exact entry a mount ID refers to.
 	Raw string
@@ -37,6 +38,7 @@ type MountCoverageGap struct {
 type RequiredMount struct {
 	MountID   int    `json:"mount_id"`
 	MountPath string `json:"mount_path"`
+	FSType    string `json:"fs_type"`
 }
 
 type policyScope struct {
@@ -116,6 +118,21 @@ func (s *watchRuleSnapshot) matches(path string) bool {
 	return false
 }
 
+// excludes reports whether the first rule covering path is an Exclude. A path
+// no rule covers is not excluded, so a nested mount stays required unless the
+// user explicitly excluded it.
+func (s *watchRuleSnapshot) excludes(path string) bool {
+	if s == nil {
+		return false
+	}
+	for _, rule := range s.Rules {
+		if pathContains(rule.Path, path) {
+			return rule.Exclude
+		}
+	}
+	return false
+}
+
 func (s *scopeSnapshot) matches(path string) bool {
 	if len(s.Rules) == 0 {
 		return true
@@ -178,7 +195,14 @@ func parseMountInfo(input string) ([]mountInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mount %d path: %w", id, err)
 		}
-		mounts = append(mounts, mountInfo{ID: id, MountPoint: mountPoint, Raw: scanner.Text()})
+		var fsType string
+		for i, field := range fields {
+			if field == "-" && i+1 < len(fields) {
+				fsType = fields[i+1]
+				break
+			}
+		}
+		mounts = append(mounts, mountInfo{ID: id, MountPoint: mountPoint, FSType: fsType, Raw: scanner.Text()})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read mountinfo: %w", err)
@@ -267,7 +291,7 @@ func (scope *policyScope) close() {
 	}
 }
 
-func discoverRequiredMounts(scopes []*policyScope, mounts []mountInfo) (map[int]mountInfo, error) {
+func discoverRequiredMounts(scopes []*policyScope, rules *watchRuleSnapshot, mounts []mountInfo) (map[int]mountInfo, error) {
 	required := make(map[int]mountInfo)
 	for _, scope := range scopes {
 		if err := scope.refresh(); err != nil {
@@ -276,7 +300,7 @@ func discoverRequiredMounts(scopes []*policyScope, mounts []mountInfo) (map[int]
 		var containing *mountInfo
 		for i := range mounts {
 			mount := mounts[i]
-			if pathContains(scope.Canonical, mount.MountPoint) {
+			if pathContains(scope.Canonical, mount.MountPoint) && !rules.excludes(mount.MountPoint) {
 				required[mount.ID] = mount
 			}
 			if pathContains(mount.MountPoint, scope.Canonical) && (containing == nil || len(mount.MountPoint) > len(containing.MountPoint)) {
@@ -492,7 +516,7 @@ func (s *fanotifySource) reconcileLocked() {
 		s.recordReconcileFailure(err, nil)
 		return
 	}
-	required, err := discoverRequiredMounts(mutableScopes(s.scopes), mounts)
+	required, err := discoverRequiredMounts(mutableScopes(s.scopes), s.watchRules, mounts)
 	if err != nil {
 		s.recordReconcileFailure(err, mounts)
 		return
@@ -625,13 +649,13 @@ func (s *fanotifySource) closeRetiredScopes() {
 	s.retiredScopes = nil
 }
 
-func knownRequiredMounts(scopes map[string]*policyScope, mounts []mountInfo) map[int]mountInfo {
+func knownRequiredMounts(scopes map[string]*policyScope, rules *watchRuleSnapshot, mounts []mountInfo) map[int]mountInfo {
 	required := make(map[int]mountInfo)
 	for _, scope := range scopes {
 		var containing *mountInfo
 		for i := range mounts {
 			mount := mounts[i]
-			if pathContains(scope.Canonical, mount.MountPoint) {
+			if pathContains(scope.Canonical, mount.MountPoint) && !rules.excludes(mount.MountPoint) {
 				required[mount.ID] = mount
 			}
 			if pathContains(mount.MountPoint, scope.Canonical) && (containing == nil || len(mount.MountPoint) > len(containing.MountPoint)) {
@@ -691,6 +715,7 @@ func (s *fanotifySource) addKnownCoverage(diagnostics *MountDiagnostics, require
 		diagnostics.RequiredMounts = append(diagnostics.RequiredMounts, RequiredMount{
 			MountID:   mount.ID,
 			MountPath: mount.MountPoint,
+			FSType:    mount.FSType,
 		})
 	}
 	sort.Slice(diagnostics.RequiredMounts, func(i, j int) bool {
@@ -737,11 +762,14 @@ func (s *fanotifySource) recordReconcileFailure(err error, mounts []mountInfo) {
 		diagnostics.CoverageKnown = false
 	} else {
 		diagnostics.CoverageKnown = true
-		s.addKnownCoverage(&diagnostics, knownRequiredMounts(s.scopes, mounts))
+		s.addKnownCoverage(&diagnostics, knownRequiredMounts(s.scopes, s.watchRules, mounts))
 		diagnostics.PartialCoverage = true
 	}
 	s.diagnostics = diagnostics
-	s.log.Warn("fanotify mount reconciliation failed", "err", err, "coverage_known", diagnostics.CoverageKnown, "active_mount_ids", diagnostics.ActiveMountIDs, "missing_mount_ids", diagnostics.MissingMountIDs)
+	if problem := "reconcile: " + err.Error(); problem != s.loggedCoverageProblem {
+		s.loggedCoverageProblem = problem
+		s.log.Error("fanotify mount reconciliation failed", "err", err, "coverage_known", diagnostics.CoverageKnown, "active_mount_ids", diagnostics.ActiveMountIDs, "missing_mount_ids", diagnostics.MissingMountIDs)
+	}
 }
 
 func (s *fanotifySource) updateDiagnostics(required map[int]mountInfo, errs []error) {
@@ -760,7 +788,12 @@ func (s *fanotifySource) updateDiagnostics(required map[int]mountInfo, errs []er
 		for _, id := range diagnostics.MissingMountIDs {
 			missingPaths = append(missingPaths, required[id].MountPoint)
 		}
-		s.log.Warn("fanotify mount coverage partial", "missing_mount_ids", diagnostics.MissingMountIDs, "missing_mount_paths", missingPaths, "errors", len(errs))
+		if problem := "partial: " + errText; problem != s.loggedCoverageProblem {
+			s.loggedCoverageProblem = problem
+			s.log.Error("fanotify mount coverage partial", "missing_mount_ids", diagnostics.MissingMountIDs, "missing_mount_paths", missingPaths, "err", errText)
+		}
+	} else {
+		s.loggedCoverageProblem = ""
 	}
 	s.diagnostics = diagnostics
 }

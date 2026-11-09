@@ -156,6 +156,33 @@ func mountCoverageDetails(mount MountDiagnostics) string {
 	return strings.Join(details, " ")
 }
 
+// partialCoverageMessage names the mounts that could not be marked, so the
+// warning can be acted on without the core's log.
+func partialCoverageMessage(mount MountDiagnostics) string {
+	paths := make(map[int]RequiredMount, len(mount.RequiredMounts))
+	for _, required := range mount.RequiredMounts {
+		paths[required.MountID] = required
+	}
+	var missing []string
+	fuse := false
+	for _, id := range mount.MissingMountIDs {
+		required, ok := paths[id]
+		if !ok {
+			continue
+		}
+		missing = append(missing, required.MountPath+" ("+required.FSType+")")
+		fuse = fuse || strings.HasPrefix(required.FSType, "fuse")
+	}
+	if len(missing) == 0 {
+		return "File access coverage is partial because one or more required mount marks are missing."
+	}
+	message := "File access coverage is partial because these mounts could not be marked: " + strings.Join(missing, ", ") + "."
+	if fuse {
+		message += " A FUSE mount is usually accessible only to the user who mounted it, so Filemaster cannot mark it; add an Exclude watch path for it if it does not need protection."
+	}
+	return message
+}
+
 func formatMountIDs(ids []int) string {
 	if len(ids) == 0 {
 		return "none"
@@ -179,7 +206,7 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 	}
 	if diagnostics.Mount.PartialCoverage {
 		appendWarning("partial-mount-coverage", "error",
-			"File access coverage is partial because one or more required mount marks are missing.",
+			partialCoverageMessage(diagnostics.Mount),
 			mountCoverageDetails(diagnostics.Mount))
 	}
 	if diagnostics.Mount.MountNamespaceIsolated {
@@ -238,7 +265,7 @@ func diagnosticsWarnings(diagnostics FileAccessDiagnostics) []DegradedWarning {
 			severity = "error"
 		}
 		appendWarning("bpf-lsm-unavailable", severity,
-			"Delete, folder, special file and symlink create, hard link and rename operations are unprotected because this kernel cannot run the BPF LSM. To enable it, add bpf to the lsm= kernel boot parameter and reboot.",
+			"Delete, folder, special file and symlink create, hard link and rename operations are unprotected because the BPF LSM cannot run: "+strings.Join(structural.Problems, "; ")+".",
 			structural.Problems...)
 	case bpflsm.StateFailed:
 		if len(structural.Retained) > 0 {
